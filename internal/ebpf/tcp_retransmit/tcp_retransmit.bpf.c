@@ -26,6 +26,9 @@ struct retransmit_event {
     char  comm[TASK_COMM_LEN];
 };
 
+// Force BTF emission so bpf2go -type can export this struct.
+struct retransmit_event *__retransmit_event_unused __attribute__((unused));
+
 // ─── Maps ────────────────────────────────────────────────────────────────────
 
 struct {

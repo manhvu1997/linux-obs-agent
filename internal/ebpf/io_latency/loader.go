@@ -109,7 +109,7 @@ func (l *Loader) consume(ctx context.Context) {
 			continue
 		}
 
-		var raw IoLatencyIoEvent
+		var raw IoLatencyIoLatEvent
 		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &raw); err != nil {
 			continue
 		}

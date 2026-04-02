@@ -16,12 +16,17 @@ ARG VERSION=dev
 ARG TARGETARCH=amd64
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+    && apt-get install -y software-properties-common \
+    && add-apt-repository ppa:longsleep/golang-backports \
+    && apt-get install -y --no-install-recommends \
     # eBPF toolchain
     clang \
     llvm \
     libbpf-dev \
     linux-headers-generic \
+    linux-tools-generic \
+    linux-image-generic \
     # Go toolchain
     golang-1.26 \
     # Utilities
@@ -33,6 +38,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # symlink so `go` is on PATH
 RUN ln -sf /usr/lib/go-1.26/bin/go /usr/local/bin/go
 
+# linux-tools-generic puts bpftool under a versioned subdir; symlink to PATH
+RUN BPFTOOL=$(find /usr/lib/linux-tools -name bpftool 2>/dev/null | head -1) \
+    && [ -n "$BPFTOOL" ] && ln -sf "$BPFTOOL" /usr/local/bin/bpftool || true
+
 WORKDIR /build
 
 # Cache Go module downloads as a separate layer
@@ -42,9 +51,17 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Generate vmlinux.h from the kernel BTF shipped in the build image
-RUN bpftool btf dump file /sys/kernel/btf/vmlinux format c \
-    > internal/ebpf/headers/vmlinux.h 2>/dev/null || \
+# Generate vmlinux.h from the kernel BTF.
+# In docker build, /sys/kernel/btf/vmlinux is not accessible, so we fall back to
+# extracting BTF from the vmlinuz shipped by linux-image-generic.
+RUN mkdir -p internal/ebpf/headers && \
+    VMLINUZ=$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1) && \
+    { [ -f /sys/kernel/btf/vmlinux ] && \
+        bpftool btf dump file /sys/kernel/btf/vmlinux format c \
+        > internal/ebpf/headers/vmlinux.h 2>/dev/null; } || \
+    { [ -n "$VMLINUZ" ] && \
+        bpftool btf dump file "$VMLINUZ" format c \
+        > internal/ebpf/headers/vmlinux.h 2>/dev/null; } || \
     echo "Warning: bpftool vmlinux generation failed – using pre-built headers"
 
 # Compile eBPF objects + generate Go scaffolding

@@ -22,6 +22,9 @@ struct runq_event {
     char  comm[TASK_COMM_LEN];
 };
 
+// Force BTF emission so bpf2go -type can export this struct.
+struct runq_event *__runq_event_unused __attribute__((unused));
+
 // ─── Maps ────────────────────────────────────────────────────────────────────
 
 // Record wakeup timestamp per PID.

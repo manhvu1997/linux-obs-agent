@@ -24,7 +24,7 @@ struct io_start_val {
     char  comm[TASK_COMM_LEN];
 };
 
-struct io_event {
+struct io_lat_event {
     __u32 pid;
     __u32 dev;
     __u64 sector;
@@ -33,6 +33,9 @@ struct io_event {
     __u8  op;           // 0 = read, 1 = write
     char  comm[TASK_COMM_LEN];
 };
+
+// Force BTF emission so bpf2go -type can export this struct.
+struct io_lat_event *__io_lat_event_unused __attribute__((unused));
 
 // ─── Maps ────────────────────────────────────────────────────────────────────
 
@@ -128,7 +131,7 @@ int trace_rq_complete(struct trace_event_raw_block_rq_completion *ctx)
     // Only emit events that exceed the slow threshold.
     if (latency_us < slow_threshold_us) return 0;
 
-    struct io_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
+    struct io_lat_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
     if (!ev) return 0;
 
     ev->pid        = pid;

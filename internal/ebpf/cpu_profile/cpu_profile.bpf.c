@@ -48,6 +48,9 @@ struct cpu_sample_event {
     char  comm[TASK_COMM_LEN];
 };
 
+// Force BTF emission so bpf2go -type can export this struct.
+struct cpu_sample_event *__cpu_sample_event_unused __attribute__((unused));
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 18); // 256 KB

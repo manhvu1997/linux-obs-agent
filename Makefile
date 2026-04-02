@@ -51,7 +51,8 @@ deps:
 vmlinux:
 	@echo ">>> Generating vmlinux.h from running kernel"
 	@mkdir -p $(HEADERS_DIR)
-	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $(HEADERS_DIR)/vmlinux.h
+	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $(HEADERS_DIR)/vmlinux.h 2>/dev/null || \
+		echo "Warning: bpftool vmlinux generation failed – using pre-built headers"
 	@echo ">>> Done: $(HEADERS_DIR)/vmlinux.h"
 
 # ─── eBPF code generation ─────────────────────────────────────────────────────
