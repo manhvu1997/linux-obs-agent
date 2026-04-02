@@ -51,6 +51,9 @@ RUN go mod download
 # Copy source
 COPY . .
 
+# Ensure go.sum is complete (handles the case where go.sum is missing or stale).
+RUN go mod tidy
+
 # Generate vmlinux.h from the kernel BTF.
 # In docker build, /sys/kernel/btf/vmlinux is not accessible, so we fall back to
 # extracting BTF from the vmlinuz shipped by linux-image-generic.

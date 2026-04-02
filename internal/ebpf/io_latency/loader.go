@@ -40,8 +40,7 @@ func (l *Loader) Start(ctx context.Context) error {
 		return fmt.Errorf("removing memlock: %w", err)
 	}
 
-	opts := &ebpfLoadOptions(l.thresholdUs)
-	if err := loadIoLatencyObjects(&l.objs, opts); err != nil {
+	if err := LoadIoLatencyObjects(&l.objs, nil); err != nil {
 		return fmt.Errorf("loading eBPF objects: %w", err)
 	}
 
@@ -149,17 +148,13 @@ func (l *Loader) LatencyHistogram() map[uint32]uint64 {
 	return result
 }
 
-// ebpfLoadOptions builds load options that set the slow_threshold_us global var.
-func ebpfLoadOptions(thresholdUs uint64) IoLatencyLoadOptions {
-	// Global variables are set via CollectionOptions.Variables in ebpf-go.
-	return IoLatencyLoadOptions{}
-}
-
-func nullTermString(b []byte) string {
-	for i, c := range b {
-		if c == 0 {
-			return string(b[:i])
+func nullTermString(b []int8) string {
+	bs := make([]byte, 0, len(b))
+	for _, v := range b {
+		if v == 0 {
+			break
 		}
+		bs = append(bs, byte(v))
 	}
-	return string(b)
+	return string(bs)
 }
