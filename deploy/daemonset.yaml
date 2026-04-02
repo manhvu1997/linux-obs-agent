@@ -1,0 +1,222 @@
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# obs-agent Kubernetes DaemonSet
+#
+# Runs on every node.  The agent needs access to /proc, /sys and the ability
+# to load eBPF programs, so it runs with specific capabilities rather than
+# full privileged mode.
+# ──────────────────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: obs-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: obs-agent-config
+  namespace: obs-system
+data:
+  config.yaml: |
+    agent:
+      log_level: info
+      metrics_addr: ":9200"
+    collect:
+      interval: 5s
+    ebpf:
+      enabled: true
+      active_duration: 60s
+      cool_down: 120s
+      slow_io_threshold_us: 1000
+      runqlat_threshold_us: 5000
+      sample_hz: 99
+    trigger:
+      cpu_usage_percent: 85.0
+      iowait_percent: 20.0
+      load_normalised: 1.5
+      ctx_switch_delta: 100000
+      net_error_delta: 100
+      eval_interval: 10s
+    process:
+      top_n: 20
+      scan_interval: 10s
+      include_io: true
+    exporter:
+      url: ""
+      flush_interval: 30s
+      compress: true
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: obs-agent
+  namespace: obs-system
+  labels:
+    app: obs-agent
+spec:
+  selector:
+    matchLabels:
+      app: obs-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: obs-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9200"
+        prometheus.io/path: "/metrics"
+    spec:
+      hostPID: true       # Required: see /proc/[pid] for all processes
+      hostNetwork: false
+      tolerations:
+        # Run on control-plane nodes too.
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      serviceAccountName: obs-agent
+
+      containers:
+        - name: obs-agent
+          image: ghcr.io/youorg/obs-agent:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config
+            - /etc/obs-agent/config.yaml
+
+          ports:
+            - name: metrics
+              containerPort: 9200
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 200m    # 20% of one core – well within the 2% budget at idle
+              memory: 128Mi
+
+          securityContext:
+            runAsUser: 0    # Root is needed for eBPF on most distros
+            # Production alternative: drop root and use capabilities:
+            # runAsNonRoot: true
+            # runAsUser: 65532
+            capabilities:
+              add:
+                - BPF
+                - PERFMON
+                - SYS_ADMIN     # needed on kernels <5.8 without CAP_BPF
+                - SYS_PTRACE    # read /proc/[pid]/io
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/obs-agent
+              readOnly: true
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+            - name: sys
+              mountPath: /sys
+              readOnly: false   # bpf filesystem under /sys/fs/bpf needs write
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9200
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9200
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+      volumes:
+        - name: config
+          configMap:
+            name: obs-agent-config
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: obs-agent
+  namespace: obs-system
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: obs-agent
+  namespace: obs-system
+  labels:
+    app: obs-agent
+spec:
+  clusterIP: None  # headless – Prometheus scrapes individual pods
+  selector:
+    app: obs-agent
+  ports:
+    - name: metrics
+      port: 9200
+      targetPort: 9200
+
+---
+# If you use the Prometheus Operator:
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: obs-agent
+  namespace: obs-system
+  labels:
+    app: obs-agent
+spec:
+  selector:
+    matchLabels:
+      app: obs-agent
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics

@@ -1,0 +1,53 @@
+[Unit]
+Description=Linux Observability Agent (eBPF-powered)
+Documentation=https://github.com/manhvu1997/linux-obs-agent
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/obs-agent -config /etc/obs-agent/config.yaml
+Restart=on-failure
+RestartSec=5s
+
+# ─── Capabilities ─────────────────────────────────────────────────────────────
+# Drop ALL capabilities first, then add only what is needed.
+# This avoids running as full root while still being able to load eBPF programs.
+
+User=obs-agent
+Group=obs-agent
+
+# Required for eBPF:
+#   CAP_BPF         – create BPF maps & load programs (kernel ≥5.8)
+#   CAP_PERFMON     – open perf_event fds for CPU profiling (kernel ≥5.8)
+#   CAP_SYS_ADMIN   – needed on kernels <5.8 where CAP_BPF did not exist yet;
+#                     also required for bpf_link pin to /sys/fs/bpf
+# Required for process inspection:
+#   CAP_SYS_PTRACE  – read /proc/[pid]/io for all processes
+# Optional (for K8s metadata):
+#   CAP_DAC_READ_SEARCH – read /proc/[pid]/environ of other processes
+
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE
+
+# Lock down the rest of the process environment.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=no          # needs /dev/... for eBPF
+ReadWritePaths=/sys/fs/bpf /sys/kernel/debug
+
+# Resource limits – prevent the agent itself from being a problem.
+LimitNOFILE=65536
+LimitMEMLOCK=infinity     # eBPF maps need locked memory
+MemoryMax=200M            # hard OOM kill above 200 MB
+CPUQuota=10%              # never more than 10% CPU on any core
+
+# Logging: send stdout/stderr to journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=obs-agent
+
+[Install]
+WantedBy=multi-user.target

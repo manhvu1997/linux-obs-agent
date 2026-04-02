@@ -1,0 +1,65 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# obs-agent configuration  (all values shown are production defaults)
+# ──────────────────────────────────────────────────────────────────────────────
+
+agent:
+  log_level: info          # debug | info | warn | error
+  metrics_addr: ":9200"    # Prometheus scrape endpoint (empty = disabled)
+  node_name: ""            # override auto-detected hostname (useful in containers)
+
+# ─── Baseline /proc collectors ────────────────────────────────────────────────
+collect:
+  interval: 5s
+  # Disk devices to monitor (empty = all non-partition block devices)
+  disk_devices: []
+  # Network interfaces to monitor (empty = all non-loopback)
+  net_interfaces: []
+
+# ─── eBPF on-demand modules ───────────────────────────────────────────────────
+ebpf:
+  enabled: true
+  # How long each eBPF module stays active after being triggered.
+  active_duration: 60s
+  # Minimum time before the same module can be re-triggered.
+  cool_down: 120s
+  # IO latency events below this threshold are suppressed (reduces noise).
+  slow_io_threshold_us: 1000    # 1 ms
+  # Run-queue latency events below this threshold are suppressed.
+  runqlat_threshold_us: 5000    # 5 ms
+  # CPU profiling sample frequency (perf_event Hz).
+  # Lower = less overhead.  99 Hz ≈ 0.1% CPU on a modern server.
+  sample_hz: 99
+
+# ─── Trigger rules ────────────────────────────────────────────────────────────
+trigger:
+  # Activate cpu_profile when total CPU usage exceeds this.
+  cpu_usage_percent: 85.0
+  # Activate io_latency when iowait% exceeds this.
+  iowait_percent: 20.0
+  # Activate runqlat (and io_latency) when load/cpu > this AND cpu < 50%.
+  # Example: 16-CPU machine with load 24 → norm_load = 1.5 → trigger fires.
+  load_normalised: 1.5
+  # Activate runqlat when context switches per second exceed this.
+  ctx_switch_delta: 100000
+  # Activate tcp_retransmit when network errors per second exceed this.
+  net_error_delta: 100
+  # How often the trigger engine evaluates these rules.
+  eval_interval: 10s
+
+# ─── Process inspection ───────────────────────────────────────────────────────
+process:
+  # Number of top processes to include in each snapshot.
+  top_n: 20
+  # How often to rescan /proc for process stats.
+  scan_interval: 10s
+  # Include per-process IO stats (may need CAP_SYS_PTRACE).
+  include_io: true
+
+# ─── HTTP exporter (send to central server) ───────────────────────────────────
+exporter:
+  # Central server endpoint (empty = disabled; only Prometheus endpoint is used).
+  url: ""           # e.g. "https://collector.internal:8080"
+  batch_size: 200   # max eBPF events per HTTP POST
+  flush_interval: 30s
+  compress: true    # gzip payloads
+  timeout: 10s
