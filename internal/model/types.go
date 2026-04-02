@@ -200,3 +200,36 @@ type Snapshot struct {
 	TopProcesses []ProcessStats `json:"top_processes"`
 	EBPFEvents   []EBPFEvent    `json:"ebpf_events,omitempty"`
 }
+
+// ─── Diagnostic Report ────────────────────────────────────────────────────────
+
+// DiagnoseReport is returned by GET /api/diagnose.
+// It is designed to be consumed by an MCP server or alerting pipeline to
+// determine exactly which process / PID / connection caused the overload.
+type DiagnoseReport struct {
+	Timestamp time.Time `json:"timestamp"`
+	Hostname  string    `json:"hostname"`
+
+	// ActiveModules lists the eBPF modules currently loaded in the kernel.
+	ActiveModules []string `json:"active_modules"`
+
+	// Metrics is the latest /proc snapshot at the time of the call.
+	Metrics NodeMetrics `json:"metrics"`
+
+	// TopProcesses are the top-N processes by CPU usage from /proc.
+	// Each entry includes PID, Comm, Cmdline, CPUPercent, MemPercent, State,
+	// and container/K8s metadata when available.
+	TopProcesses []ProcessStats `json:"top_processes"`
+
+	// CPUHotspots are the hottest PIDs sampled by the cpu_profile eBPF module
+	// (only populated when cpu_profile is active).  Sorted by SampleCount desc.
+	CPUHotspots []CPUProfileEvent `json:"cpu_hotspots,omitempty"`
+
+	// RecentEvents contains the last N eBPF events across all active modules.
+	// Each event carries PID, Comm, and module-specific fields:
+	//   cpu_profile   – stack IDs, sample count
+	//   runq_latency  – latency_us (scheduler wait time)
+	//   io_latency    – latency_us, bytes, op (R/W), device
+	//   tcp_retransmit – src_ip:port, dst_ip:port, address family
+	RecentEvents []EBPFEvent `json:"recent_events,omitempty"`
+}

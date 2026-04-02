@@ -23,6 +23,10 @@ import (
 
 const agentVersion = "1.0.0"
 
+// recentCap is the maximum number of eBPF events kept in the ring buffer
+// for the /api/diagnose endpoint.  Oldest entries are overwritten when full.
+const recentCap = 500
+
 // Exporter collects Snapshots from channels and ships them to the server.
 type Exporter struct {
 	cfg      *config.ExporterConfig
@@ -30,7 +34,8 @@ type Exporter struct {
 	hostname string
 
 	mu      sync.Mutex
-	pending []model.EBPFEvent
+	pending []model.EBPFEvent // drain-on-flush buffer for HTTP export
+	recent  []model.EBPFEvent // fixed-size ring buffer for /api/diagnose
 }
 
 func New(cfg *config.ExporterConfig) *Exporter {
@@ -63,7 +68,8 @@ func (e *Exporter) Run(ctx context.Context) {
 	}
 }
 
-// QueueEvent adds an eBPF event to the pending buffer (non-blocking).
+// QueueEvent adds an eBPF event to both the pending export buffer and the
+// recent ring buffer used by /api/diagnose.
 func (e *Exporter) QueueEvent(ev model.EBPFEvent) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -72,6 +78,25 @@ func (e *Exporter) QueueEvent(ev model.EBPFEvent) {
 		e.pending = e.pending[1:]
 	}
 	e.pending = append(e.pending, ev)
+
+	if len(e.recent) >= recentCap {
+		e.recent = e.recent[1:]
+	}
+	e.recent = append(e.recent, ev)
+}
+
+// RecentEvents returns a copy of the last N eBPF events without draining the
+// buffer.  n <= 0 returns all buffered events (up to recentCap).
+func (e *Exporter) RecentEvents(n int) []model.EBPFEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	src := e.recent
+	if n > 0 && n < len(src) {
+		src = src[len(src)-n:]
+	}
+	out := make([]model.EBPFEvent, len(src))
+	copy(out, src)
+	return out
 }
 
 // SendSnapshot assembles a full Snapshot and ships it.

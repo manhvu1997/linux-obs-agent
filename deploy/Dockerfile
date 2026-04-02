@@ -10,7 +10,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ─── Stage 1: Builder ────────────────────────────────────────────────────────
-FROM ubuntu:24.04 AS builder
+FROM --platform=linux/amd64 ubuntu:24.04 AS builder
 
 ARG VERSION=dev
 ARG TARGETARCH=amd64

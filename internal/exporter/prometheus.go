@@ -7,21 +7,33 @@ package exporter
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
+	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/process"
 )
 
 // PrometheusExporter serves a /metrics endpoint.
 type PrometheusExporter struct {
-	addr string
-	coll *collector.Collector
+	addr     string
+	coll     *collector.Collector
+	hostname string
+
+	// Optional diagnostic sources – set via RegisterDiagnosticSources.
+	mgr     *ebpfmgr.Manager
+	insp    *process.Inspector
+	httpExp *Exporter
 
 	// CPU
 	cpuUsage     prometheus.Gauge
@@ -63,7 +75,8 @@ type PrometheusExporter struct {
 
 func NewPrometheusExporter(addr string, coll *collector.Collector) *PrometheusExporter {
 	ns := "obs_agent"
-	p := &PrometheusExporter{addr: addr, coll: coll}
+	hostname, _ := os.Hostname()
+	p := &PrometheusExporter{addr: addr, coll: coll, hostname: hostname}
 
 	p.cpuUsage = promauto.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "cpu_usage_percent"})
 	p.cpuUser = promauto.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "cpu_user_percent"})
@@ -104,6 +117,18 @@ func NewPrometheusExporter(addr string, coll *collector.Collector) *PrometheusEx
 	return p
 }
 
+// RegisterDiagnosticSources wires the optional dependencies needed by
+// GET /api/diagnose.  Call this once after all components are created.
+func (p *PrometheusExporter) RegisterDiagnosticSources(
+	mgr *ebpfmgr.Manager,
+	insp *process.Inspector,
+	exp *Exporter,
+) {
+	p.mgr = mgr
+	p.insp = insp
+	p.httpExp = exp
+}
+
 // RecordEBPFEvent increments the per-module event counter.
 func (p *PrometheusExporter) RecordEBPFEvent(ev model.EBPFEvent) {
 	p.ebpfEventsTotal.WithLabelValues(string(ev.Type)).Inc()
@@ -120,6 +145,8 @@ func (p *PrometheusExporter) Run(ctx context.Context) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	// MCP / alerting diagnostic endpoint.
+	http.HandleFunc("/api/diagnose", p.handleDiagnose)
 
 	srv := &http.Server{Addr: p.addr}
 	go func() {
@@ -132,6 +159,70 @@ func (p *PrometheusExporter) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// handleDiagnose is called by GET /api/diagnose.
+//
+// Query parameters:
+//
+//	n        – max number of recent eBPF events to include (default 100)
+//	top_pids – max CPU hotspots from cpu_profile map (default 20)
+//
+// The MCP server can POST an alert to Slack and include the JSON body of this
+// endpoint so the on-call engineer immediately sees which PID / process /
+// connection is responsible.
+func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse optional query params.
+	n := queryInt(r, "n", 100)
+	topPIDsN := queryInt(r, "top_pids", 20)
+
+	report := model.DiagnoseReport{
+		Timestamp: time.Now(),
+		Hostname:  p.hostname,
+		Metrics:   p.coll.Latest(),
+	}
+
+	// Active eBPF modules.
+	if p.mgr != nil {
+		for _, id := range p.mgr.ActiveModules() {
+			report.ActiveModules = append(report.ActiveModules, string(id))
+		}
+		// CPU hotspots from the kernel-side perf counts map.
+		report.CPUHotspots = p.mgr.CPUTopPIDs(topPIDsN)
+	}
+
+	// Top processes from /proc.
+	if p.insp != nil {
+		report.TopProcesses = p.insp.TopCPU()
+	}
+
+	// Recent eBPF events from the ring buffer.
+	if p.httpExp != nil {
+		report.RecentEvents = p.httpExp.RecentEvents(n)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(report); err != nil {
+		slog.Warn("diagnose: encode error", "err", err)
+	}
+}
+
+// queryInt reads an integer query parameter, returning def if absent or invalid.
+func queryInt(r *http.Request, key string, def int) int {
+	s := r.URL.Query().Get(key)
+	if s == "" {
+		return def
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v <= 0 {
+		return def
+	}
+	return v
 }
 
 func (p *PrometheusExporter) refresh() {

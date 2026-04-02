@@ -93,16 +93,21 @@ func main() {
 	var promExp *exporter.PrometheusExporter
 	if cfg.Agent.MetricsAddr != "" {
 		promExp = exporter.NewPrometheusExporter(cfg.Agent.MetricsAddr, coll)
+	}
+
+	// ── HTTP exporter (optional central server) ─────────────────────────────
+	httpExp := exporter.New(&cfg.Exporter)
+	go httpExp.Run(ctx)
+
+	// Wire diagnostic sources so /api/diagnose has full visibility.
+	if promExp != nil {
+		promExp.RegisterDiagnosticSources(ebpfMgr, insp, httpExp)
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)
 			}
 		}()
 	}
-
-	// ── HTTP exporter (optional central server) ─────────────────────────────
-	httpExp := exporter.New(&cfg.Exporter)
-	go httpExp.Run(ctx)
 
 	// ── eBPF event fan-out loop ─────────────────────────────────────────────
 	go func() {
