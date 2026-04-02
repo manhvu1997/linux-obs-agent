@@ -139,6 +139,7 @@ const (
 	EventIOLatency     EBPFEventType = "io_latency"
 	EventRunQLat       EBPFEventType = "runq_latency"
 	EventTCPRetransmit EBPFEventType = "tcp_retransmit"
+	EventDiskWrite     EBPFEventType = "disk_write"
 )
 
 // EBPFEvent wraps kernel-side events with host metadata.
@@ -232,4 +233,57 @@ type DiagnoseReport struct {
 	//   io_latency    – latency_us, bytes, op (R/W), device
 	//   tcp_retransmit – src_ip:port, dst_ip:port, address family
 	RecentEvents []EBPFEvent `json:"recent_events,omitempty"`
+
+	// DiskReport contains directory-growth data and top disk writers.
+	// Populated when the disk scanner is enabled.
+	DiskReport *DiskDiagnoseReport `json:"disk_report,omitempty"`
+}
+
+// ─── Disk Scanner ─────────────────────────────────────────────────────────────
+
+// DirEntry holds the aggregated size for one scanned directory.
+type DirEntry struct {
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
+	FileCount int64  `json:"file_count"`
+}
+
+// DirSnapshot captures the result of one full scan cycle.
+type DirSnapshot struct {
+	ScannedAt time.Time  `json:"scanned_at"`
+	Top10     []DirEntry `json:"top10"`
+	All       []DirEntry `json:"all"`
+}
+
+// DiskGrowthEvent is emitted when a directory grows faster than the threshold.
+type DiskGrowthEvent struct {
+	Path          string    `json:"path"`
+	PrevSizeBytes int64     `json:"prev_size_bytes"`
+	CurrSizeBytes int64     `json:"curr_size_bytes"`
+	GrowthBytes   int64     `json:"growth_bytes"`
+	GrowthPercent float64   `json:"growth_percent"`
+	DetectedAt    time.Time `json:"detected_at"`
+}
+
+// DiskWriteEvent is emitted by the disk_write eBPF module for each vfs_write call.
+type DiskWriteEvent struct {
+	PID          uint32 `json:"pid"`
+	Comm         string `json:"comm"`
+	BytesWritten uint64 `json:"bytes_written"`
+	Filename     string `json:"filename"`
+}
+
+// DiskWriteProcess aggregates eBPF-traced bytes written per process.
+type DiskWriteProcess struct {
+	PID          uint32 `json:"pid"`
+	Comm         string `json:"comm"`
+	BytesWritten uint64 `json:"bytes_written"`
+	LastFilename string `json:"last_filename,omitempty"`
+}
+
+// DiskDiagnoseReport is the disk-specific section of DiagnoseReport.
+type DiskDiagnoseReport struct {
+	Snapshot     *DirSnapshot       `json:"snapshot,omitempty"`
+	GrowthEvents []DiskGrowthEvent  `json:"growth_events,omitempty"`
+	TopWriters   []DiskWriteProcess `json:"top_writers,omitempty"`
 }

@@ -32,8 +32,10 @@ import (
 
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
+	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
 	"github.com/manhvu1997/linux-obs-agent/internal/exporter"
+	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/trigger"
 )
@@ -89,6 +91,20 @@ func main() {
 	triggerEngine := trigger.NewEngine(&cfg.Trigger, coll, ebpfMgr)
 	go triggerEngine.Run(ctx)
 
+	// ── Disk scanner ────────────────────────────────────────────────────────
+	// Runs periodically (default every 10 min) scanning /var /home /data /opt.
+	// When a directory grows > 20 % it activates the disk_write eBPF module
+	// for 30–60 s to capture the writing processes.
+	diskScanner := diskscanner.New(&cfg.DiskScan, func(events []model.DiskGrowthEvent) {
+		slog.Warn("disk growth detected – activating disk_write eBPF module",
+			"events", len(events),
+		)
+		if err := ebpfMgr.Activate(ctx, ebpfmgr.ModDiskWrite); err != nil {
+			slog.Warn("disk_write activation failed", "err", err)
+		}
+	})
+	go diskScanner.Run(ctx)
+
 	// ── Prometheus exporter ─────────────────────────────────────────────────
 	var promExp *exporter.PrometheusExporter
 	if cfg.Agent.MetricsAddr != "" {
@@ -102,6 +118,7 @@ func main() {
 	// Wire diagnostic sources so /api/diagnose has full visibility.
 	if promExp != nil {
 		promExp.RegisterDiagnosticSources(ebpfMgr, insp, httpExp)
+		promExp.RegisterDiskScanner(diskScanner)
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)

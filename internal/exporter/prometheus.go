@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
+	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
@@ -31,9 +32,10 @@ type PrometheusExporter struct {
 	hostname string
 
 	// Optional diagnostic sources – set via RegisterDiagnosticSources.
-	mgr     *ebpfmgr.Manager
-	insp    *process.Inspector
-	httpExp *Exporter
+	mgr         *ebpfmgr.Manager
+	insp        *process.Inspector
+	httpExp     *Exporter
+	diskScanner *diskscanner.Scanner
 
 	// CPU
 	cpuUsage     prometheus.Gauge
@@ -129,6 +131,12 @@ func (p *PrometheusExporter) RegisterDiagnosticSources(
 	p.httpExp = exp
 }
 
+// RegisterDiskScanner wires the disk scanner so /api/diagnose includes
+// directory-growth data and top disk writers.
+func (p *PrometheusExporter) RegisterDiskScanner(s *diskscanner.Scanner) {
+	p.diskScanner = s
+}
+
 // RecordEBPFEvent increments the per-module event counter.
 func (p *PrometheusExporter) RecordEBPFEvent(ev model.EBPFEvent) {
 	p.ebpfEventsTotal.WithLabelValues(string(ev.Type)).Inc()
@@ -204,6 +212,19 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 	// Recent eBPF events from the ring buffer.
 	if p.httpExp != nil {
 		report.RecentEvents = p.httpExp.RecentEvents(n)
+	}
+
+	// Disk scanner: top directories, growth events, top write processes.
+	if p.diskScanner != nil {
+		diskReport := &model.DiskDiagnoseReport{
+			Snapshot:     p.diskScanner.Snapshot(),
+			GrowthEvents: p.diskScanner.GrowthEvents(),
+		}
+		// Top disk writers from the disk_write eBPF module (nil when not active).
+		if p.mgr != nil {
+			diskReport.TopWriters = p.mgr.DiskTopWriters(topPIDsN)
+		}
+		report.DiskReport = diskReport
 	}
 
 	w.Header().Set("Content-Type", "application/json")

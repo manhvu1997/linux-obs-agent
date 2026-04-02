@@ -18,6 +18,7 @@ type Config struct {
 	Trigger  TriggerConfig  `yaml:"trigger"`
 	Exporter ExporterConfig `yaml:"exporter"`
 	Process  ProcessConfig  `yaml:"process"`
+	DiskScan DiskScanConfig `yaml:"disk_scan"`
 }
 
 type AgentConfig struct {
@@ -92,6 +93,27 @@ type ProcessConfig struct {
 	IncludeIO bool `yaml:"include_io"`
 }
 
+// DiskScanConfig controls the directory-size scanner and growth detector.
+type DiskScanConfig struct {
+	// Enabled is the master switch for the disk scanner.
+	Enabled bool `yaml:"enabled"`
+	// Dirs is the list of root directories to scan.
+	Dirs []string `yaml:"dirs"`
+	// MaxDepth limits how many directory levels deep each scan walks.
+	MaxDepth int `yaml:"max_depth"`
+	// MaxWorkers caps the number of concurrent directory-size goroutines.
+	MaxWorkers int `yaml:"max_workers"`
+	// IgnorePatterns are directory names to skip (e.g. node_modules, .cache).
+	IgnorePatterns []string `yaml:"ignore_patterns"`
+	// GrowthThresholdPct: trigger eBPF tracing when a directory grows by more
+	// than this percentage between two consecutive scans.
+	GrowthThresholdPct float64 `yaml:"growth_threshold_pct"`
+	// ScanInterval controls how often the scanner runs.  Minimum 1 minute.
+	ScanInterval time.Duration `yaml:"scan_interval"`
+	// SkipNFS skips directories backed by NFS/CIFS mounts (detected via /proc/mounts).
+	SkipNFS bool `yaml:"skip_nfs"`
+}
+
 // Defaults returns a Config with sensible production defaults.
 func Defaults() *Config {
 	return &Config{
@@ -128,6 +150,16 @@ func Defaults() *Config {
 			TopN:         20,
 			ScanInterval: 10 * time.Second,
 			IncludeIO:    true,
+		},
+		DiskScan: DiskScanConfig{
+			Enabled:            true,
+			Dirs:               []string{"/var", "/home", "/data", "/opt", "/root"},
+			MaxDepth:           3,
+			MaxWorkers:         5,
+			IgnorePatterns:     []string{"node_modules", ".cache", "tmp", ".git", "__pycache__", "lost+found"},
+			GrowthThresholdPct: 20.0,
+			ScanInterval:       10 * time.Minute,
+			SkipNFS:            true,
 		},
 	}
 }

@@ -1,0 +1,2222 @@
+{
+  "timestamp": "2026-04-02T16:05:21.191513997+07:00",
+  "hostname": "prod-work-sentry-new",
+  "active_modules": null,
+  "metrics": {
+    "timestamp": "2026-04-02T16:05:17.497700135+07:00",
+    "hostname": "prod-work-sentry-new",
+    "cpu": {
+      "usage_percent": 93.5457682159529,
+      "user_percent": 58.9202354373858,
+      "sys_percent": 32.0681956565862,
+      "iowait_percent": 1.11629795007104,
+      "idle_percent": 5.33793383397605,
+      "steal_percent": 0.10148163182464,
+      "ctx_switches_total": 42663,
+      "interrupts_total": 23928,
+      "forks_total": 579,
+      "running_procs": 46,
+      "blocked_procs": 0,
+      "per_cpu": [
+        {
+          "id": 0,
+          "usage_percent": 93.3198380566802,
+          "iowait_percent": 0.809716599190283
+        },
+        {
+          "id": 1,
+          "usage_percent": 92.6829268292683,
+          "iowait_percent": 1.6260162601626
+        },
+        {
+          "id": 2,
+          "usage_percent": 94.3089430894309,
+          "iowait_percent": 0.813008130081301
+        },
+        {
+          "id": 3,
+          "usage_percent": 94.949494949495,
+          "iowait_percent": 1.61616161616162
+        },
+        {
+          "id": 4,
+          "usage_percent": 94.7046843177189,
+          "iowait_percent": 0.610997963340122
+        },
+        {
+          "id": 5,
+          "usage_percent": 92.7272727272727,
+          "iowait_percent": 1.21212121212121
+        },
+        {
+          "id": 6,
+          "usage_percent": 94.3089430894309,
+          "iowait_percent": 1.01626016260163
+        },
+        {
+          "id": 7,
+          "usage_percent": 94.7154471544716,
+          "iowait_percent": 0.40650406504065
+        },
+        {
+          "id": 8,
+          "usage_percent": 92.4489795918367,
+          "iowait_percent": 1.42857142857143
+        },
+        {
+          "id": 9,
+          "usage_percent": 91.3757700205339,
+          "iowait_percent": 1.43737166324435
+        }
+      ]
+    },
+    "memory": {
+      "total_bytes": 31533527040,
+      "used_bytes": 24288923648,
+      "free_bytes": 560705536,
+      "buffers_bytes": 243679232,
+      "cached_bytes": 6440218624,
+      "available_bytes": 7750418432,
+      "usage_percent": 77.0257117676361,
+      "swap_total_bytes": 0,
+      "swap_used_bytes": 0,
+      "swap_percent": 0,
+      "slab_bytes": 1741406208,
+      "page_faults_total": 0,
+      "major_faults_total": 0
+    },
+    "load_avg": {
+      "load1": 66.76,
+      "load5": 62.14,
+      "load15": 60.14,
+      "num_cpu": 10
+    },
+    "disk": [
+      {
+        "device": "sda",
+        "read_bytes_total": 60204201022976,
+        "write_bytes_total": 425430005951488,
+        "read_ops_total": 2206972033,
+        "write_ops_total": 6994172157,
+        "read_bytes_per_sec": 24748935.5891432,
+        "write_bytes_per_sec": 40522721.002756,
+        "read_ops_per_sec": 505.137413740426,
+        "write_ops_per_sec": 581.649107653528,
+        "io_util_percent": 90.1315765992037,
+        "avg_wait_ms": 1.21913011426465
+      }
+    ],
+    "network": [
+      {
+        "interface": "veth57f4f3d",
+        "rx_bytes_total": 11521673868694,
+        "tx_bytes_total": 8412335012933,
+        "rx_packets_total": 6332207540,
+        "tx_packets_total": 8312796850,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 1277983.64688548,
+        "tx_bytes_per_sec": 1064584.08922913
+      },
+      {
+        "interface": "veth4deca87",
+        "rx_bytes_total": 1318171312582,
+        "tx_bytes_total": 5986523376014,
+        "rx_packets_total": 8221954148,
+        "tx_packets_total": 9378198427,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 36012.4058883698,
+        "tx_bytes_per_sec": 60670.752205325
+      },
+      {
+        "interface": "veth0c99535",
+        "rx_bytes_total": 1888904866,
+        "tx_bytes_total": 2910527568,
+        "rx_packets_total": 10845896,
+        "tx_packets_total": 23437934,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 3248.50924690891,
+        "tx_bytes_per_sec": 4879.0730165054
+      },
+      {
+        "interface": "vetha47a6d1",
+        "rx_bytes_total": 56828576367,
+        "tx_bytes_total": 15679308536821,
+        "rx_packets_total": 572043733,
+        "tx_packets_total": 1207259158,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 1374.79298790201,
+        "tx_bytes_per_sec": 54409.0748771227
+      },
+      {
+        "interface": "vetha388af8",
+        "rx_bytes_total": 1136734416,
+        "tx_bytes_total": 1527218909,
+        "rx_packets_total": 3277839,
+        "tx_packets_total": 7325088,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 44533.9592775421,
+        "tx_bytes_per_sec": 61616.9238362762
+      },
+      {
+        "interface": "veth5fada25",
+        "rx_bytes_total": 52831196747,
+        "tx_bytes_total": 49685792924,
+        "rx_packets_total": 197642658,
+        "tx_packets_total": 156318024,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      },
+      {
+        "interface": "veth9d85da9",
+        "rx_bytes_total": 1021396622438,
+        "tx_bytes_total": 1445517647650,
+        "rx_packets_total": 627992500,
+        "tx_packets_total": 682828912,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 377805.691309687,
+        "tx_bytes_per_sec": 1860899.67927265
+      },
+      {
+        "interface": "veth8846034",
+        "rx_bytes_total": 39850266504678,
+        "tx_bytes_total": 33316741338249,
+        "rx_packets_total": 32511792849,
+        "tx_packets_total": 29782648540,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 885616.245989626,
+        "tx_bytes_per_sec": 1124803.18668683
+      },
+      {
+        "interface": "veth21bb5ad",
+        "rx_bytes_total": 22877681636,
+        "tx_bytes_total": 2704821864,
+        "rx_packets_total": 51849641,
+        "tx_packets_total": 30780792,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 901.907462780124,
+        "tx_bytes_per_sec": 106.554468176555
+      },
+      {
+        "interface": "docker0",
+        "rx_bytes_total": 0,
+        "tx_bytes_total": 0,
+        "rx_packets_total": 0,
+        "tx_packets_total": 0,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      },
+      {
+        "interface": "veth0369abc",
+        "rx_bytes_total": 5073332397631,
+        "tx_bytes_total": 1303987988614,
+        "rx_packets_total": 10888848705,
+        "tx_packets_total": 12645054089,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 265537.740503049,
+        "tx_bytes_per_sec": 52844.0060531911
+      },
+      {
+        "interface": "vethb87eb74",
+        "rx_bytes_total": 85080550872669,
+        "tx_bytes_total": 23324498987834,
+        "rx_packets_total": 19825003250,
+        "tx_packets_total": 10999812675,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 1465520.11174728,
+        "tx_bytes_per_sec": 1254439.91638695
+      },
+      {
+        "interface": "veth701b687",
+        "rx_bytes_total": 0,
+        "tx_bytes_total": 10899452,
+        "rx_packets_total": 0,
+        "tx_packets_total": 171658,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      },
+      {
+        "interface": "veth9195eae",
+        "rx_bytes_total": 567732566367,
+        "tx_bytes_total": 561327449779,
+        "rx_packets_total": 258871002,
+        "tx_packets_total": 318487664,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 1168678.390991,
+        "tx_bytes_per_sec": 1203383.30145031
+      },
+      {
+        "interface": "vethde7e057",
+        "rx_bytes_total": 583674715,
+        "tx_bytes_total": 9553993718,
+        "rx_packets_total": 1061892,
+        "tx_packets_total": 2071910,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 2043.96305966493,
+        "tx_bytes_per_sec": 36090.5191263187
+      },
+      {
+        "interface": "br-73118725f0cd",
+        "rx_bytes_total": 575761997591,
+        "tx_bytes_total": 8624654818287,
+        "rx_packets_total": 4913147735,
+        "tx_packets_total": 7097225937,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 77418.831292647,
+        "tx_bytes_per_sec": 1533735.00041564
+      },
+      {
+        "interface": "veth0490827",
+        "rx_bytes_total": 18195500260,
+        "tx_bytes_total": 27910272531,
+        "rx_packets_total": 155226705,
+        "tx_packets_total": 334303865,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 600.470480438555,
+        "tx_bytes_per_sec": 903.309495256131
+      },
+      {
+        "interface": "vethf5588e3",
+        "rx_bytes_total": 126355576045,
+        "tx_bytes_total": 121874610948,
+        "rx_packets_total": 97452693,
+        "tx_packets_total": 125838132,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 48738.2540923806,
+        "tx_bytes_per_sec": 45145.0451467276
+      },
+      {
+        "interface": "veth72d11bd",
+        "rx_bytes_total": 142150408,
+        "tx_bytes_total": 139807844,
+        "rx_packets_total": 1670099,
+        "tx_packets_total": 1516797,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      },
+      {
+        "interface": "ens4",
+        "rx_bytes_total": 9348155127135,
+        "tx_bytes_total": 2841101118079,
+        "rx_packets_total": 9271408701,
+        "tx_packets_total": 7805885080,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 1668297.27049433,
+        "tx_bytes_per_sec": 563220.280164224
+      },
+      {
+        "interface": "veth5694e52",
+        "rx_bytes_total": 8934327429,
+        "tx_bytes_total": 5032603857,
+        "rx_packets_total": 21111068,
+        "tx_packets_total": 22324617,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      },
+      {
+        "interface": "veth9a0c02b",
+        "rx_bytes_total": 463746085,
+        "tx_bytes_total": 787329473,
+        "rx_packets_total": 5392256,
+        "tx_packets_total": 10955305,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 17.2249704195182,
+        "tx_bytes_per_sec": 28.8418109350073
+      },
+      {
+        "interface": "vethb384094",
+        "rx_bytes_total": 56726814138,
+        "tx_bytes_total": 15732951685006,
+        "rx_packets_total": 572623063,
+        "tx_packets_total": 1208872105,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 1533.82352875199,
+        "tx_bytes_per_sec": 55054.2101064397
+      },
+      {
+        "interface": "vethc46fbe7",
+        "rx_bytes_total": 77432258269,
+        "tx_bytes_total": 1390539904626,
+        "rx_packets_total": 463281963,
+        "tx_packets_total": 676773801,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 2439.93708896013,
+        "tx_bytes_per_sec": 35898.8412578132
+      },
+      {
+        "interface": "vethfd24059",
+        "rx_bytes_total": 35761782839,
+        "tx_bytes_total": 721990972508,
+        "rx_packets_total": 103448219,
+        "tx_packets_total": 130835429,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 6519.85159414137,
+        "tx_bytes_per_sec": 85823.0145345422
+      },
+      {
+        "interface": "veth879796f",
+        "rx_bytes_total": 0,
+        "tx_bytes_total": 10898958,
+        "rx_packets_total": 0,
+        "tx_packets_total": 171653,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      },
+      {
+        "interface": "vethcaa78c7",
+        "rx_bytes_total": 18946925391,
+        "tx_bytes_total": 28519948177,
+        "rx_packets_total": 155782262,
+        "tx_packets_total": 334562399,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 592.458866289941,
+        "tx_bytes_per_sec": 887.286266958905
+      },
+      {
+        "interface": "veth6c22395",
+        "rx_bytes_total": 133386488,
+        "tx_bytes_total": 178928598,
+        "rx_packets_total": 67059,
+        "tx_packets_total": 264101,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      },
+      {
+        "interface": "vethbdd1fdc",
+        "rx_bytes_total": 141410260,
+        "tx_bytes_total": 139713552,
+        "rx_packets_total": 1667894,
+        "tx_packets_total": 1514566,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      },
+      {
+        "interface": "veth342268f",
+        "rx_bytes_total": 3859992410,
+        "tx_bytes_total": 120889582193,
+        "rx_packets_total": 9975499,
+        "tx_packets_total": 19911639,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 3271.34234723246,
+        "tx_bytes_per_sec": 36320.4524523839
+      },
+      {
+        "interface": "veth8cf63d8",
+        "rx_bytes_total": 19353085047,
+        "tx_bytes_total": 28907399311,
+        "rx_packets_total": 156047016,
+        "tx_packets_total": 334543380,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 604.476287512861,
+        "tx_bytes_per_sec": 899.303688181824
+      },
+      {
+        "interface": "vethd790441",
+        "rx_bytes_total": 38634269423,
+        "tx_bytes_total": 32314288414,
+        "rx_packets_total": 164979166,
+        "tx_packets_total": 165109930,
+        "rx_errors_total": 0,
+        "tx_errors_total": 0,
+        "rx_dropped_total": 0,
+        "tx_dropped_total": 0,
+        "rx_bytes_per_sec": 0,
+        "tx_bytes_per_sec": 0
+      }
+    ]
+  },
+  "top_processes": [
+    {
+      "pid": 3767963,
+      "ppid": 2160309,
+      "comm": "kesl",
+      "cmdline": "/opt/kaspersky/kesl/libexec/kesl",
+      "cpu_percent": 21.3824640296249,
+      "mem_percent": 3.56978495482629,
+      "mem_rss_bytes": 1125679104,
+      "mem_vms_bytes": 3504480256,
+      "read_bytes_total": 3181539328,
+      "write_bytes_total": 3202932736,
+      "read_bytes_per_sec": 237185.732335051,
+      "write_bytes_per_sec": 898765.970195342,
+      "threads": 212,
+      "state": "S",
+      "open_files": 752,
+      "cgroup_path": "13:devices:/system.slice/kesl.service"
+    },
+    {
+      "pid": 1227084,
+      "ppid": 1229909,
+      "comm": "redis-server",
+      "cmdline": "redis-rdb-bgsave 0.0.0.0:6379",
+      "cpu_percent": 6.77078023763147,
+      "mem_percent": 38.5552076574813,
+      "mem_rss_bytes": 12157816832,
+      "mem_vms_bytes": 47539306496,
+      "read_bytes_total": 73728,
+      "write_bytes_total": 1781280768,
+      "read_bytes_per_sec": 2457.88323663266,
+      "write_bytes_per_sec": 24933177.1996078,
+      "threads": 1,
+      "state": "R",
+      "open_files": 71,
+      "cgroup_path": "13:devices:/docker/71265a254175d1f81d55439133f65244f679437a68e35df99e9fbae96d7ed573",
+      "container_id": "71265a254175"
+    },
+    {
+      "pid": 1212562,
+      "ppid": 9076,
+      "comm": "sentry",
+      "cmdline": "/usr/local/bin/python /usr/local/bin/sentry run worker --concurrency=4",
+      "cpu_percent": 6.64076525522495,
+      "mem_percent": 1.35964715731336,
+      "mem_rss_bytes": 428744704,
+      "mem_vms_bytes": 1111900160,
+      "read_bytes_total": 3231744,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 8,
+      "state": "R",
+      "open_files": 52,
+      "cgroup_path": "13:devices:/docker/b739e44843f8daaed4c0cc990cf63998a5d1c4d26352dbcc6961e48c41e950af",
+      "container_id": "b739e44843f8",
+      "k8s_pod_name": "b739e44843f8"
+    },
+    {
+      "pid": 657410,
+      "ppid": 9076,
+      "comm": "sentry",
+      "cmdline": "/usr/local/bin/python /usr/local/bin/sentry run worker --concurrency=4",
+      "cpu_percent": 6.15070878307733,
+      "mem_percent": 1.39375718879305,
+      "mem_rss_bytes": 439500800,
+      "mem_vms_bytes": 1122766848,
+      "read_bytes_total": 217874432,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 8,
+      "state": "S",
+      "open_files": 51,
+      "cgroup_path": "13:devices:/docker/b739e44843f8daaed4c0cc990cf63998a5d1c4d26352dbcc6961e48c41e950af",
+      "container_id": "b739e44843f8",
+      "k8s_pod_name": "b739e44843f8"
+    },
+    {
+      "pid": 1266318,
+      "ppid": 1263445,
+      "comm": "sentry",
+      "cmdline": "/usr/local/bin/python /usr/local/bin/sentry run ingest-consumer --all-consumer-types",
+      "cpu_percent": 6.06069841064205,
+      "mem_percent": 0.588833186228952,
+      "mem_rss_bytes": 185679872,
+      "mem_vms_bytes": 888053760,
+      "read_bytes_total": 1060495360,
+      "write_bytes_total": 4096,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 6,
+      "state": "R",
+      "open_files": 19,
+      "cgroup_path": "13:devices:/docker/35e083f1d9667ddc267275cf0e57219205b429945e5e481388bdc6e796bf13ab",
+      "container_id": "35e083f1d966",
+      "k8s_pod_name": "35e083f1d966"
+    },
+    {
+      "pid": 960527,
+      "ppid": 9076,
+      "comm": "sentry",
+      "cmdline": "/usr/local/bin/python /usr/local/bin/sentry run worker --concurrency=4",
+      "cpu_percent": 5.59064424348004,
+      "mem_percent": 1.43306296002593,
+      "mem_rss_bytes": 451895296,
+      "mem_vms_bytes": 1374457856,
+      "read_bytes_total": 340062208,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 1528393.72597941,
+      "write_bytes_per_sec": 0,
+      "threads": 8,
+      "state": "R",
+      "open_files": 51,
+      "cgroup_path": "13:devices:/docker/b739e44843f8daaed4c0cc990cf63998a5d1c4d26352dbcc6961e48c41e950af",
+      "container_id": "b739e44843f8",
+      "k8s_pod_name": "b739e44843f8"
+    },
+    {
+      "pid": 2021,
+      "ppid": 1986,
+      "comm": "relay",
+      "cmdline": "/bin/relay run",
+      "cpu_percent": 5.57064193849443,
+      "mem_percent": 2.98040621592325,
+      "mem_rss_bytes": 939827200,
+      "mem_vms_bytes": 2483802112,
+      "read_bytes_total": 25971740672,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 31,
+      "state": "R",
+      "open_files": 76,
+      "cgroup_path": "13:devices:/docker/c5912a896aa4b8172bc8c9679bdf7e413705537a30368fdaa787c92f9ef3fe45",
+      "container_id": "c5912a896aa4",
+      "k8s_pod_name": "c5912a896aa4"
+    },
+    {
+      "pid": 791505,
+      "ppid": 9076,
+      "comm": "sentry",
+      "cmdline": "/usr/local/bin/python /usr/local/bin/sentry run worker --concurrency=4",
+      "cpu_percent": 5.55063963350881,
+      "mem_percent": 1.3818199767101,
+      "mem_rss_bytes": 435736576,
+      "mem_vms_bytes": 1118945280,
+      "read_bytes_total": 656871424,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 8,
+      "state": "R",
+      "open_files": 51,
+      "cgroup_path": "13:devices:/docker/b739e44843f8daaed4c0cc990cf63998a5d1c4d26352dbcc6961e48c41e950af",
+      "container_id": "b739e44843f8",
+      "k8s_pod_name": "b739e44843f8"
+    },
+    {
+      "pid": 2810,
+      "ppid": 2726,
+      "comm": "clickhouse-serv",
+      "cmdline": "/usr/bin/clickhouse-server --config-file=/etc/clickhouse-server/config.xml",
+      "cpu_percent": 3.51040452497584,
+      "mem_percent": 6.53440911124923,
+      "mem_rss_bytes": 2060529664,
+      "mem_vms_bytes": 31312138240,
+      "read_bytes_total": 2635850399744,
+      "write_bytes_total": 175120907436032,
+      "read_bytes_per_sec": 555071.964272875,
+      "write_bytes_per_sec": 5815761.38507897,
+      "threads": 110,
+      "state": "S",
+      "open_files": 344,
+      "cgroup_path": "13:devices:/docker/4fa9d0c0734e02d98438adeb3a5d592f10864dbc67dfaddb6f80ea941121ee61",
+      "container_id": "4fa9d0c0734e",
+      "k8s_pod_name": "4fa9d0c0734e"
+    },
+    {
+      "pid": 1636430,
+      "ppid": 1636429,
+      "comm": "klnagent",
+      "cmdline": "/opt/kaspersky/klnagent64/sbin/klnagent -rcvr_loadconnector 4AAEFF1A727AF2E886E64700F283D332 -rcvr_product kesl -rcvr_version 12.4.0.0",
+      "cpu_percent": 2.02023280354735,
+      "mem_percent": 0.190293968460561,
+      "mem_rss_bytes": 60006400,
+      "mem_vms_bytes": 2564001792,
+      "read_bytes_total": 13221818368,
+      "write_bytes_total": 44950974464,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 24,
+      "state": "S",
+      "open_files": 70,
+      "cgroup_path": "13:devices:/system.slice/klnagent64.service"
+    },
+    {
+      "pid": 3899360,
+      "ppid": 1,
+      "comm": "auditd",
+      "cmdline": "/sbin/auditd",
+      "cpu_percent": 1.69019477128466,
+      "mem_percent": 0.00481904862108314,
+      "mem_rss_bytes": 1519616,
+      "mem_vms_bytes": 11636736,
+      "read_bytes_total": 507904,
+      "write_bytes_total": 7499968512,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 2049464.97214553,
+      "threads": 2,
+      "state": "D",
+      "open_files": 10,
+      "cgroup_path": "13:devices:/system.slice/auditd.service"
+    },
+    {
+      "pid": 1666,
+      "ppid": 1596,
+      "comm": "java",
+      "cmdline": "java -Xmx1G -Xms1G -server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -Djava.awt.headless=true -Xloggc:/var/log/kafka/kafkaServer-gc.log -verbose:gc -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:+PrintGCTimeStamps -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=10 -XX:GCLogFileSize=100M -Dcom.sun.management.jmxremote=true -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Dkafka.logs.dir=/var/log/kafka -Dlog4j.configuration=file:/etc/kafka/log4j.properties -cp /usr/bin/../share/java/kafka/*:/usr/bin/../support-metrics-client/build/dependant-libs-2.12/*:/usr/bin/../support-metrics-client/build/libs/*:/usr/share/java/support-metrics-client/* io.confluent.support.metrics.SupportedKafka /etc/kafka/kafka.properties",
+      "cpu_percent": 1.66019131380624,
+      "mem_percent": 4.5939561856256,
+      "mem_rss_bytes": 1448636416,
+      "mem_vms_bytes": 8462721024,
+      "read_bytes_total": 185348796416,
+      "write_bytes_total": 22351854862336,
+      "read_bytes_per_sec": 419478.739051973,
+      "write_bytes_per_sec": 1305545.64585805,
+      "threads": 86,
+      "state": "S",
+      "open_files": 265,
+      "cgroup_path": "13:devices:/docker/858d02b395efdbdf9ad533b4ecaafec64ce088d7ba37a78ed30aec899871cbb4",
+      "container_id": "858d02b395ef",
+      "k8s_pod_name": "858d02b395ef"
+    },
+    {
+      "pid": 2328285,
+      "ppid": 1,
+      "comm": "wazuh-agentd",
+      "cmdline": "/var/ossec/bin/wazuh-agentd",
+      "cpu_percent": 1.56017978887815,
+      "mem_percent": 0.0206400761695448,
+      "mem_rss_bytes": 6508544,
+      "mem_vms_bytes": 257105920,
+      "read_bytes_total": 2972233728,
+      "write_bytes_total": 2246901760,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 819.294412210886,
+      "threads": 5,
+      "state": "S",
+      "open_files": 14,
+      "cgroup_path": "13:devices:/system.slice/vadar-agent.service"
+    },
+    {
+      "pid": 1976050,
+      "ppid": 1976049,
+      "comm": "nginx",
+      "cmdline": "nginx: worker process",
+      "cpu_percent": 1.18013599415142,
+      "mem_percent": 0.051346898110894,
+      "mem_rss_bytes": 16191488,
+      "mem_vms_bytes": 64659456,
+      "read_bytes_total": 2464657408,
+      "write_bytes_total": 1009572278272,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 644784.702409967,
+      "threads": 1,
+      "state": "S",
+      "open_files": 767,
+      "cgroup_path": "13:devices:/system.slice/nginx.service"
+    },
+    {
+      "pid": 9076,
+      "ppid": 2774,
+      "comm": "sentry",
+      "cmdline": "/usr/local/bin/python /usr/local/bin/sentry run worker --concurrency=4",
+      "cpu_percent": 1.13013023168738,
+      "mem_percent": 0.447885756074307,
+      "mem_rss_bytes": 141234176,
+      "mem_vms_bytes": 531451904,
+      "read_bytes_total": 9321253183488,
+      "write_bytes_total": 1639304306688,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 4,
+      "state": "S",
+      "open_files": 44,
+      "cgroup_path": "13:devices:/docker/b739e44843f8daaed4c0cc990cf63998a5d1c4d26352dbcc6961e48c41e950af",
+      "container_id": "b739e44843f8",
+      "k8s_pod_name": "b739e44843f8"
+    },
+    {
+      "pid": 1802,
+      "ppid": 981,
+      "comm": "docker-proxy",
+      "cmdline": "/usr/bin/docker-proxy -proto tcp -host-ip 0.0.0.0 -host-port 3030 -container-ip 172.21.0.8 -container-port 3000",
+      "cpu_percent": 1.13013023168738,
+      "mem_percent": 0.00284466751487118,
+      "mem_rss_bytes": 897024,
+      "mem_vms_bytes": 9192169472,
+      "read_bytes_total": 5135212544,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 378,
+      "state": "S",
+      "open_files": 67,
+      "cgroup_path": "13:devices:/system.slice/docker.service"
+    },
+    {
+      "pid": 75,
+      "ppid": 2,
+      "comm": "kauditd",
+      "cmdline": "",
+      "cpu_percent": 0.980112944295249,
+      "mem_percent": 0,
+      "mem_rss_bytes": 0,
+      "mem_vms_bytes": 0,
+      "read_bytes_total": 0,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 1,
+      "state": "S",
+      "open_files": 0,
+      "cgroup_path": "13:devices:/"
+    },
+    {
+      "pid": 2328371,
+      "ppid": 1,
+      "comm": "wazuh-logcollec",
+      "cmdline": "/var/ossec/bin/wazuh-logcollector",
+      "cpu_percent": 0.97011179180244,
+      "mem_percent": 0.0291221213166264,
+      "mem_rss_bytes": 9183232,
+      "mem_vms_bytes": 1044070400,
+      "read_bytes_total": 1076544868352,
+      "write_bytes_total": 242520064,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 409.647206105443,
+      "threads": 8,
+      "state": "S",
+      "open_files": 76,
+      "cgroup_path": "13:devices:/system.slice/vadar-agent.service"
+    },
+    {
+      "pid": 1229909,
+      "ppid": 1229880,
+      "comm": "redis-server",
+      "cmdline": "redis-server 0.0.0.0:6379",
+      "cpu_percent": 0.920106029338397,
+      "mem_percent": 38.5642482446518,
+      "mem_rss_bytes": 12160667648,
+      "mem_vms_bytes": 47539167232,
+      "read_bytes_total": 9389084672,
+      "write_bytes_total": 11285679697920,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 1382559.32060587,
+      "threads": 7,
+      "state": "S",
+      "open_files": 72,
+      "cgroup_path": "13:devices:/docker/71265a254175d1f81d55439133f65244f679437a68e35df99e9fbae96d7ed573",
+      "container_id": "71265a254175"
+    },
+    {
+      "pid": 1572,
+      "ppid": 1520,
+      "comm": "memcached",
+      "cmdline": "memcached",
+      "cpu_percent": 0.570065692090094,
+      "mem_percent": 0.224793680421738,
+      "mem_rss_bytes": 70885376,
+      "mem_vms_bytes": 77389824,
+      "read_bytes_total": 954372096,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 10,
+      "state": "S",
+      "open_files": 40,
+      "cgroup_path": "13:devices:/docker/124e74a973d34107fcc253e46bb182624099546c4b0b5b89eb025ddae86eac31",
+      "container_id": "124e74a973d3",
+      "k8s_pod_name": "124e74a973d3"
+    }
+  ],
+  "recent_events": [
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.421126782+07:00",
+      "pid": 3771041,
+      "comm": "kesl",
+      "data": {
+        "pid": 3771041,
+        "comm": "kesl",
+        "latency_us": 5742
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.421848272+07:00",
+      "pid": 3768430,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768430,
+        "comm": "keslOASEvent",
+        "latency_us": 6477
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.422031462+07:00",
+      "pid": 1254047,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 1254047,
+        "comm": "keslOASEvent",
+        "latency_us": 6683
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.423866992+07:00",
+      "pid": 1227084,
+      "comm": "redis-server",
+      "data": {
+        "pid": 1227084,
+        "comm": "redis-server",
+        "kern_stack_id": -14,
+        "user_stack_id": -12,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.423879121+07:00",
+      "pid": 657410,
+      "comm": "sentry",
+      "data": {
+        "pid": 657410,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 1405,
+        "sample_count": 0,
+        "user_stack": [140311549268634]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.423902512+07:00",
+      "pid": 960527,
+      "comm": "sentry",
+      "data": {
+        "pid": 960527,
+        "comm": "sentry",
+        "kern_stack_id": -17,
+        "user_stack_id": 10727,
+        "sample_count": 0,
+        "user_stack": [140311552276798]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.423911792+07:00",
+      "pid": 1217899,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1217899,
+        "comm": "obs-agent",
+        "kern_stack_id": 13333,
+        "user_stack_id": 562,
+        "sample_count": 0,
+        "user_stack": [4793846, 4597489, 4595864, 4595400, 4554803, 4554613, 4781164],
+        "kern_stack": [1.8446744072388192e+19, 1.8446744072374563e+19, 1.8446744072374567e+19, 1.8446744072374567e+19, 1.8446744072374567e+19, 1.8446744072373692e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.423929212+07:00",
+      "pid": 1212562,
+      "comm": "sentry",
+      "data": {
+        "pid": 1212562,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 12992,
+        "sample_count": 0,
+        "user_stack": [140311553842237]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.423994032+07:00",
+      "pid": 791526,
+      "comm": "sentry",
+      "data": {
+        "pid": 791526,
+        "comm": "sentry",
+        "kern_stack_id": 15059,
+        "user_stack_id": 8857,
+        "sample_count": 0,
+        "user_stack": [140311549716505],
+        "kern_stack": [1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.424020072+07:00",
+      "pid": 3899360,
+      "comm": "auditd",
+      "data": {
+        "pid": 3899360,
+        "comm": "auditd",
+        "kern_stack_id": 14716,
+        "user_stack_id": -17,
+        "sample_count": 0,
+        "kern_stack": [1.8446744072377606e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.424091861+07:00",
+      "pid": 3774667,
+      "comm": "kesl",
+      "data": {
+        "pid": 3774667,
+        "comm": "kesl",
+        "kern_stack_id": 14946,
+        "user_stack_id": -17,
+        "sample_count": 0,
+        "kern_stack": [1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.424113792+07:00",
+      "pid": 736099,
+      "comm": "klnagent",
+      "data": {
+        "pid": 736099,
+        "comm": "klnagent",
+        "kern_stack_id": 8387,
+        "user_stack_id": 10794,
+        "sample_count": 0,
+        "user_stack": [140627165196491, 140626514839742, 140626514942050, 140626514944688, 140626514488628, 140626513735279, 140626513744674, 140626068555363, 140626069482024, 140626069504188, 140626069591808, 140626076748951, 140626076749799, 140626076753858, 140626076500989, 140626076517101, 140626076798184, 140626199599663, 140626199457107, 140626199604987, 140626199599663, 140626199457107, 140626199601291, 140626199605398, 140627166336521],
+        "kern_stack": [1.8446744072375554e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.424130181+07:00",
+      "pid": 3768300,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768300,
+        "comm": "keslOASEvent",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.427572651+07:00",
+      "pid": 1212610,
+      "comm": "sentry",
+      "data": {
+        "pid": 1212610,
+        "comm": "sentry",
+        "latency_us": 8712
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.429038591+07:00",
+      "pid": 3768442,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768442,
+        "comm": "keslOASEvent",
+        "latency_us": 5319
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.432157191+07:00",
+      "pid": 6060,
+      "comm": "rdk:broker1001",
+      "data": {
+        "pid": 6060,
+        "comm": "rdk:broker1001",
+        "latency_us": 5362
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.43391158+07:00",
+      "pid": 1227084,
+      "comm": "redis-server",
+      "data": {
+        "pid": 1227084,
+        "comm": "redis-server",
+        "kern_stack_id": -17,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.433934411+07:00",
+      "pid": 657410,
+      "comm": "sentry",
+      "data": {
+        "pid": 657410,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.433937231+07:00",
+      "pid": 960527,
+      "comm": "sentry",
+      "data": {
+        "pid": 960527,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 12938,
+        "sample_count": 0,
+        "user_stack": [140311553683946, 140311555278144]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.433959951+07:00",
+      "pid": 1229909,
+      "comm": "redis-server",
+      "data": {
+        "pid": 1229909,
+        "comm": "redis-server",
+        "kern_stack_id": 11634,
+        "user_stack_id": 12226,
+        "sample_count": 0,
+        "user_stack": [139936721745903, 4294967296],
+        "kern_stack": [1.844674407237473e+19, 1.8446744072388168e+19, 1.844674407238817e+19, 1.8446744072388188e+19, 1.8446744072388188e+19, 1.8446744072377827e+19, 1.8446744072377827e+19, 1.844674407237783e+19, 1.844674407237369e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.434074151+07:00",
+      "pid": 6044,
+      "comm": "relay",
+      "data": {
+        "pid": 6044,
+        "comm": "relay",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.43411336+07:00",
+      "pid": 1223271,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1223271,
+        "comm": "obs-agent",
+        "kern_stack_id": 14826,
+        "user_stack_id": 14837,
+        "sample_count": 0,
+        "user_stack": [4795139, 4335847, 4560812, 4567912, 4572337, 4573509, 4781301],
+        "kern_stack": [1.844674407237473e+19, 1.8446744072388168e+19, 1.844674407238817e+19, 1.8446744072375323e+19, 1.8446744072375327e+19, 1.8446744072375335e+19, 1.8446744072375337e+19, 1.844674407237369e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.4341454+07:00",
+      "pid": 9076,
+      "comm": "sentry",
+      "data": {
+        "pid": 9076,
+        "comm": "sentry",
+        "kern_stack_id": -17,
+        "user_stack_id": -12,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.4341469+07:00",
+      "pid": 1277819,
+      "comm": "sentry",
+      "data": {
+        "pid": 1277819,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.43424792+07:00",
+      "pid": 1254055,
+      "comm": "postgres",
+      "data": {
+        "pid": 1254055,
+        "comm": "postgres",
+        "kern_stack_id": -17,
+        "user_stack_id": 1595,
+        "sample_count": 0,
+        "user_stack": [140003777067280]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.434289691+07:00",
+      "pid": 3768300,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768300,
+        "comm": "keslOASEvent",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.434930351+07:00",
+      "pid": 1266318,
+      "comm": "sentry",
+      "data": {
+        "pid": 1266318,
+        "comm": "sentry",
+        "latency_us": 5335
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.44401214+07:00",
+      "pid": 3768315,
+      "comm": "keslFanPoll",
+      "data": {
+        "pid": 3768315,
+        "comm": "keslFanPoll",
+        "kern_stack_id": 5699,
+        "user_stack_id": 1186,
+        "sample_count": 0,
+        "user_stack": [140335413217337, 140335265737147, 140335265743286, 140335266304648, 140335266327370, 140335402394847, 140335413200393],
+        "kern_stack": [1.8446744072388192e+19, 1.8446744072374772e+19, 1.8446744072374772e+19, 1.8446744072375325e+19, 1.8446744072375335e+19, 1.8446744072375337e+19, 1.844674407237369e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.44411366+07:00",
+      "pid": 3768300,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768300,
+        "comm": "keslOASEvent",
+        "kern_stack_id": -17,
+        "user_stack_id": 3111,
+        "sample_count": 0,
+        "user_stack": [140335397122403, 140335266417625, 140335265838759, 140335265850301, 140335265851281, 140334988315302, 140334988231460, 140334988236542, 140334988200879, 140334988206378, 140334418428398, 140335380398063, 140335380255827, 140335380403387, 140335380398063, 140335380255827, 140335380399691, 140335380403798, 94787888885894, 140335413200393]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.4441266+07:00",
+      "pid": 1269493,
+      "comm": "postgres",
+      "data": {
+        "pid": 1269493,
+        "comm": "postgres",
+        "kern_stack_id": -17,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.44412871+07:00",
+      "pid": 1223305,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1223305,
+        "comm": "obs-agent",
+        "kern_stack_id": -14,
+        "user_stack_id": 294,
+        "sample_count": 0,
+        "user_stack": [4602232, 4602451, 4758405, 4548215, 4307557, 4781418, 4307423, 4306836, 4311994, 6874215, 6872191, 4788161]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.44420654+07:00",
+      "pid": 1217905,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1217905,
+        "comm": "obs-agent",
+        "kern_stack_id": 14826,
+        "user_stack_id": 14837,
+        "sample_count": 0,
+        "user_stack": [4795139, 4335847, 4560812, 4567912, 4572337, 4573509, 4781301],
+        "kern_stack": [1.844674407237473e+19, 1.8446744072388168e+19, 1.844674407238817e+19, 1.8446744072375323e+19, 1.8446744072375327e+19, 1.8446744072375335e+19, 1.8446744072375337e+19, 1.844674407237369e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.44423423+07:00",
+      "pid": 3899360,
+      "comm": "auditd",
+      "data": {
+        "pid": 3899360,
+        "comm": "auditd",
+        "kern_stack_id": 14595,
+        "user_stack_id": 3127,
+        "sample_count": 0,
+        "user_stack": [140440630646414],
+        "kern_stack": [1.8446744072377825e+19, 1.8446744072377827e+19, 1.8446744072377827e+19, 1.844674407237783e+19, 1.844674407237369e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.44437455+07:00",
+      "pid": 657410,
+      "comm": "sentry",
+      "data": {
+        "pid": 657410,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.4444076+07:00",
+      "pid": 1976050,
+      "comm": "nginx",
+      "data": {
+        "pid": 1976050,
+        "comm": "nginx",
+        "kern_stack_id": -14,
+        "user_stack_id": -12,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.451684979+07:00",
+      "pid": 3768430,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768430,
+        "comm": "keslOASEvent",
+        "latency_us": 5079
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.453887069+07:00",
+      "pid": 1254042,
+      "comm": "postgres",
+      "data": {
+        "pid": 1254042,
+        "comm": "postgres",
+        "latency_us": 10576
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454097449+07:00",
+      "pid": 3768314,
+      "comm": "keslFanPoll",
+      "data": {
+        "pid": 3768314,
+        "comm": "keslFanPoll",
+        "kern_stack_id": -17,
+        "user_stack_id": 6318,
+        "sample_count": 0,
+        "user_stack": [140335413245019, 140335265732552, 140335265738040, 140335265743286, 140335266304648, 140335266327370, 140335402394847, 140335413200393]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454130299+07:00",
+      "pid": 736099,
+      "comm": "klnagent",
+      "data": {
+        "pid": 736099,
+        "comm": "klnagent",
+        "kern_stack_id": 1541,
+        "user_stack_id": -17,
+        "sample_count": 0,
+        "kern_stack": [1.8446744072375554e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454140709+07:00",
+      "pid": 3774667,
+      "comm": "kesl",
+      "data": {
+        "pid": 3774667,
+        "comm": "kesl",
+        "kern_stack_id": 13326,
+        "user_stack_id": 2883,
+        "sample_count": 0,
+        "user_stack": [140335397165405, 140334010885930, 140334010894269, 140334008064162, 94787888885894, 140335413200393],
+        "kern_stack": [1.844674407237555e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454154649+07:00",
+      "pid": 2021,
+      "comm": "relay",
+      "data": {
+        "pid": 2021,
+        "comm": "relay",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454262449+07:00",
+      "pid": 3768430,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768430,
+        "comm": "keslOASEvent",
+        "kern_stack_id": -14,
+        "user_stack_id": 4330,
+        "sample_count": 0,
+        "user_stack": [140334866352760, 140334866284759, 140334866298228, 140334866303365, 140334866304508, 140334866347332, 140334866352048, 140334865446925, 140334865433792, 140334865441779, 140334865437553, 140334865442193, 140334865442512, 140334865799517, 140334865799897, 140334676418754, 140334865465821, 140334888735563, 140334888734122, 140334793010322, 140334792953571, 140334888733883, 140334865481517, 140334652818925, 140334865446925, 140334865433792, 140334865442193, 140334865442512, 140334865799517, 140334865799897, 140334676418754, 140334865855453, 140334888735909, 140334888733591, 140334888484856, 140334888428048, 140334888450492, 140334888454378, 140334986208029, 140334986214163, 140334986224054, 140334986224571, 140334986513343, 140334985996849, 140334986004737, 140334987999646, 140334988050583, 140334988083145, 140334988163889, 140334988171750, 140334988176625, 140334988202160, 140334988206378, 140334418428398, 140335380398063, 140335380255827, 140335380403387, 140335380398063, 140335380255827, 140335380399691, 140335380403798, 94787888885894, 140335413200393]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454291199+07:00",
+      "pid": 1254055,
+      "comm": "postgres",
+      "data": {
+        "pid": 1254055,
+        "comm": "postgres",
+        "kern_stack_id": -12,
+        "user_stack_id": -14,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454300569+07:00",
+      "pid": 2328290,
+      "comm": "wazuh-agentd",
+      "data": {
+        "pid": 2328290,
+        "comm": "wazuh-agentd",
+        "kern_stack_id": 7408,
+        "user_stack_id": 11084,
+        "sample_count": 0,
+        "user_stack": [140197904383131],
+        "kern_stack": [1.8446744072376953e+19, 1.8446744072376588e+19, 1.8446744072377016e+19, 1.8446744072376877e+19, 1.8446744072376877e+19, 1.8446744072376816e+19, 1.8446744072377004e+19, 1.844674407237701e+19, 1.844674407237701e+19, 1.8446744072373692e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454398789+07:00",
+      "pid": 1277819,
+      "comm": "sentry",
+      "data": {
+        "pid": 1277819,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": -12,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454430879+07:00",
+      "pid": 1227084,
+      "comm": "redis-server",
+      "data": {
+        "pid": 1227084,
+        "comm": "redis-server",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.454433909+07:00",
+      "pid": 1254042,
+      "comm": "postgres",
+      "data": {
+        "pid": 1254042,
+        "comm": "postgres",
+        "kern_stack_id": 9571,
+        "user_stack_id": -17,
+        "sample_count": 0,
+        "kern_stack": [1.844674407237555e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.457334239+07:00",
+      "pid": 791505,
+      "comm": "sentry",
+      "data": {
+        "pid": 791505,
+        "comm": "sentry",
+        "latency_us": 7029
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.458976389+07:00",
+      "pid": 1254060,
+      "comm": "kesl",
+      "data": {
+        "pid": 1254060,
+        "comm": "kesl",
+        "latency_us": 5005
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464192548+07:00",
+      "pid": 9076,
+      "comm": "sentry",
+      "data": {
+        "pid": 9076,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 2474,
+        "sample_count": 0,
+        "user_stack": [140311553536592, 140311555223488]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464262278+07:00",
+      "pid": 736099,
+      "comm": "klnagent",
+      "data": {
+        "pid": 736099,
+        "comm": "klnagent",
+        "kern_stack_id": 9571,
+        "user_stack_id": 14729,
+        "sample_count": 0,
+        "user_stack": [140627165411677, 140626514942018, 140626514944688, 140626514488628, 140626513735279, 140626513744674, 140626068555363, 140626069482024, 140626069504188, 140626069591808, 140626076748951, 140626076749799, 140626076753858, 140626076500989, 140626076517101, 140626076798184, 140626199599663, 140626199457107, 140626199604987, 140626199599663, 140626199457107, 140626199601291, 140626199605398, 140627166336521],
+        "kern_stack": [1.844674407237555e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464289038+07:00",
+      "pid": 75,
+      "comm": "kauditd",
+      "data": {
+        "pid": 75,
+        "comm": "kauditd",
+        "kern_stack_id": 1785,
+        "user_stack_id": -14,
+        "sample_count": 0,
+        "kern_stack": [1.8446744072388192e+19, 1.8446744072385026e+19, 1.8446744072385706e+19, 1.844674407238572e+19, 1.8446744072375521e+19, 1.8446744072375521e+19, 1.844674407237466e+19, 1.8446744072373686e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464296638+07:00",
+      "pid": 1254042,
+      "comm": "postgres",
+      "data": {
+        "pid": 1254042,
+        "comm": "postgres",
+        "kern_stack_id": -17,
+        "user_stack_id": 1557,
+        "sample_count": 0,
+        "user_stack": [140003777066736, 93835630778502, 93835630924493, 93835630928557, 93835630929307, 93835630765381, 93835630767957, 93835628524671, 93835628496283, 93835628542249, 93835628547639, 93835628496252, 93835629894431, 93835629784568, 93835629768206, 93835630963480, 93835630964061, 93835630967165, 93835630957012, 93835628274724, 93835630544720, 93835628279748, 140003776299745, 1.3827780994688893e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464304528+07:00",
+      "pid": 3768313,
+      "comm": "keslFanPoll",
+      "data": {
+        "pid": 3768313,
+        "comm": "keslFanPoll",
+        "kern_stack_id": 2803,
+        "user_stack_id": 14392,
+        "sample_count": 0,
+        "user_stack": [140335397119801, 140335266415748, 140335265729564, 140335265738040, 140335265743286, 140335266304648, 140335266327370, 140335402394847, 140335413200393],
+        "kern_stack": [1.8446744072375548e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.464308288+07:00",
+      "pid": 328666,
+      "comm": "keslFanPoll",
+      "data": {
+        "pid": 328666,
+        "comm": "keslFanPoll",
+        "latency_us": 5466
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464470188+07:00",
+      "pid": 775838,
+      "comm": "snuba",
+      "data": {
+        "pid": 775838,
+        "comm": "snuba",
+        "kern_stack_id": 9571,
+        "user_stack_id": -12,
+        "sample_count": 0,
+        "kern_stack": [1.844674407237555e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464525878+07:00",
+      "pid": 1976050,
+      "comm": "nginx",
+      "data": {
+        "pid": 1976050,
+        "comm": "nginx",
+        "kern_stack_id": -17,
+        "user_stack_id": 266,
+        "sample_count": 0,
+        "user_stack": [139801118065719]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464538078+07:00",
+      "pid": 1223305,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1223305,
+        "comm": "obs-agent",
+        "kern_stack_id": -17,
+        "user_stack_id": 7347,
+        "sample_count": 0,
+        "user_stack": [4247566, 4888970, 4891645, 6207055, 6855589, 6862364, 6861396, 6872686, 6872191, 4788161]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464547528+07:00",
+      "pid": 328666,
+      "comm": "keslFanPoll",
+      "data": {
+        "pid": 328666,
+        "comm": "keslFanPoll",
+        "kern_stack_id": -12,
+        "user_stack_id": 10157,
+        "sample_count": 0,
+        "user_stack": [140335397129883, 140335265729581, 140335265738040, 140335265743286, 140335266304648, 140335266327370, 140335402394847, 140335413200393]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.464556118+07:00",
+      "pid": 3768439,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768439,
+        "comm": "keslOASEvent",
+        "kern_stack_id": 984,
+        "user_stack_id": -12,
+        "sample_count": 0,
+        "kern_stack": [1.8446744072374462e+19, 1.8446744072375572e+19, 1.8446744072375556e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.465286138+07:00",
+      "pid": 888477,
+      "comm": "postgres",
+      "data": {
+        "pid": 888477,
+        "comm": "postgres",
+        "latency_us": 5859
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.465456058+07:00",
+      "pid": 1212562,
+      "comm": "sentry",
+      "data": {
+        "pid": 1212562,
+        "comm": "sentry",
+        "latency_us": 5214
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.467084798+07:00",
+      "pid": 1254063,
+      "comm": "keslFanEvent",
+      "data": {
+        "pid": 1254063,
+        "comm": "keslFanEvent",
+        "latency_us": 5172
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.471848158+07:00",
+      "pid": 3768311,
+      "comm": "keslFanPoll",
+      "data": {
+        "pid": 3768311,
+        "comm": "keslFanPoll",
+        "latency_us": 5078
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.472551758+07:00",
+      "pid": 1803,
+      "comm": "docker-proxy",
+      "data": {
+        "pid": 1803,
+        "comm": "docker-proxy",
+        "latency_us": 7164
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.472579918+07:00",
+      "pid": 3775664,
+      "comm": "keslFanEvent",
+      "data": {
+        "pid": 3775664,
+        "comm": "keslFanEvent",
+        "latency_us": 7194
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.473025428+07:00",
+      "pid": 3768442,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768442,
+        "comm": "keslOASEvent",
+        "latency_us": 5871
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.473314408+07:00",
+      "pid": 1227084,
+      "comm": "redis-server",
+      "data": {
+        "pid": 1227084,
+        "comm": "redis-server",
+        "latency_us": 7527
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474281208+07:00",
+      "pid": 1212610,
+      "comm": "sentry",
+      "data": {
+        "pid": 1212610,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 5002,
+        "sample_count": 0,
+        "user_stack": [140311553816702, 140311555204224]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474340897+07:00",
+      "pid": 2328290,
+      "comm": "wazuh-agentd",
+      "data": {
+        "pid": 2328290,
+        "comm": "wazuh-agentd",
+        "kern_stack_id": 1541,
+        "user_stack_id": 11084,
+        "sample_count": 0,
+        "user_stack": [140197904383131],
+        "kern_stack": [1.8446744072375554e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474360977+07:00",
+      "pid": 700855,
+      "comm": "docker-proxy",
+      "data": {
+        "pid": 700855,
+        "comm": "docker-proxy",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474363037+07:00",
+      "pid": 960586,
+      "comm": "sentry",
+      "data": {
+        "pid": 960586,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 3765,
+        "sample_count": 0,
+        "user_stack": [140311553816853, 140311555204224]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474452848+07:00",
+      "pid": 3768431,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768431,
+        "comm": "keslOASEvent",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474457917+07:00",
+      "pid": 9076,
+      "comm": "sentry",
+      "data": {
+        "pid": 9076,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 8406,
+        "sample_count": 0,
+        "user_stack": [140311553559593]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474566077+07:00",
+      "pid": 3768065,
+      "comm": "keslEventStorer",
+      "data": {
+        "pid": 3768065,
+        "comm": "keslEventStorer",
+        "kern_stack_id": -14,
+        "user_stack_id": 5423,
+        "sample_count": 0,
+        "user_stack": [140335414200952, 140335414229666, 140335414249736, 140335414251909, 140335414253094, 140335414253914, 140335414160913, 140335164648419, 140335164572343, 140335164606022, 140335161856789, 94787888885894, 140335413200393]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474629648+07:00",
+      "pid": 1266318,
+      "comm": "sentry",
+      "data": {
+        "pid": 1266318,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": -12,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474632488+07:00",
+      "pid": 1227084,
+      "comm": "redis-server",
+      "data": {
+        "pid": 1227084,
+        "comm": "redis-server",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.474634297+07:00",
+      "pid": 3768401,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768401,
+        "comm": "keslOASEvent",
+        "kern_stack_id": -14,
+        "user_stack_id": -12,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484456387+07:00",
+      "pid": 3774667,
+      "comm": "kesl",
+      "data": {
+        "pid": 3774667,
+        "comm": "kesl",
+        "kern_stack_id": 9571,
+        "user_stack_id": -17,
+        "sample_count": 0,
+        "kern_stack": [1.844674407237555e+19, 1.8446744072375558e+19, 1.8446744072375562e+19, 1.8446744072375196e+19, 1.8446744072388129e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484563607+07:00",
+      "pid": 657410,
+      "comm": "sentry",
+      "data": {
+        "pid": 657410,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": -12,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484566837+07:00",
+      "pid": 3768428,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768428,
+        "comm": "keslOASEvent",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484568787+07:00",
+      "pid": 3768430,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 3768430,
+        "comm": "keslOASEvent",
+        "kern_stack_id": -12,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484570287+07:00",
+      "pid": 773636,
+      "comm": "snuba",
+      "data": {
+        "pid": 773636,
+        "comm": "snuba",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484686717+07:00",
+      "pid": 1223305,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1223305,
+        "comm": "obs-agent",
+        "kern_stack_id": -17,
+        "user_stack_id": 7347,
+        "sample_count": 0,
+        "user_stack": [4247566, 4888970, 4891645, 6207055, 6855589, 6862364, 6861396, 6872686, 6872191, 4788161]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484725227+07:00",
+      "pid": 1266318,
+      "comm": "sentry",
+      "data": {
+        "pid": 1266318,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 5484,
+        "sample_count": 0,
+        "user_stack": [140515482462334, 140515483849856]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484735467+07:00",
+      "pid": 3775664,
+      "comm": "keslFanEvent",
+      "data": {
+        "pid": 3775664,
+        "comm": "keslFanEvent",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.484736877+07:00",
+      "pid": 3768827,
+      "comm": "kesl",
+      "data": {
+        "pid": 3768827,
+        "comm": "kesl",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.485853137+07:00",
+      "pid": 1212610,
+      "comm": "sentry",
+      "data": {
+        "pid": 1212610,
+        "comm": "sentry",
+        "latency_us": 6927
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.488891827+07:00",
+      "pid": 1254069,
+      "comm": "keslOASEvent",
+      "data": {
+        "pid": 1254069,
+        "comm": "keslOASEvent",
+        "latency_us": 5049
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.490735347+07:00",
+      "pid": 3768314,
+      "comm": "keslFanPoll",
+      "data": {
+        "pid": 3768314,
+        "comm": "keslFanPoll",
+        "latency_us": 5296
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.493211076+07:00",
+      "pid": 3768355,
+      "comm": "kesl",
+      "data": {
+        "pid": 3768355,
+        "comm": "kesl",
+        "latency_us": 5341
+      }
+    },
+    {
+      "type": "runq_latency",
+      "timestamp": "2026-04-02T16:04:52.493874386+07:00",
+      "pid": 3774642,
+      "comm": "kesl",
+      "data": {
+        "pid": 3774642,
+        "comm": "kesl",
+        "latency_us": 5197
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.494556566+07:00",
+      "pid": 657410,
+      "comm": "sentry",
+      "data": {
+        "pid": 657410,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.494592306+07:00",
+      "pid": 960586,
+      "comm": "sentry",
+      "data": {
+        "pid": 960586,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 6430,
+        "sample_count": 0,
+        "user_stack": [140311553817818, 140311555204224]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.494616326+07:00",
+      "pid": 1217905,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1217905,
+        "comm": "obs-agent",
+        "kern_stack_id": -17,
+        "user_stack_id": -12,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.494721736+07:00",
+      "pid": 1223271,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1223271,
+        "comm": "obs-agent",
+        "kern_stack_id": -17,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.494727346+07:00",
+      "pid": 1227084,
+      "comm": "redis-server",
+      "data": {
+        "pid": 1227084,
+        "comm": "redis-server",
+        "kern_stack_id": 5671,
+        "user_stack_id": -17,
+        "sample_count": 0,
+        "kern_stack": [1.84467440723773e+19, 1.844674407237732e+19, 1.8446744072377321e+19, 1.844674407237733e+19, 1.8446744072376525e+19, 1.8446744072376525e+19, 1.8446744072376527e+19, 1.8446744072376529e+19, 1.8446744072378376e+19, 1.8446744072376515e+19, 1.8446744072378282e+19, 1.8446744072378284e+19, 1.844674407237742e+19, 1.8446744072377424e+19, 1.8446744072377426e+19, 1.8446744072642335e+19, 1.844674407237742e+19, 1.8446744072377422e+19, 1.844674407237743e+19, 1.844674407237743e+19, 1.8446744072373686e+19, 1.844674407238811e+19, 1.8446744072388346e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.494767876+07:00",
+      "pid": 1266318,
+      "comm": "sentry",
+      "data": {
+        "pid": 1266318,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 2171,
+        "sample_count": 0,
+        "user_stack": [140515482073481, 140515483799072]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.494785436+07:00",
+      "pid": 3774642,
+      "comm": "kesl",
+      "data": {
+        "pid": 3774642,
+        "comm": "kesl",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-04-02T16:04:52.494833706+07:00",
+      "pid": 1212610,
+      "comm": "sentry",
+      "data": {
+        "pid": 1212610,
+        "comm": "sentry",
+        "kern_stack_id": -14,
+        "user_stack_id": 6472,
+        "sample_count": 0,
+        "user_stack": [140311553559290, 140311555204224]
+      }
+    }
+  ]
+}

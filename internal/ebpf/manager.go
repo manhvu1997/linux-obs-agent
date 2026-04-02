@@ -14,6 +14,7 @@ import (
 
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/cpu_profile"
+	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/disk_write"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/io_latency"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/runqlat"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/tcp_retransmit"
@@ -28,6 +29,7 @@ const (
 	ModIOLatency     ModuleID = "io_latency"
 	ModRunQLat       ModuleID = "runqlat"
 	ModTCPRetransmit ModuleID = "tcp_retransmit"
+	ModDiskWrite     ModuleID = "disk_write"
 )
 
 // moduleState tracks the lifecycle of one eBPF module.
@@ -47,10 +49,11 @@ type Manager struct {
 	modules map[ModuleID]*moduleState
 
 	// Concrete loaders – created on first activation.
-	cpuLoader *cpu_profile.Loader
-	ioLoader  *io_latency.Loader
-	rqLoader  *runqlat.Loader
-	tcpLoader *tcp_retransmit.Loader
+	cpuLoader  *cpu_profile.Loader
+	ioLoader   *io_latency.Loader
+	rqLoader   *runqlat.Loader
+	tcpLoader  *tcp_retransmit.Loader
+	diskLoader *disk_write.Loader
 }
 
 func NewManager(cfg *config.EBPFConfig) *Manager {
@@ -186,6 +189,14 @@ func (m *Manager) startModule(ctx context.Context, id ModuleID) error {
 		m.tcpLoader = l
 		go m.fanIn(ctx, l.Events)
 
+	case ModDiskWrite:
+		l := disk_write.NewLoader()
+		if err := l.Start(ctx); err != nil {
+			return err
+		}
+		m.diskLoader = l
+		go m.fanIn(ctx, l.Events)
+
 	default:
 		return fmt.Errorf("unknown module: %s", id)
 	}
@@ -213,6 +224,11 @@ func (m *Manager) stopModule(id ModuleID) {
 		if m.tcpLoader != nil {
 			m.tcpLoader.Stop()
 			m.tcpLoader = nil
+		}
+	case ModDiskWrite:
+		if m.diskLoader != nil {
+			m.diskLoader.Stop()
+			m.diskLoader = nil
 		}
 	}
 }
@@ -245,4 +261,16 @@ func (m *Manager) CPUTopPIDs(n int) []model.CPUProfileEvent {
 		return nil
 	}
 	return l.TopPIDs(n)
+}
+
+// DiskTopWriters returns the top-n processes by bytes written from the
+// disk_write eBPF module (only populated when disk_write is active).
+func (m *Manager) DiskTopWriters(n int) []model.DiskWriteProcess {
+	m.mu.Lock()
+	l := m.diskLoader
+	m.mu.Unlock()
+	if l == nil {
+		return nil
+	}
+	return l.TopWriters(n)
 }
