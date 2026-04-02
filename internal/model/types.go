@@ -139,6 +139,7 @@ const (
 	EventIOLatency     EBPFEventType = "io_latency"
 	EventRunQLat       EBPFEventType = "runq_latency"
 	EventTCPRetransmit EBPFEventType = "tcp_retransmit"
+	EventTCPDrop       EBPFEventType = "tcp_drop"
 	EventDiskWrite     EBPFEventType = "disk_write"
 )
 
@@ -180,14 +181,58 @@ type RunQLatEvent struct {
 }
 
 // TCPRetransmitEvent is emitted for every TCP retransmit.
+// Enriched with RTT, congestion window, byte counters, queue depths,
+// cumulative per-flow retransmit count, and flow duration.
 type TCPRetransmitEvent struct {
+	// Connection identity
 	PID     uint32 `json:"pid"`
 	Comm    string `json:"comm"`
 	SrcIP   string `json:"src_ip"`
 	DstIP   string `json:"dst_ip"`
 	SrcPort uint16 `json:"src_port"`
 	DstPort uint16 `json:"dst_port"`
-	AF      uint16 `json:"af"` // 2=IPv4, 10=IPv6
+	AF      uint16 `json:"af"`      // 2=IPv4, 10=IPv6
+	TCPState string `json:"tcp_state"` // e.g. "ESTABLISHED", "CLOSE_WAIT"
+
+	// Human-readable summary
+	Flow string `json:"flow"` // "src:sport → dst:dport"
+
+	// RTT & congestion
+	RTTUS       uint32  `json:"rtt_us"`        // smoothed RTT in µs
+	RTTVarUS    uint32  `json:"rtt_var_us"`    // RTT variance in µs
+	SndCwnd     uint32  `json:"snd_cwnd"`      // congestion window (segments)
+	SndSsthresh uint32  `json:"snd_ssthresh"`  // slow-start threshold
+
+	// Byte counters (cumulative on this socket)
+	BytesSent     uint64 `json:"bytes_sent"`
+	BytesReceived uint64 `json:"bytes_received"`
+
+	// Socket queue depths
+	SendQueueBytes uint32 `json:"send_queue_bytes"` // sk_wmem_queued
+	RecvQueueBytes uint32 `json:"recv_queue_bytes"` // sk_backlog.rmem_alloc (kernel 6.x)
+	Backlog        uint32 `json:"backlog"`           // sk_backlog.len
+
+	// Per-flow context
+	RetransmitCount uint32  `json:"retransmit_count"` // cumulative for this flow
+	DurationMs      uint64  `json:"duration_ms"`      // ms since ESTABLISHED (0=unknown)
+	LossRate        float64 `json:"loss_rate_pct"`    // retransmit_count/bytes_sent*100 (approx)
+}
+
+// TCPDropEvent is emitted by the kfree_skb tracepoint for dropped IP packets.
+// drop_reason is 0 (unknown) on kernels < 5.17.
+// location is the raw kernel symbol address of the drop site.
+type TCPDropEvent struct {
+	PID        uint32 `json:"pid"`
+	Comm       string `json:"comm"`
+	SrcIP      string `json:"src_ip"`
+	DstIP      string `json:"dst_ip"`
+	SrcPort    uint16 `json:"src_port"`
+	DstPort    uint16 `json:"dst_port"`
+	AF         uint16 `json:"af"`
+	DropReason uint32 `json:"drop_reason"`        // raw enum skb_drop_reason value
+	DropName   string `json:"drop_reason_name"`   // human-readable name (best-effort)
+	Location   uint64 `json:"location"`           // kernel address of drop site
+	Flow       string `json:"flow"`
 }
 
 // ─── Wire Payload ─────────────────────────────────────────────────────────────
