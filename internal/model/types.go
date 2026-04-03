@@ -229,10 +229,11 @@ type TCPDropEvent struct {
 	SrcPort    uint16 `json:"src_port"`
 	DstPort    uint16 `json:"dst_port"`
 	AF         uint16 `json:"af"`
-	DropReason uint32 `json:"drop_reason"`        // raw enum skb_drop_reason value
-	DropName   string `json:"drop_reason_name"`   // human-readable name (best-effort)
-	Location   uint64 `json:"location"`           // kernel address of drop site
-	Flow       string `json:"flow"`
+	DropReason  uint32 `json:"drop_reason"`        // raw enum skb_drop_reason value
+	DropName    string `json:"drop_reason_name"`   // human-readable name (best-effort)
+	Location    uint64 `json:"location"`           // kernel address of drop site (raw)
+	LocationHex string `json:"location_hex"`       // e.g. "0xffffffff81234567" – grep in /proc/kallsyms
+	Flow        string `json:"flow"`
 }
 
 // ─── Wire Payload ─────────────────────────────────────────────────────────────

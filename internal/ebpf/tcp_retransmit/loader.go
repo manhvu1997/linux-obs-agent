@@ -2,7 +2,7 @@
 //
 // Three eBPF programs are loaded:
 //   - tp_btf/tcp_retransmit_skb  – enriched per-retransmit event
-//   - tp_btf/tcp_set_state       – per-flow ESTABLISHED timestamp tracking
+//   - fentry/tcp_set_state       – per-flow ESTABLISHED timestamp tracking
 //   - tp_btf/kfree_skb           – packet drop events (requires kernel >= 5.17
 //                                  for drop_reason; older kernels get reason=0)
 package tcp_retransmit
@@ -153,7 +153,8 @@ func (l *Loader) Start(ctx context.Context) error {
 	}
 	l.links = append(l.links, tp)
 
-	// ── tp_btf/tcp_set_state ──────────────────────────────────────────────
+	// ── fentry/tcp_set_state ─────────────────────────────────────────────
+	// tcp_set_state is a kernel function (not a tracepoint) – fentry required.
 	// Tracks ESTABLISHED timestamp for per-flow duration calculation.
 	ss, err := link.AttachTracing(link.TracingOptions{
 		Program: l.objs.HandleTcpSetState,
@@ -345,17 +346,18 @@ func buildDropEvent(raw *TcpRetransmitDropEvent) model.EBPFEvent {
 		PID:       raw.Pid,
 		Comm:      comm,
 		Data: model.TCPDropEvent{
-			PID:        raw.Pid,
-			Comm:       comm,
-			SrcIP:      srcIP,
-			DstIP:      dstIP,
-			SrcPort:    raw.Sport,
-			DstPort:    raw.Dport,
-			AF:         raw.Af,
-			DropReason: raw.DropReason,
-			DropName:   reasonName,
-			Location:   raw.Location,
-			Flow:       flow,
+			PID:         raw.Pid,
+			Comm:        comm,
+			SrcIP:       srcIP,
+			DstIP:       dstIP,
+			SrcPort:     raw.Sport,
+			DstPort:     raw.Dport,
+			AF:          raw.Af,
+			DropReason:  raw.DropReason,
+			DropName:    reasonName,
+			Location:    raw.Location,
+			LocationHex: fmt.Sprintf("0x%016x", raw.Location),
+			Flow:        flow,
 		},
 	}
 }

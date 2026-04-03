@@ -226,12 +226,14 @@ int handle_tcp_retransmit(u64 *ctx)
 
 /* ─── Program 2: connection state tracking ───────────────────────────────── */
 
-SEC("tp_btf/tcp_set_state")
-int handle_tcp_set_state(u64 *ctx)
+/*
+ * tcp_set_state is a kernel function, not a raw tracepoint, so we use
+ * fentry (kernel >= 5.5, BTF required) instead of tp_btf.
+ * BPF_PROG gives us typed args directly without the u64 *ctx dance.
+ */
+SEC("fentry/tcp_set_state")
+int BPF_PROG(handle_tcp_set_state, struct sock *sk, int newstate)
 {
-    struct sock *sk = (struct sock *)ctx[0];
-    int newstate    = (int)ctx[1];
-
     struct flow_key fk = {};
     fill_flow_key(&fk, sk);
 
@@ -251,16 +253,19 @@ int handle_tcp_set_state(u64 *ctx)
 
 /* ─── Program 3: packet drop events ─────────────────────────────────────── */
 
+/*
+ * Use BPF_PROG with typed arguments so the verifier uses BTF-typed access
+ * to enum skb_drop_reason (ctx[2]).  The raw u64 *ctx approach can miss the
+ * enum value on some verifier versions.  Pre-5.17 kernels lack the third
+ * argument entirely; the loader detects the load failure and disables drop
+ * event collection gracefully.
+ */
 SEC("tp_btf/kfree_skb")
-int handle_kfree_skb(u64 *ctx)
+int BPF_PROG(handle_kfree_skb, struct sk_buff *skb, void *location,
+             enum skb_drop_reason reason)
 {
-    struct sk_buff *skb = (struct sk_buff *)ctx[0];
-    __u64 location      = ctx[1];
-    /* drop_reason (ctx[2]) was added in kernel 5.17.
-     * We read it unconditionally; the BPF verifier on pre-5.17 kernels
-     * will reject this program at load time – the loader falls back
-     * gracefully and logs a warning. */
-    __u32 drop_reason = (__u32)ctx[2];
+    __u32 drop_reason = (__u32)reason;
+    __u64 loc         = (__u64)(unsigned long)location;
 
     /* Filter: only track IP (TCP/UDP) drops. */
     __u16 protocol = BPF_CORE_READ(skb, protocol);
@@ -274,33 +279,78 @@ int handle_kfree_skb(u64 *ctx)
 
     ev->pid         = bpf_get_current_pid_tgid() & 0xffffffff;
     ev->drop_reason = drop_reason;
-    ev->location    = location;
+    ev->location    = loc;
     ev->sport       = 0;
     ev->dport       = 0;
+    __builtin_memset(ev->saddr, 0, 16);
+    __builtin_memset(ev->daddr, 0, 16);
 
-    /* Extract src/dst IP from the network header. */
-    void    *head   = BPF_CORE_READ(skb, head);
-    __u16    nh_off = BPF_CORE_READ(skb, network_header);
+    /*
+     * Strategy 1: read addresses from the socket attached to the skb.
+     * skb->sk is set for locally-originated and locally-destined packets and
+     * gives canonical connection endpoints regardless of network-header state.
+     */
+    struct sock *sk = BPF_CORE_READ(skb, sk);
+    if (sk) {
+        __u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
+        ev->af    = family;
+        /* skc_num = local port (host byte order); skc_dport = remote (network). */
+        ev->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+        ev->dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+        if (family == AF_INET) {
+            __u32 saddr4 = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+            __u32 daddr4 = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+            __builtin_memcpy(ev->saddr, &saddr4, 4);
+            __builtin_memcpy(ev->daddr, &daddr4, 4);
+        } else if (family == AF_INET6) {
+            BPF_CORE_READ_INTO(ev->saddr, sk,
+                __sk_common.skc_v6_rcv_saddr.in6_u.u6_addr8);
+            BPF_CORE_READ_INTO(ev->daddr, sk,
+                __sk_common.skc_v6_daddr.in6_u.u6_addr8);
+        }
+        bpf_get_current_comm(&ev->comm, sizeof(ev->comm));
+        bpf_ringbuf_submit(ev, 0);
+        return 0;
+    }
+
+    /*
+     * Strategy 2: parse network header from packet buffer.
+     * Used for forwarded / pre-socket drops where skb->sk is NULL.
+     * Guard against network_header == 0 (not yet populated at drop point).
+     */
+    __u16 nh_off = BPF_CORE_READ(skb, network_header);
+    if (nh_off == 0) {
+        bpf_ringbuf_discard(ev, 0);
+        return 0;
+    }
+
+    void *head = BPF_CORE_READ(skb, head);
 
     if (protocol == ETH_P_IP_NBO) {
         ev->af = AF_INET;
         struct iphdr iph;
-        bpf_probe_read_kernel(&iph, sizeof(iph), head + nh_off);
+        if (bpf_probe_read_kernel(&iph, sizeof(iph), head + nh_off) < 0) {
+            bpf_ringbuf_discard(ev, 0);
+            return 0;
+        }
         __builtin_memcpy(ev->saddr, &iph.saddr, 4);
         __builtin_memcpy(ev->daddr, &iph.daddr, 4);
 
-        /* Best-effort TCP/UDP port extraction (ihl*4 = IP header length). */
+        /* Best-effort TCP/UDP port extraction. */
         if (iph.protocol == 6 || iph.protocol == 17) {
-            __u32 th_off = nh_off + (iph.ihl * 4);
+            __u32 th_off = nh_off + ((__u32)iph.ihl * 4);
             struct tcphdr th;
-            bpf_probe_read_kernel(&th, 4, head + th_off); /* only first 4 B */
+            bpf_probe_read_kernel(&th, 4, head + th_off); /* first 4 B only */
             ev->sport = bpf_ntohs(th.source);
             ev->dport = bpf_ntohs(th.dest);
         }
     } else {
         ev->af = AF_INET6;
         struct ipv6hdr ip6h;
-        bpf_probe_read_kernel(&ip6h, sizeof(ip6h), head + nh_off);
+        if (bpf_probe_read_kernel(&ip6h, sizeof(ip6h), head + nh_off) < 0) {
+            bpf_ringbuf_discard(ev, 0);
+            return 0;
+        }
         __builtin_memcpy(ev->saddr, &ip6h.saddr, 16);
         __builtin_memcpy(ev->daddr, &ip6h.daddr, 16);
 

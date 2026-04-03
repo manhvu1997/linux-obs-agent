@@ -23,9 +23,9 @@ ebpf:
   # Minimum time before the same module can be re-triggered.
   cool_down: 120s
   # IO latency events below this threshold are suppressed (reduces noise).
-  slow_io_threshold_us: 1000    # 1 ms
+  slow_io_threshold_us: 10000    # 1 ms
   # Run-queue latency events below this threshold are suppressed.
-  runqlat_threshold_us: 5000    # 5 ms
+  runqlat_threshold_us: 50000    # 5 ms
   # CPU profiling sample frequency (perf_event Hz).
   # Lower = less overhead.  99 Hz ≈ 0.1% CPU on a modern server.
   sample_hz: 99

@@ -1,5 +1,5 @@
 // Package io_latency provides on-demand block IO latency tracing via eBPF.
-// It attaches to tracepoints block:block_rq_issue and block:block_rq_complete,
+// It attaches fentry hooks on blk_mq_start_request / blk_mq_end_request,
 // calculates per-request latency in-kernel, and emits events for slow IOs.
 package io_latency
 
@@ -40,13 +40,18 @@ func (l *Loader) Start(ctx context.Context) error {
 		return fmt.Errorf("removing memlock: %w", err)
 	}
 
-	if err := LoadIoLatencyObjects(&l.objs, nil); err != nil {
-		return fmt.Errorf("loading eBPF objects: %w", err)
+	// Load the CollectionSpec so we can rewrite the const volatile variable
+	// BEFORE the programs are loaded.  Once loaded, .rodata becomes read-only
+	// and Set() returns "resource is read-only".
+	spec, err := LoadIoLatency()
+	if err != nil {
+		return fmt.Errorf("loading eBPF spec: %w", err)
 	}
-
-	// Set global variable: slow threshold.
-	if err := l.objs.SlowThresholdUs.Set(l.thresholdUs); err != nil {
+	if err := spec.Variables["slow_threshold_us"].Set(l.thresholdUs); err != nil {
 		slog.Warn("io_latency: could not set slow_threshold_us", "err", err)
+	}
+	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
+		return fmt.Errorf("loading eBPF objects: %w", err)
 	}
 
 	rd, err := ringbuf.NewReader(l.objs.Events)
@@ -56,20 +61,24 @@ func (l *Loader) Start(ctx context.Context) error {
 	}
 	l.rd = rd
 
-	// Attach tracepoints.
-	issueTP, err := link.Tracepoint("block", "block_rq_issue", l.objs.TraceRqIssue, nil)
+	// Attach fentry hooks (BPF_PROG_TYPE_TRACING / fentry).
+	issueLink, err := link.AttachTracing(link.TracingOptions{
+		Program: l.objs.TraceRqIssue,
+	})
 	if err != nil {
 		l.cleanup()
-		return fmt.Errorf("attaching block_rq_issue: %w", err)
+		return fmt.Errorf("attaching blk_mq_start_request: %w", err)
 	}
-	l.links = append(l.links, issueTP)
+	l.links = append(l.links, issueLink)
 
-	completeTP, err := link.Tracepoint("block", "block_rq_complete", l.objs.TraceRqComplete, nil)
+	completeLink, err := link.AttachTracing(link.TracingOptions{
+		Program: l.objs.TraceRqComplete,
+	})
 	if err != nil {
 		l.cleanup()
-		return fmt.Errorf("attaching block_rq_complete: %w", err)
+		return fmt.Errorf("attaching blk_mq_end_request: %w", err)
 	}
-	l.links = append(l.links, completeTP)
+	l.links = append(l.links, completeLink)
 
 	slog.Info("io_latency: started", "threshold_us", l.thresholdUs)
 	go l.consume(ctx)

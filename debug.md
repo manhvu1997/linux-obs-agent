@@ -249,6 +249,95 @@ var raw IoLatencyIoLatEvent  // was: IoLatencyIoEvent
 
 ---
 
+## 13. `tcp_drop` events: `drop_reason` always 0 / `location` corrupted
+
+**Stage:** Runtime – `kfree_skb` event data quality
+**Symptoms:**
+```json
+{ "drop_reason": 0, "drop_reason_name": "NOT_SPECIFIED", "location": 1.844674407183263e+19 }
+```
+**Root cause:** The handler used `int handle_kfree_skb(u64 *ctx)` and read
+`ctx[2]` for `enum skb_drop_reason`.  With the raw `u64 *ctx` pattern the BPF
+verifier may not validate the access against the tracepoint's BTF prototype,
+resulting in the wrong value being loaded.  The `location` (ctx[1]) similarly
+returned a garbage/max-uint64 value.
+**Fix (`tcp_retransmit.bpf.c`):**
+Changed the handler to use `BPF_PROG` with typed arguments, which forces
+BTF-typed access and correct enum extraction:
+```c
+SEC("tp_btf/kfree_skb")
+int BPF_PROG(handle_kfree_skb, struct sk_buff *skb, void *location,
+             enum skb_drop_reason reason)
+{
+    __u32 drop_reason = (__u32)reason;
+    __u64 loc         = (__u64)(unsigned long)location;
+    ...
+}
+```
+Also added `location_hex` field (`0x%016x` formatted) in `TCPDropEvent` so
+the address can be resolved with `grep <hex> /proc/kallsyms`.
+
+---
+
+## 14. `tcp_drop` IP extraction: improved reliability for sk-attached packets
+
+**Stage:** Runtime – `kfree_skb` event IP addresses
+**Background:** For locally-originated / locally-destined packets (e.g. loopback
+envoy→statsd), both src and dst show the loopback address (127.0.0.1).  This is
+*correct* — but reading IPs solely from the packet's network header is fragile
+when `skb->network_header` has not been set at the drop point (returns 0 or
+invalid offset, causing reads from wrong buffer position).
+**Fix (`tcp_retransmit.bpf.c`):**
+Two-strategy approach:
+1. **If `skb->sk` is non-NULL**: read IPs and ports directly from the socket
+   (`skc_rcv_saddr`/`skc_daddr`, `skc_num`/`skc_dport`).  This is canonical
+   and works regardless of the packet's header state.
+2. **Fallback**: parse `skb->head + skb->network_header` as before, but now
+   with an explicit `nh_off == 0` guard and `bpf_probe_read_kernel` return-code
+   check that discards the event on read failure.
+
+---
+
+## 15. `bad CO-RE relocation: invalid func unknown#N` in `trace_rq_complete`
+
+**Stage:** Runtime – `io_latency` module load failure
+**Error:**
+```
+trigger: activate failed  module=io_latency
+err=starting module io_latency: loading eBPF objects:
+  field TraceRqComplete: program trace_rq_complete: load program:
+  bad CO-RE relocation: invalid func unknown#195896080
+```
+**Root cause:** `trace_rq_complete` was declared as:
+```c
+SEC("tracepoint/block/block_rq_complete")
+int trace_rq_complete(struct trace_event_raw_block_rq_completion *ctx)
+```
+CO-RE relocation needs to find `struct trace_event_raw_block_rq_completion` in
+the **running** kernel's BTF.  This struct name is auto-generated from the
+`DECLARE_EVENT_CLASS(block_rq_completion, ...)` macro.  Before kernel 5.15 the
+`block_rq_complete` tracepoint was defined with a plain `TRACE_EVENT` which
+produces `struct trace_event_raw_block_rq_complete` (no `_ion` suffix) – a
+completely different BTF type.  When vmlinux.h came from a 5.15+ kernel but the
+agent runs on an older (or differently-patched) kernel, CO-RE fails with
+`unknown#N`.
+
+**Fix (`io_latency.bpf.c` + `loader.go`):**
+Replaced the raw tracepoint programs with `fentry` hooks on stable kernel
+functions that have been present since blk-mq became the default:
+- `SEC("fentry/blk_mq_start_request")` — fires when request enters driver queue
+- `SEC("fentry/blk_mq_end_request")` — fires on hardware completion
+
+Keyed the `io_start` map by **request pointer** (cast to `__u64`) instead of
+`{dev, sector}` — simpler and collision-free for in-flight requests.
+
+Device number extraction uses CO-RE `bpf_core_field_exists(rq->part)` to
+branch between kernel 5.12+ (`rq->part->bd_dev`) and older (`rq->rq_disk->major/first_minor`).
+
+Loader changed from `link.Tracepoint(...)` to `link.AttachTracing(...)`.
+
+---
+
 ## Summary table
 
 | # | File | Error | Fix |
@@ -265,3 +354,6 @@ var raw IoLatencyIoLatEvent  // was: IoLatencyIoEvent
 | 10 | cpu_profile/loader.go | `l.links undefined` | Update log to `l.perfFDs` |
 | 11 | tcp_retransmit/loader.go | `[]uint8` vs `[]int8` in Saddr/Daddr | Use `uint8` slice directly as `net.IP` |
 | 12 | io_latency/loader.go | `undefined: IoLatencyIoEvent` | Update to `IoLatencyIoLatEvent` |
+| 13 | tcp_retransmit.bpf.c | `drop_reason=0`, corrupted `location` | Switch `handle_kfree_skb` to `BPF_PROG` with typed args |
+| 14 | tcp_retransmit.bpf.c | IP extraction fragile when `network_header=0` | Use `skb->sk` first; fallback with `nh_off==0` guard |
+| 15 | io_latency.bpf.c + loader.go | `bad CO-RE relocation: invalid func unknown#N` | Replace `tracepoint/block/*` with `fentry/blk_mq_start_request` + `fentry/blk_mq_end_request` |
