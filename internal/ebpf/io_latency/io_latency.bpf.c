@@ -120,10 +120,13 @@ int BPF_PROG(trace_rq_issue, struct request *rq)
 {
     __u64 key = (__u64)(unsigned long)rq;
 
-    struct io_start_val val = {
-        .ts_ns = bpf_ktime_get_ns(),
-        .pid   = bpf_get_current_pid_tgid() & 0xffffffff,
-    };
+    /* Zero the entire struct (including any tail padding) so the BPF verifier
+     * on older kernels (5.15) does not reject the map_update_elem call with
+     * "invalid indirect read from stack" for uninitialised padding bytes. */
+    struct io_start_val val;
+    __builtin_memset(&val, 0, sizeof(val));
+    val.ts_ns = bpf_ktime_get_ns();
+    val.pid   = bpf_get_current_pid_tgid() & 0xffffffff;
     bpf_get_current_comm(&val.comm, sizeof(val.comm));
     bpf_map_update_elem(&io_start, &key, &val, BPF_ANY);
     return 0;
