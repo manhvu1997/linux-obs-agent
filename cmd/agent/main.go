@@ -35,6 +35,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
 	"github.com/manhvu1997/linux-obs-agent/internal/exporter"
+	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/trigger"
@@ -105,6 +106,18 @@ func main() {
 	})
 	go diskScanner.Run(ctx)
 
+	// ── Fsync tracer (always-on, bounded LRU map) ───────────────────────────
+	// Runs independently of the trigger engine.  The analyzer polls the
+	// in-kernel LRU map every cfg.Fsync.PollInterval (default 5 s) and
+	// publishes a FsyncAnalysis snapshot to GET /api/diagnose whenever the
+	// system is under pressure (CPU > 85 % OR Mem > 85 %).
+	fsyncAnalyzer := fsync.NewAnalyzer(&cfg.Fsync, coll)
+	go func() {
+		if err := fsyncAnalyzer.Start(ctx); err != nil {
+			slog.Error("fsync analyzer error", "err", err)
+		}
+	}()
+
 	// ── Prometheus exporter ─────────────────────────────────────────────────
 	var promExp *exporter.PrometheusExporter
 	if cfg.Agent.MetricsAddr != "" {
@@ -119,6 +132,7 @@ func main() {
 	if promExp != nil {
 		promExp.RegisterDiagnosticSources(ebpfMgr, insp, httpExp)
 		promExp.RegisterDiskScanner(diskScanner)
+		promExp.RegisterFsyncAnalyzer(fsyncAnalyzer)
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)

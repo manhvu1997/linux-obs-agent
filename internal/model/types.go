@@ -283,6 +283,59 @@ type DiagnoseReport struct {
 	// DiskReport contains directory-growth data and top disk writers.
 	// Populated when the disk scanner is enabled.
 	DiskReport *DiskDiagnoseReport `json:"disk_report,omitempty"`
+
+	// FsyncReport is the latest fsync analysis snapshot.
+	// Only populated when the system was under pressure (CPU > threshold OR
+	// Memory > threshold) at the time of the last poll cycle.
+	// Top offenders are sorted by total fsync call count (descending) and
+	// enriched with cmdline, cgroup, and application-type classification.
+	FsyncReport *FsyncAnalysis `json:"fsync_report,omitempty"`
+}
+
+// ─── Fsync Tracer ─────────────────────────────────────────────────────────────
+
+// EventFsync is the EBPFEventType for fsync slow-event outliers.
+const EventFsync EBPFEventType = "fsync"
+
+// FsyncSlowEvent is emitted when a single fsync/fdatasync/sync_file_range call
+// exceeds the configured slow threshold.  This is the ringbuf path (outliers
+// only).  Bulk statistics come from FsyncAnalysis via map polling.
+type FsyncSlowEvent struct {
+	PID         uint32 `json:"pid"`
+	TID         uint32 `json:"tid"`
+	Comm        string `json:"comm"`
+	LatencyUs   uint64 `json:"latency_us"`
+	SyscallName string `json:"syscall"` // "fsync" | "fdatasync" | "sync_file_range"
+}
+
+// FsyncOffender is one PID's aggregated fsync statistics, enriched with
+// /proc metadata by the userspace analyzer.
+type FsyncOffender struct {
+	PID          uint32  `json:"pid"`
+	Comm         string  `json:"comm"`
+	Cmdline      string  `json:"cmdline,omitempty"`
+	CgroupPath   string  `json:"cgroup_path,omitempty"`
+	FsyncCalls   uint64  `json:"fsync_calls"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+	MaxLatencyMs float64 `json:"max_latency_ms"`
+	// AppType is set when the process matches a known high-fsync workload.
+	// Possible values: "database", "log_agent", "antivirus", ""
+	AppType string `json:"app_type,omitempty"`
+}
+
+// FsyncSystemInfo holds the system pressure snapshot at analysis time.
+type FsyncSystemInfo struct {
+	CPUPercent float64 `json:"cpu_percent"`
+	MemPercent float64 `json:"mem_percent"`
+}
+
+// FsyncAnalysis is the full fsync diagnostic report POSTed to /api/diagnose
+// when CPU > 85% OR Memory > 85%.
+type FsyncAnalysis struct {
+	Type         string          `json:"type"` // always "fsync_analysis"
+	Timestamp    time.Time       `json:"timestamp"`
+	System       FsyncSystemInfo `json:"system"`
+	TopOffenders []FsyncOffender `json:"top_offenders"`
 }
 
 // ─── Disk Scanner ─────────────────────────────────────────────────────────────

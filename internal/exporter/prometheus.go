@@ -21,6 +21,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
 	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
+	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 )
@@ -32,10 +33,11 @@ type PrometheusExporter struct {
 	hostname string
 
 	// Optional diagnostic sources – set via RegisterDiagnosticSources.
-	mgr         *ebpfmgr.Manager
-	insp        *process.Inspector
-	httpExp     *Exporter
-	diskScanner *diskscanner.Scanner
+	mgr          *ebpfmgr.Manager
+	insp         *process.Inspector
+	httpExp      *Exporter
+	diskScanner  *diskscanner.Scanner
+	fsyncAnalyzer *fsync.Analyzer
 
 	// CPU
 	cpuUsage     prometheus.Gauge
@@ -137,6 +139,12 @@ func (p *PrometheusExporter) RegisterDiskScanner(s *diskscanner.Scanner) {
 	p.diskScanner = s
 }
 
+// RegisterFsyncAnalyzer wires the fsync analyzer so /api/diagnose includes
+// the latest FsyncAnalysis snapshot (populated only under system pressure).
+func (p *PrometheusExporter) RegisterFsyncAnalyzer(a *fsync.Analyzer) {
+	p.fsyncAnalyzer = a
+}
+
 // RecordEBPFEvent increments the per-module event counter.
 func (p *PrometheusExporter) RecordEBPFEvent(ev model.EBPFEvent) {
 	p.ebpfEventsTotal.WithLabelValues(string(ev.Type)).Inc()
@@ -225,6 +233,13 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 			diskReport.TopWriters = p.mgr.DiskTopWriters(topPIDsN)
 		}
 		report.DiskReport = diskReport
+	}
+
+	// Fsync analysis: latest high-pressure snapshot from the always-on tracer.
+	// Only non-nil when the system was under CPU/mem pressure during a recent
+	// poll cycle (CPU > cfg.CPUThreshold OR Mem > cfg.MemThreshold).
+	if p.fsyncAnalyzer != nil {
+		report.FsyncReport = p.fsyncAnalyzer.Latest()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

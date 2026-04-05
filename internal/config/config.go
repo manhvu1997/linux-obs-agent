@@ -19,6 +19,7 @@ type Config struct {
 	Exporter ExporterConfig `yaml:"exporter"`
 	Process  ProcessConfig  `yaml:"process"`
 	DiskScan DiskScanConfig `yaml:"disk_scan"`
+	Fsync    FsyncConfig    `yaml:"fsync"`
 }
 
 type AgentConfig struct {
@@ -93,6 +94,28 @@ type ProcessConfig struct {
 	IncludeIO bool `yaml:"include_io"`
 }
 
+// FsyncConfig controls the eBPF fsync latency tracer and its analyzer.
+// The analyzer continuously polls the in-kernel LRU map and makes the latest
+// FsyncAnalysis available to GET /api/diagnose.
+type FsyncConfig struct {
+	// Enabled is the master switch for the fsync tracer.
+	Enabled bool `yaml:"enabled"`
+	// SlowThresholdUs: emit a ringbuf outlier event only when a single fsync
+	// call exceeds this latency (microseconds).  Default 5 000 µs = 5 ms.
+	// Normal calls update only the in-kernel LRU map (no per-event wakeup).
+	SlowThresholdUs uint64 `yaml:"slow_threshold_us"`
+	// PollInterval: how often the analyzer batch-reads the in-kernel LRU map.
+	PollInterval time.Duration `yaml:"poll_interval"`
+	// TopN: how many top offenders to include in FsyncAnalysis.
+	TopN int `yaml:"top_n"`
+	// StaleSeconds: ignore LRU entries whose last_seen_ts is older than this.
+	StaleSeconds int `yaml:"stale_seconds"`
+	// CPUThreshold: refresh the analysis snapshot when CPU usage exceeds this.
+	CPUThreshold float64 `yaml:"cpu_threshold"`
+	// MemThreshold: refresh the analysis snapshot when memory usage exceeds this.
+	MemThreshold float64 `yaml:"mem_threshold"`
+}
+
 // DiskScanConfig controls the directory-size scanner and growth detector.
 type DiskScanConfig struct {
 	// Enabled is the master switch for the disk scanner.
@@ -160,6 +183,15 @@ func Defaults() *Config {
 			GrowthThresholdPct: 20.0,
 			ScanInterval:       10 * time.Minute,
 			SkipNFS:            true,
+		},
+		Fsync: FsyncConfig{
+			Enabled:         true,
+			SlowThresholdUs: 5000,            // 5 ms – only outliers hit the ringbuf
+			PollInterval:    5 * time.Second, // poll in-kernel LRU map every 5 s
+			TopN:            20,
+			StaleSeconds:    60,
+			CPUThreshold:    85.0,
+			MemThreshold:    85.0,
 		},
 	}
 }

@@ -12,14 +12,15 @@
 3. [Module Reference](#3-module-reference)
 4. [eBPF Programs](#4-ebpf-programs)
 5. [Trigger Engine](#5-trigger-engine)
-6. [Data Flow](#6-data-flow)
-7. [Build Pipeline](#7-build-pipeline)
-8. [Installation & Running](#8-installation--running)
-9. [Kubernetes Deployment](#9-kubernetes-deployment)
-10. [Security & Capabilities](#10-security--capabilities)
-11. [Prometheus Metrics](#11-prometheus-metrics)
-12. [Performance Budget](#12-performance-budget)
-13. [Extending the Agent](#13-extending-the-agent)
+6. [Fsync Tracer](#6-fsync-tracer)
+7. [Data Flow](#7-data-flow)
+8. [Build Pipeline](#8-build-pipeline)
+9. [Installation & Running](#9-installation--running)
+10. [Kubernetes Deployment](#10-kubernetes-deployment)
+11. [Security & Capabilities](#11-security--capabilities)
+12. [Prometheus Metrics](#12-prometheus-metrics)
+13. [Performance Budget](#13-performance-budget)
+14. [Extending the Agent](#14-extending-the-agent)
 
 ---
 
@@ -32,41 +33,41 @@
 │  ┌─────────────────────┐   5s poll   ┌────────────────────────────────────┐ │
 │  │  Collector          │ ──────────► │  NodeMetrics channel (buffered 4)  │ │
 │  │  /proc/stat         │             └────────────────────────────────────┘ │
-│  │  /proc/meminfo      │                          │                         │
-│  │  /proc/diskstats    │                          ▼                         │
-│  │  /proc/net/dev      │             ┌────────────────────────────────────┐ │
-│  │  /proc/loadavg      │             │    Trigger Engine  (10s eval)      │ │
-│  └─────────────────────┘             │  CPU>85% → fire cpu_profile        │ │
-│                                      │  IOWait>20% → fire io_latency      │ │
-│  ┌─────────────────────┐             │  load/cpu>1.5 → fire runqlat       │ │
-│  │  Process Inspector  │             │  net_err>100 → fire tcp_retransmit │ │
-│  │  /proc/[pid]/stat   │             └────────────────────────────────────┘ │
-│  │  /proc/[pid]/status │                          │                         │
-│  │  /proc/[pid]/io     │                          ▼                         │
-│  │  (top-20 by CPU/RSS)│             ┌────────────────────────────────────┐ │
-│  └─────────────────────┘             │         eBPF Manager               │ │
-│                                      │  ┌──────────┐  ┌────────────────┐  │ │
-│  ┌─────────────────────┐             │  │cpu_profile│  │  io_latency    │  │ │
-│  │  Prometheus Exporter│ ◄── pull ── │  │(perf_event│  │(tracepoint/blk)│  │ │
-│  │  :9200/metrics      │             │  │ sampling) │  └────────────────┘  │ │
-│  └─────────────────────┘             │  └──────────┘  ┌────────────────┐  │ │
-│                                      │  ┌──────────┐  │ tcp_retransmit │  │ │
-│  ┌─────────────────────┐             │  │ runqlat  │  │ (tp_btf/tcp)   │  │ │
-│  │  HTTP Exporter      │ ──► push ── │  │(tp_btf/  │  └────────────────┘  │ │
-│  │  (batch+gzip)       │             │  │ sched_*) │                       │ │
-│  └─────────────────────┘             │  └──────────┘                       │ │
-│                                      │   All INACTIVE until triggered       │ │
-└──────────────────────────────────────└────────────────────────────────────┘─┘
-                                                      │
-                                              Ring Buffer / Map
-                                                      │
-                                              Linux Kernel
-                                         ┌────────────────────┐
-                                         │  perf_event (CPU)  │
-                                         │  block tracepoints │
-                                         │  sched tracepoints │
-                                         │  tcp tracepoints   │
-                                         └────────────────────┘
+│  │  /proc/meminfo      │                     │              │               │
+│  │  /proc/diskstats    │                     ▼              ▼               │
+│  │  /proc/net/dev      │    ┌──────────────────┐  ┌──────────────────────┐ │
+│  │  /proc/loadavg      │    │  Trigger Engine  │  │  Fsync Analyzer      │ │
+│  └─────────────────────┘    │  (10s eval)      │  │  (always-on, 5s poll)│ │
+│                             │  CPU>85% → ...   │  │  LRU map aggregation │ │
+│  ┌─────────────────────┐    │  IOWait>20% → ...│  │  /proc enrichment    │ │
+│  │  Process Inspector  │    └────────┬─────────┘  │  app classification  │ │
+│  │  /proc/[pid]/stat   │             │             └──────────┬───────────┘ │
+│  │  /proc/[pid]/status │             ▼                        │             │
+│  │  /proc/[pid]/io     │    ┌────────────────────────────┐   │ CPU>85%     │
+│  │  (top-20 by CPU/RSS)│    │       eBPF Manager         │   │ OR Mem>85%  │
+│  └─────────────────────┘    │  ┌──────────┐ ┌─────────┐  │   ▼             │
+│                             │  │cpu_profile│ │io_latency│  │ ┌───────────┐ │
+│  ┌─────────────────────┐    │  └──────────┘ └─────────┘  │ │FsyncAnalysis│ │
+│  │  Prometheus Exporter│◄───│  ┌──────────┐ ┌─────────┐  │ │cached in   │ │
+│  │  :9200/metrics      │    │  │ runqlat  │ │tcp_retr.│  │ │  memory    │ │
+│  │  GET /api/diagnose  │◄───┘  └──────────┘ └─────────┘  │ └─────┬─────┘ │
+│  └─────────────────────┘    │  All INACTIVE until triggered│       │       │
+│                             └────────────────────────────┘ │       │       │
+│  ┌─────────────────────┐                                    └───────┘       │
+│  │  HTTP Exporter      │ ──► push ── (batch+gzip Snapshot)                  │
+│  └─────────────────────┘                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+                         │                          │
+               Ring Buffer / Map             kprobe/kretprobe
+                         │                          │
+                  Linux Kernel               Linux Kernel
+             ┌────────────────────┐    ┌─────────────────────────┐
+             │  perf_event (CPU)  │    │  __x64_sys_fsync        │
+             │  block tracepoints │    │  __x64_sys_fdatasync    │
+             │  sched tracepoints │    │  __x64_sys_sync_file_   │
+             │  tcp tracepoints   │    │    range                │
+             └────────────────────┘    │  LRU_HASH[pid] → stats  │
+                                       └─────────────────────────┘
 ```
 
 ### Key Design Decisions
@@ -78,6 +79,7 @@
 | **Ring buffer for events** | BPF_MAP_TYPE_RINGBUF (kernel ≥5.8) has lower overhead than perf_event_array; no per-CPU buffers |
 | **CO-RE (BTF)** | One binary runs on any kernel ≥5.4 with BTF enabled; no per-kernel compilation |
 | **No CGO** | Fully static binary, trivial to ship as a scratch/distroless container |
+| **Fsync LRU aggregation** | In-kernel BPF_MAP_TYPE_LRU_HASH aggregates per-PID stats; userspace polls once every 5 s instead of once per syscall |
 
 ---
 
@@ -114,20 +116,27 @@ linux-obs-agent/
 │   │   │   ├── runqlat.bpf.c    ← eBPF C: sched_wakeup → sched_switch delta
 │   │   │   ├── gen.go
 │   │   │   └── loader.go
-│   │   └── tcp_retransmit/
-│   │       ├── tcp_retransmit.bpf.c ← eBPF C: tp_btf/tcp_retransmit_skb
+│   │   ├── tcp_retransmit/
+│   │   │   ├── tcp_retransmit.bpf.c ← eBPF C: tp_btf/tcp_retransmit_skb
+│   │   │   ├── gen.go
+│   │   │   └── loader.go
+│   │   └── fsync/               ← NEW: always-on fsync latency tracer
+│   │       ├── fsync.bpf.c      ← eBPF C: kprobe/kretprobe + LRU_HASH aggregation
 │   │       ├── gen.go
-│   │       └── loader.go
+│   │       └── loader.go        ← Go: attach kprobes, TopOffenders() map poll
 │   │
 │   ├── trigger/
 │   │   └── engine.go            ← threshold evaluator → calls ebpf.Manager.Activate
+│   │
+│   ├── fsync/                   ← NEW: userspace fsync analysis loop
+│   │   └── analyzer.go          ← polls LRU map, enriches PIDs, publishes FsyncAnalysis
 │   │
 │   ├── process/
 │   │   └── inspector.go         ← /proc/[pid] scanner, top-N CPU/RSS, K8s metadata
 │   │
 │   └── exporter/
 │       ├── exporter.go          ← HTTP batch+gzip exporter with retry
-│       └── prometheus.go        ← :9200/metrics Prometheus endpoint
+│       └── prometheus.go        ← :9200/metrics + GET /api/diagnose (now incl. fsync)
 │
 ├── deploy/
 │   ├── Dockerfile               ← multi-stage: clang builder + distroless runtime
@@ -160,6 +169,9 @@ Stateless evaluator that runs every `trigger.eval_interval`. Reads the latest `N
 
 ### `internal/process`
 Scans all `/proc/[pid]` directories every `process.scan_interval`. Uses a two-sample delta for CPU% and IO rates. Container/K8s metadata is extracted from the cgroup path (works for cgroupv1 and cgroupv2) and optionally from `/proc/[pid]/environ`.
+
+### `internal/fsync`
+Always-on fsync analysis loop. `Analyzer.Start()` loads the eBPF module at agent startup and runs a `time.Ticker` every `fsync.poll_interval` (default 5 s). On each tick it batch-reads the in-kernel LRU map, enriches each PID entry with `/proc/<pid>/cmdline` and cgroup path, classifies known workloads (databases, log agents, antivirus), and atomically stores the result as a `*model.FsyncAnalysis`. The snapshot is only published when the system is under pressure (`CPU > cpu_threshold OR Mem > mem_threshold`), so `GET /api/diagnose` always reflects the most-recent high-pressure picture.
 
 ### `internal/exporter`
 Two export paths:
@@ -257,6 +269,73 @@ tcp_retransmit_skb(sock *sk, skb *skb)
 
 **IPv4 and IPv6**: The same program handles both by checking `skc_family` and reading the appropriate address union.
 
+### 4.5 Fsync Tracer (`fsync.bpf.c`)
+
+**Mechanism**: kprobe/kretprobe pairs on three syscall entry points (kernel ≥ 4.x, no BTF required)
+
+```
+kprobe/__x64_sys_fsync          kprobe/__x64_sys_fdatasync      kprobe/__x64_sys_sync_file_range
+    │                               │                               │
+    └───────────────────────────────┴───────────────────────────────┘
+                                    │
+                           record_entry():
+                           fsync_start[tid] = bpf_ktime_get_ns()
+                                    │
+                          [syscall executes in kernel]
+                                    │
+kretprobe/__x64_sys_fsync  kretprobe/__x64_sys_fdatasync  kretprobe/__x64_sys_sync_file_range
+    │                               │                               │
+    └───────────────────────────────┴───────────────────────────────┘
+                                    │
+                           record_exit(syscall_nr):
+                           latency_ns = now - fsync_start[tid]
+                           delete fsync_start[tid]
+                                    │
+                    ┌───────────────┴───────────────────────┐
+                    │                                       │
+             fsync_stats[tgid]:                   if latency_us > slow_threshold_us:
+             total_calls++           (atomic)         push fsync_event → RINGBUF
+             total_latency_ns += Δ   (atomic)         (outliers only, drop-safe)
+             max_latency_ns = max(Δ)
+             last_seen_ts = now
+             comm = bpf_get_current_comm()
+                    │
+         BPF_MAP_TYPE_LRU_HASH
+         max_entries = 10 240
+         (auto-evicts least-recently-used)
+```
+
+**Maps used**:
+- `fsync_start` (HASH, 65 536 entries) – transient per-TID entry timestamps; always deleted in kretprobe so no stale growth
+- `fsync_stats` (LRU_HASH, 10 240 entries) – accumulated per-PID stats; LRU eviction bounds memory automatically
+- `events` (RINGBUF, 256 KB) – outlier events only (latency > `slow_fsync_threshold_us`, default 5 ms)
+
+**Why kprobes (not fentry)?**: The fsync syscall wrappers (`__x64_sys_*`) are architecture-specific entry stubs that exist on all kernels ≥ 4.x without BTF. This makes the module usable on older distributions.
+
+**Configurable threshold**: `slow_fsync_threshold_us` is a `const volatile` global, rewritten at load time from Go via `spec.Variables["slow_fsync_threshold_us"].Set(v)`. At 10 k+ fsync/s with a 5 ms threshold, the ringbuf emits near-zero events; all aggregation happens in the LRU map with atomic ops only.
+
+**Userspace polling** (`internal/fsync/analyzer.go`):
+
+```
+Every 5 s (poll_interval):
+    TopOffenders(n=20, stale=60s):
+        iterate LRU map → skip entries older than 60 s
+        sort by total_calls desc
+        return top-20
+            │
+            ├── /proc/<pid>/cmdline   – full command line
+            ├── /proc/<pid>/cgroup    – cgroup / container path
+            └── classify comm+cmdline → app_type
+                  "database"   : mongod, mysql, postgres, redis, cassandra
+                  "log_agent"  : loki, filebeat, fluentd, promtail, vector
+                  "antivirus"  : clamd, falcon, crowdstrike, cylance
+                  ""           : unknown
+            │
+            ▼
+    if CPU > 85% OR Mem > 85%:
+        atomic.Store(&latest, &FsyncAnalysis{...})   ← available to /api/diagnose
+```
+
 ---
 
 ## 5. Trigger Engine
@@ -304,7 +383,114 @@ The trigger engine runs in a tight `time.Ticker` loop (default every 10s). It ca
 
 ---
 
-## 6. Data Flow
+## 6. Fsync Tracer
+
+### Overview
+
+The fsync tracer is **always-on** (unlike other eBPF modules that activate on-demand). It attaches six kprobe/kretprobe hooks at agent startup and continuously aggregates per-PID statistics in a kernel-side LRU map. Because aggregation happens in-kernel with atomic ops, userspace only needs to read the map once every 5 seconds — no per-syscall wakeups at any call rate.
+
+### Observed process categories
+
+| App Type | Matched processes |
+|---|---|
+| `database` | `mongod`, `mongos`, `cassandra`, `redis-server`, `mysqld`, `postgres`, `postmaster` |
+| `log_agent` | `loki`, `promtail`, `filebeat`, `fluentd`, `fluent-bit`, `logstash`, `vector` |
+| `antivirus` | `clamd`, `clamav`, `sophos`, `cylance`, `falcon`, `crowdstrike`, `carbonblack`, `eset` |
+
+Classification is substring-based on `comm` + `cmdline` (case-insensitive), so renamed binaries like `mongod_r3` still match.
+
+### GET /api/diagnose — FsyncReport field
+
+`FsyncReport` is included in the diagnose response **only when the system was under pressure** (CPU > 85 % OR Memory > 85 %) during a recent 5-second poll cycle.
+
+```bash
+curl -s http://localhost:9200/api/diagnose | jq .fsync_report
+```
+
+```json
+{
+  "type": "fsync_analysis",
+  "timestamp": "2026-04-05T10:12:00Z",
+  "system": {
+    "cpu_percent": 91.2,
+    "mem_percent": 72.1
+  },
+  "top_offenders": [
+    {
+      "pid": 567,
+      "comm": "mongod",
+      "cmdline": "/usr/bin/mongod --config /etc/mongod.conf",
+      "cgroup_path": "/system.slice/mongod.service",
+      "fsync_calls": 1200,
+      "avg_latency_ms": 3.2,
+      "max_latency_ms": 25.1,
+      "app_type": "database"
+    },
+    {
+      "pid": 534,
+      "comm": "loki",
+      "cmdline": "/usr/bin/loki -config.file /etc/loki/config.yaml",
+      "cgroup_path": "/system.slice/loki.service",
+      "fsync_calls": 800,
+      "avg_latency_ms": 5.5,
+      "max_latency_ms": 40.3,
+      "app_type": "log_agent"
+    }
+  ]
+}
+```
+
+### Configuration (`fsync:` section in config.yaml)
+
+```yaml
+fsync:
+  enabled: true
+  slow_threshold_us: 5000   # emit ringbuf event only when a single call > 5 ms
+  poll_interval: 5s          # how often to batch-read the in-kernel LRU map
+  top_n: 20                  # max offenders in each FsyncAnalysis
+  stale_seconds: 60          # ignore PIDs not seen in the last 60 s
+  cpu_threshold: 85.0        # publish snapshot when CPU exceeds this %
+  mem_threshold: 85.0        # publish snapshot when memory exceeds this %
+```
+
+### Test the tracer
+
+```bash
+# 1. Generate fsync load with dd (forces fdatasync after each write)
+dd if=/dev/zero of=/tmp/fsync_test bs=4k count=10000 conv=fdatasync
+
+# 2. Stress with fio (multiple parallel fsyncs)
+fio --name=fsync-stress --ioengine=sync --rw=write --bs=4k \
+    --size=1G --numjobs=4 --fsync=1 --filename=/tmp/fio_fsync
+
+# 3. Watch the analyzer output
+sudo ./build/obs-agent -loglevel debug 2>&1 | grep fsync
+
+# 4. Query the diagnose endpoint
+curl -s localhost:9200/api/diagnose | jq '.fsync_report.top_offenders[:3]'
+```
+
+### Verify loaded kprobes
+
+```bash
+# After agent starts, confirm the six hooks are attached:
+sudo bpftool prog list | grep kprobe
+# Expected output includes:
+#   kprobe  name kprobe_fsync
+#   kprobe  name kretprobe_fsync
+#   kprobe  name kprobe_fdatasync
+#   kprobe  name kretprobe_fdatasync
+#   kprobe  name kprobe_sync_file_range
+#   kprobe  name kretprobe_sync_file_range
+
+# Inspect the LRU stats map:
+sudo bpftool map show name fsync_stats
+sudo bpftool map dump name fsync_stats
+```
+
+---
+
+## 7. Data Flow
 
 ```
 /proc polling (5s)
@@ -330,16 +516,30 @@ The trigger engine runs in a tight `time.Ticker` loop (default every 10s). It ca
     │           │                       │
     │           │                  [flush_interval]
     │           │                       │
-    └───────────┴── Snapshot{metrics + topProcs + ebpfEvents}
-                                        │
-                                  gzip + POST
-                                        │
-                              Central Collector Server
+    │           └── Snapshot{metrics + topProcs + ebpfEvents}
+    │                                   │
+    │                             gzip + POST
+    │                                   │
+    │                         Central Collector Server
+    │
+    └──► Fsync Analyzer (always-on, independent loop)
+                │
+          [every 5s]
+                │
+         iterate LRU map (fsync_stats)
+                │
+         enrich /proc/<pid>/cmdline, /cgroup
+                │
+         if CPU>85% OR Mem>85%:
+                │
+         atomic.Store(latest FsyncAnalysis)
+                │
+         GET /api/diagnose → .fsync_report
 ```
 
 ---
 
-## 7. Build Pipeline
+## 8. Build Pipeline
 
 ### Prerequisites
 
@@ -436,7 +636,7 @@ curl -s localhost:9200/metrics | grep obs_agent
 
 ---
 
-## 8. Installation & Running
+## 9. Installation & Running
 
 ### Bare metal / VM
 
@@ -487,7 +687,7 @@ fio --name=test --ioengine=libaio --rw=randread --bs=4k \
 
 ---
 
-## 9. Kubernetes Deployment
+## 10. Kubernetes Deployment
 
 ```bash
 # Deploy
@@ -531,7 +731,7 @@ obs_agent_mem_available_bytes / obs_agent_mem_total_bytes
 
 ---
 
-## 10. Security & Capabilities
+## 11. Security & Capabilities
 
 ### Required Linux Capabilities
 
@@ -564,10 +764,11 @@ All eBPF programs are verified by the kernel before loading:
 - Stack usage is within the 512-byte BPF stack limit
 - No unbounded loops
 - `BPF_F_USER_STACK` flag on `bpf_get_stackid` – gracefully fails if user stacks aren't available
+- Fsync: `fsync_start` entries are always deleted in the kretprobe – no unbounded map growth
 
 ---
 
-## 11. Prometheus Metrics
+## 12. Prometheus Metrics
 
 All metrics are prefixed with `obs_agent_`.
 
@@ -594,10 +795,11 @@ All metrics are prefixed with `obs_agent_`.
 | `net_tx_bytes_per_sec{interface}` | Gauge | Transmit throughput |
 | `net_rx_errors_total{interface}` | Gauge | RX errors (cumulative) |
 | `ebpf_events_total{module}` | Counter | eBPF events emitted per module |
+| `ebpf_events_total{module="fsync"}` | Counter | Fsync outlier events (latency > threshold) |
 
 ---
 
-## 12. Performance Budget
+## 13. Performance Budget
 
 | Component | CPU | Memory |
 |---|---|---|
@@ -608,15 +810,19 @@ All metrics are prefixed with `obs_agent_`.
 | eBPF io_latency (active) | ~0.05% per IOPS | ~8 MB |
 | eBPF runqlat (active) | ~0.1% | ~8 MB |
 | eBPF tcp_retransmit (active) | ~0.02% per conn | ~4 MB |
+| **eBPF fsync (always-on)** | **~0.01% at 10k fsync/s** | **~1 MB (LRU map + ringbuf)** |
+| **Fsync analyzer poll (5s)** | **~0.001%** | **< 1 MB** |
 | Go runtime overhead | ~0.02% | ~12 MB |
-| **Total (all eBPF active)** | **~0.6%** | **~54 MB** |
-| **Total (no eBPF)** | **~0.16%** | **~19 MB** |
+| **Total (all eBPF active + fsync)** | **~0.61%** | **~55 MB** |
+| **Total (no trigger-eBPF, fsync only)** | **~0.17%** | **~20 MB** |
 
 All measurements are on a 4-core 8GB VM under moderate load. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
 
+**Fsync overhead detail**: At 10 000 fsync/s with a 5 ms slow threshold, the kprobe/kretprobe pair executes ~20 000 times/s. Each execution does one map lookup + one atomic add (~50 ns each). Total: ~1 ms/s ≈ **0.01% CPU** on a single core. The ringbuf emits zero events at normal latencies.
+
 ---
 
-## 13. Extending the Agent
+## 14. Extending the Agent
 
 ### Adding a new eBPF module
 

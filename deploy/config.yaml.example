@@ -63,3 +63,38 @@ exporter:
   flush_interval: 30s
   compress: true    # gzip payloads
   timeout: 10s
+
+# ─── Fsync latency tracer (always-on, bounded LRU map) ───────────────────────
+# Traces fsync / fdatasync / sync_file_range via kprobe/kretprobe.
+# Aggregates per-PID call counts and latency in-kernel; userspace polls every
+# poll_interval.  The analysis snapshot is published to GET /api/diagnose ONLY
+# when the system is under pressure (cpu_threshold OR mem_threshold breached).
+fsync:
+  # Master switch.  Set to false to skip loading the kprobes entirely.
+  enabled: true
+
+  # Emit a ringbuf outlier event only when a single fsync call exceeds this
+  # latency.  Normal-speed calls still update the in-kernel LRU map (no wakeup).
+  # Default 5 000 µs = 5 ms.  Lower → more events, higher CPU from ringbuf drain.
+  slow_threshold_us: 1000
+
+  # How often the Go analyzer batch-reads the in-kernel LRU map and re-evaluates
+  # top offenders.  Must be a valid Go duration string (e.g. "5s", "10s").
+  # NOTE: bare integers like "5" are parsed as nanoseconds — always add the unit.
+  poll_interval: 5s
+
+  # Max number of top offenders included in the FsyncAnalysis report.
+  # Each entry is enriched with /proc cmdline, cgroup path, and app-type label.
+  top_n: 20
+
+  # Ignore LRU map entries whose last_seen timestamp is older than this many
+  # seconds.  Prevents reporting processes that have already exited.
+  stale_seconds: 60
+
+  # Publish a new FsyncAnalysis snapshot when CPU usage exceeds this percent.
+  # Set to 101 to disable CPU-based publishing (use mem_threshold only).
+  cpu_threshold: 85.0
+
+  # Publish a new FsyncAnalysis snapshot when memory usage exceeds this percent.
+  # Your prod-mongodb-noti server runs at ~90% memory — this threshold fires.
+  mem_threshold: 85.0
