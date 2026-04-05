@@ -39,6 +39,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/trigger"
+	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
 )
 
 func main() {
@@ -118,6 +119,19 @@ func main() {
 		}
 	}()
 
+	// ── Writeback tracer (always-on, bounded LRU map) ────────────────────────
+	// Traces dirty page generation (writeback_dirty_page) and direct-reclaim
+	// stalls (mm_vmscan_direct_reclaim_begin/end) per PID.  Publishes a
+	// WritebackAnalysis snapshot to GET /api/diagnose when memory usage
+	// exceeds cfg.Writeback.MemThreshold OR any process experiences a
+	// direct-reclaim stall longer than cfg.Writeback.ReclaimSpikeNs.
+	writebackAnalyzer := writeback.NewAnalyzer(&cfg.Writeback, coll)
+	go func() {
+		if err := writebackAnalyzer.Start(ctx); err != nil {
+			slog.Error("writeback analyzer error", "err", err)
+		}
+	}()
+
 	// ── Prometheus exporter ─────────────────────────────────────────────────
 	var promExp *exporter.PrometheusExporter
 	if cfg.Agent.MetricsAddr != "" {
@@ -133,6 +147,7 @@ func main() {
 		promExp.RegisterDiagnosticSources(ebpfMgr, insp, httpExp)
 		promExp.RegisterDiskScanner(diskScanner)
 		promExp.RegisterFsyncAnalyzer(fsyncAnalyzer)
+		promExp.RegisterWritebackAnalyzer(writebackAnalyzer)
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)

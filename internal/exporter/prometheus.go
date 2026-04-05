@@ -24,6 +24,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
+	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
 )
 
 // PrometheusExporter serves a /metrics endpoint.
@@ -33,11 +34,12 @@ type PrometheusExporter struct {
 	hostname string
 
 	// Optional diagnostic sources – set via RegisterDiagnosticSources.
-	mgr          *ebpfmgr.Manager
-	insp         *process.Inspector
-	httpExp      *Exporter
-	diskScanner  *diskscanner.Scanner
-	fsyncAnalyzer *fsync.Analyzer
+	mgr               *ebpfmgr.Manager
+	insp              *process.Inspector
+	httpExp           *Exporter
+	diskScanner       *diskscanner.Scanner
+	fsyncAnalyzer     *fsync.Analyzer
+	writebackAnalyzer *writeback.Analyzer
 
 	// CPU
 	cpuUsage     prometheus.Gauge
@@ -145,6 +147,13 @@ func (p *PrometheusExporter) RegisterFsyncAnalyzer(a *fsync.Analyzer) {
 	p.fsyncAnalyzer = a
 }
 
+// RegisterWritebackAnalyzer wires the writeback analyzer so /api/diagnose
+// includes the latest WritebackAnalysis snapshot (populated only when memory
+// is under pressure or direct-reclaim latency spikes).
+func (p *PrometheusExporter) RegisterWritebackAnalyzer(a *writeback.Analyzer) {
+	p.writebackAnalyzer = a
+}
+
 // RecordEBPFEvent increments the per-module event counter.
 func (p *PrometheusExporter) RecordEBPFEvent(ev model.EBPFEvent) {
 	p.ebpfEventsTotal.WithLabelValues(string(ev.Type)).Inc()
@@ -240,6 +249,13 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 	// poll cycle (CPU > cfg.CPUThreshold OR Mem > cfg.MemThreshold).
 	if p.fsyncAnalyzer != nil {
 		report.FsyncReport = p.fsyncAnalyzer.Latest()
+	}
+
+	// Writeback analysis: latest snapshot from the always-on tracer.
+	// Only non-nil when memory exceeds cfg.MemThreshold OR any process has
+	// experienced a direct-reclaim stall longer than cfg.ReclaimSpikeNs.
+	if p.writebackAnalyzer != nil {
+		report.WritebackReport = p.writebackAnalyzer.Latest()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

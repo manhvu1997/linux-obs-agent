@@ -12,14 +12,15 @@ import (
 
 // Config is the root configuration object.
 type Config struct {
-	Agent    AgentConfig    `yaml:"agent"`
-	Collect  CollectConfig  `yaml:"collect"`
-	EBPF     EBPFConfig     `yaml:"ebpf"`
-	Trigger  TriggerConfig  `yaml:"trigger"`
-	Exporter ExporterConfig `yaml:"exporter"`
-	Process  ProcessConfig  `yaml:"process"`
-	DiskScan DiskScanConfig `yaml:"disk_scan"`
-	Fsync    FsyncConfig    `yaml:"fsync"`
+	Agent     AgentConfig     `yaml:"agent"`
+	Collect   CollectConfig   `yaml:"collect"`
+	EBPF      EBPFConfig      `yaml:"ebpf"`
+	Trigger   TriggerConfig   `yaml:"trigger"`
+	Exporter  ExporterConfig  `yaml:"exporter"`
+	Process   ProcessConfig   `yaml:"process"`
+	DiskScan  DiskScanConfig  `yaml:"disk_scan"`
+	Fsync     FsyncConfig     `yaml:"fsync"`
+	Writeback WritebackConfig `yaml:"writeback"`
 }
 
 type AgentConfig struct {
@@ -116,6 +117,31 @@ type FsyncConfig struct {
 	MemThreshold float64 `yaml:"mem_threshold"`
 }
 
+// WritebackConfig controls the eBPF memory writeback / direct-reclaim tracer.
+// The analyzer continuously polls the in-kernel LRU map and makes the latest
+// WritebackAnalysis available to GET /api/diagnose.
+type WritebackConfig struct {
+	// Enabled is the master switch for the writeback tracer.
+	Enabled bool `yaml:"enabled"`
+	// SlowReclaimThresholdNs: emit a ringbuf outlier event only when a single
+	// direct-reclaim episode exceeds this duration (nanoseconds).
+	// Default 100 000 000 ns = 100 ms.
+	SlowReclaimThresholdNs uint64 `yaml:"slow_reclaim_threshold_ns"`
+	// PollInterval: how often the analyzer batch-reads the in-kernel LRU map.
+	// NOTE: bare integers (e.g. "5") are parsed as nanoseconds — always add a
+	// unit suffix (e.g. "5s").
+	PollInterval time.Duration `yaml:"poll_interval"`
+	// TopN: how many top offenders to include in WritebackAnalysis.
+	TopN int `yaml:"top_n"`
+	// StaleSeconds: ignore LRU entries whose last_seen_ts is older than this.
+	StaleSeconds int `yaml:"stale_seconds"`
+	// MemThreshold: publish a new snapshot when memory usage exceeds this %.
+	MemThreshold float64 `yaml:"mem_threshold"`
+	// ReclaimSpikeNs: publish a new snapshot when any PID's max direct-reclaim
+	// latency exceeds this duration (nanoseconds).  Default 10 000 000 = 10 ms.
+	ReclaimSpikeNs uint64 `yaml:"reclaim_spike_ns"`
+}
+
 // DiskScanConfig controls the directory-size scanner and growth detector.
 type DiskScanConfig struct {
 	// Enabled is the master switch for the disk scanner.
@@ -192,6 +218,15 @@ func Defaults() *Config {
 			StaleSeconds:    60,
 			CPUThreshold:    85.0,
 			MemThreshold:    85.0,
+		},
+		Writeback: WritebackConfig{
+			Enabled:                true,
+			SlowReclaimThresholdNs: 100_000_000, // 100 ms – only severe stalls hit the ringbuf
+			PollInterval:           5 * time.Second,
+			TopN:                   20,
+			StaleSeconds:           60,
+			MemThreshold:           85.0,
+			ReclaimSpikeNs:         10_000_000, // 10 ms – publish snapshot on any spike > 10 ms
 		},
 	}
 }

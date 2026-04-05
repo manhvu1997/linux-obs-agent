@@ -141,6 +141,7 @@ const (
 	EventTCPRetransmit EBPFEventType = "tcp_retransmit"
 	EventTCPDrop       EBPFEventType = "tcp_drop"
 	EventDiskWrite     EBPFEventType = "disk_write"
+	EventWriteback     EBPFEventType = "writeback"
 )
 
 // EBPFEvent wraps kernel-side events with host metadata.
@@ -290,6 +291,13 @@ type DiagnoseReport struct {
 	// Top offenders are sorted by total fsync call count (descending) and
 	// enriched with cmdline, cgroup, and application-type classification.
 	FsyncReport *FsyncAnalysis `json:"fsync_report,omitempty"`
+
+	// WritebackReport is the latest memory writeback / direct-reclaim analysis.
+	// Only populated when memory usage exceeds MemThreshold OR any process has
+	// experienced a direct-reclaim stall longer than ReclaimSpikeNs.
+	// Top offenders are sorted by dirty pages generated (descending) and
+	// enriched with cmdline, cgroup, and application-type classification.
+	WritebackReport *WritebackAnalysis `json:"writeback_report,omitempty"`
 }
 
 // ─── Fsync Tracer ─────────────────────────────────────────────────────────────
@@ -336,6 +344,50 @@ type FsyncAnalysis struct {
 	Timestamp    time.Time       `json:"timestamp"`
 	System       FsyncSystemInfo `json:"system"`
 	TopOffenders []FsyncOffender `json:"top_offenders"`
+}
+
+// ─── Writeback Tracer ─────────────────────────────────────────────────────────
+
+// WritebackSlowEvent is emitted when a single direct-reclaim episode exceeds
+// the configured slow threshold.  This is the ringbuf path (outliers only).
+// Bulk statistics come from WritebackAnalysis via map polling.
+type WritebackSlowEvent struct {
+	PID              uint32 `json:"pid"`
+	TID              uint32 `json:"tid"`
+	Comm             string `json:"comm"`
+	ReclaimLatencyNs uint64 `json:"reclaim_latency_ns"`
+}
+
+// WritebackOffender is one PID's aggregated writeback / direct-reclaim
+// statistics, enriched with /proc metadata by the userspace analyzer.
+type WritebackOffender struct {
+	PID          uint32  `json:"pid"`
+	Comm         string  `json:"comm"`
+	Cmdline      string  `json:"cmdline,omitempty"`
+	CgroupPath   string  `json:"cgroup_path,omitempty"`
+	DirtyPages   uint64  `json:"dirty_pages"`
+	ReclaimCount uint64  `json:"reclaim_count"`
+	AvgReclaimMs float64 `json:"avg_reclaim_ms"`
+	MaxReclaimMs float64 `json:"max_reclaim_ms"`
+	// AppType is set when the process matches a known high-writeback workload.
+	// Possible values: "database", "log_agent", "messaging", "storage", "antivirus", ""
+	AppType string `json:"app_type,omitempty"`
+}
+
+// WritebackSystemInfo holds system-level writeback pressure at analysis time.
+type WritebackSystemInfo struct {
+	MemPercent   float64 `json:"mem_percent"`
+	MaxReclaimMs float64 `json:"max_reclaim_ms"` // worst per-PID direct-reclaim stall
+	WbOperations uint64  `json:"wb_operations"`  // system-wide writeback ops since start
+}
+
+// WritebackAnalysis is the full writeback diagnostic report returned by
+// GET /api/diagnose when Memory > MemThreshold OR reclaim latency spikes.
+type WritebackAnalysis struct {
+	Type         string              `json:"type"` // always "writeback_analysis"
+	Timestamp    time.Time           `json:"timestamp"`
+	System       WritebackSystemInfo `json:"system"`
+	TopOffenders []WritebackOffender `json:"top_offenders"`
 }
 
 // ─── Disk Scanner ─────────────────────────────────────────────────────────────

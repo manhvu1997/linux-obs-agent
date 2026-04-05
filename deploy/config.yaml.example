@@ -98,3 +98,42 @@ fsync:
   # Publish a new FsyncAnalysis snapshot when memory usage exceeds this percent.
   # Your prod-mongodb-noti server runs at ~90% memory — this threshold fires.
   mem_threshold: 85.0
+
+# ─── Memory writeback / direct-reclaim tracer (always-on, bounded LRU map) ───
+# Traces dirty page generation per PID (writeback_dirty_page tracepoint) and
+# direct-reclaim stall latency per PID (mm_vmscan_direct_reclaim_begin/end).
+# Unlike kswapd (background reclaim), direct reclaim stalls the application
+# thread directly — tracking it reveals which processes are causing memory
+# pressure.  The analysis snapshot is published to GET /api/diagnose ONLY
+# when the system is under pressure (mem_threshold breached OR any PID's
+# max direct-reclaim stall exceeds reclaim_spike_ns).
+writeback:
+  # Master switch.  Set to false to skip loading the tracepoints entirely.
+  enabled: true
+
+  # Emit a ringbuf outlier event only when a single direct-reclaim episode
+  # exceeds this latency (nanoseconds).  Normal stalls still update the
+  # in-kernel LRU map (no wakeup).
+  # Default 100 000 000 ns = 100 ms.
+  slow_reclaim_threshold_ns: 100000000
+
+  # How often the Go analyzer batch-reads the in-kernel LRU map.
+  # NOTE: bare integers like "5" are parsed as nanoseconds — always add the unit.
+  poll_interval: 5s
+
+  # Max number of top offenders included in the WritebackAnalysis report.
+  # Each entry is enriched with /proc cmdline, cgroup path, and app-type label.
+  top_n: 20
+
+  # Ignore LRU map entries whose last_seen timestamp is older than this many
+  # seconds.  Prevents reporting processes that have already exited.
+  stale_seconds: 60
+
+  # Publish a new WritebackAnalysis snapshot when memory usage exceeds this %.
+  mem_threshold: 85.0
+
+  # Publish a new WritebackAnalysis snapshot when any PID's max direct-reclaim
+  # stall exceeds this threshold (nanoseconds).
+  # Default 10 000 000 ns = 10 ms — catches serious memory pressure spikes.
+  # Set to 0 to disable reclaim-spike-based publishing (use mem_threshold only).
+  reclaim_spike_ns: 10000000
