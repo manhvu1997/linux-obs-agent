@@ -182,6 +182,44 @@ func (l *Loader) resolveStack(stackID int32) []uint64 {
 	return out
 }
 
+// CountEntry is one raw aggregated sample entry from the in-kernel counts map.
+// It corresponds to one unique (pid, tgid, kern_stack_id, user_stack_id, comm) tuple.
+type CountEntry struct {
+	PID         uint32
+	TGID        uint32
+	Comm        string
+	KernStackID int32
+	UserStackID int32
+	Count       uint64
+}
+
+// AllCounts iterates the full counts map and returns every entry.
+// The caller aggregates by TGID, resolves stacks, and computes weights.
+func (l *Loader) AllCounts() []CountEntry {
+	var entries []CountEntry
+	iter := l.objs.Counts.Iterate()
+	var k CpuProfileCpuCountKey
+	var v uint64
+	for iter.Next(&k, &v) {
+		entries = append(entries, CountEntry{
+			PID:         k.Pid,
+			TGID:        k.Tgid,
+			Comm:        nullTermString(k.Comm[:]),
+			KernStackID: k.KernStackId,
+			UserStackID: k.UserStackId,
+			Count:       v,
+		})
+	}
+	return entries
+}
+
+// StackAddresses resolves a stack ID to a slice of instruction pointer addresses
+// by reading the kernel-side stack_traces BPF_MAP_TYPE_STACK_TRACE map.
+// Returns nil if stackID < 0 or the entry is not found.
+func (l *Loader) StackAddresses(stackID int32) []uint64 {
+	return l.resolveStack(stackID)
+}
+
 // TopPIDs returns the top-N hottest PIDs from the aggregated counts map.
 func (l *Loader) TopPIDs(n int) []model.CPUProfileEvent {
 	type entry struct {

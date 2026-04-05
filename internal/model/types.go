@@ -273,6 +273,12 @@ type DiagnoseReport struct {
 	// (only populated when cpu_profile is active).  Sorted by SampleCount desc.
 	CPUHotspots []CPUProfileEvent `json:"cpu_hotspots,omitempty"`
 
+	// CPUProfileReport is the fully-aggregated, symbolized CPU profile.
+	// Populated only when cpu_profile is active.  Designed for LLM analysis:
+	// top stacks per process with resolved symbol names, relative weights,
+	// and a system-wide kernel function aggregate.
+	CPUProfileReport *CPUProfileReport `json:"cpu_profile_report,omitempty"`
+
 	// RecentEvents contains the last N eBPF events across all active modules.
 	// Each event carries PID, Comm, and module-specific fields:
 	//   cpu_profile   – stack IDs, sample count
@@ -344,6 +350,56 @@ type FsyncAnalysis struct {
 	Timestamp    time.Time       `json:"timestamp"`
 	System       FsyncSystemInfo `json:"system"`
 	TopOffenders []FsyncOffender `json:"top_offenders"`
+}
+
+// ─── CPU Profile V2 (aggregated, symbolized) ─────────────────────────────────
+
+// CPUProfileReport is the aggregated, symbolized CPU profiling report.
+// Returned by GET /api/diagnose when the cpu_profile eBPF module is active.
+// Designed for downstream LLM analysis: compact, weighted, no raw addresses.
+type CPUProfileReport struct {
+	Type      string               `json:"type"`      // always "cpu_profile_v2"
+	Timestamp time.Time            `json:"timestamp"`
+	System    CPUProfileSystemInfo `json:"system"`
+	// Processes sorted by total sample count descending; entries < 1% omitted.
+	Processes []CPUProfileProcess `json:"processes"`
+	// KernelAggregate: top-10 kernel functions across all processes.
+	KernelAggregate []KernelAggEntry `json:"kernel_aggregate,omitempty"`
+}
+
+// CPUProfileSystemInfo holds system-wide sampling totals.
+type CPUProfileSystemInfo struct {
+	TotalSamples  uint64 `json:"total_samples"`
+	UserSamples   uint64 `json:"user_samples"`   // samples with a valid user stack
+	KernelSamples uint64 `json:"kernel_samples"` // samples with a valid kernel stack
+}
+
+// CPUProfileProcess is one process's aggregated profiling data.
+type CPUProfileProcess struct {
+	PID           uint32     `json:"pid"`
+	Comm          string     `json:"comm"`
+	Samples       uint64     `json:"samples"`
+	UserSamples   uint64     `json:"user_samples,omitempty"`
+	KernelSamples uint64     `json:"kernel_samples,omitempty"`
+	Threads       int        `json:"threads,omitempty"`
+	TopUserStacks []CPUStack `json:"top_user_stacks,omitempty"`
+	TopKernStacks []CPUStack `json:"top_kern_stacks,omitempty"`
+}
+
+// CPUStack is one aggregated stack trace with resolved symbol names.
+// Raw addresses are never included; stacks where all symbols fail are dropped.
+type CPUStack struct {
+	// SymbolStack: function names from innermost (top) to outermost (bottom).
+	SymbolStack []string `json:"symbol_stack"`
+	Samples     uint64   `json:"samples"`
+	Percent     float64  `json:"percent"` // % of this process's total, 2 dp
+}
+
+// KernelAggEntry is one kernel function's aggregate across all processes.
+type KernelAggEntry struct {
+	Symbol  string  `json:"symbol"`
+	Samples uint64  `json:"samples"`
+	Percent float64 `json:"percent"` // % of total kernel samples, 2 dp
 }
 
 // ─── Writeback Tracer ─────────────────────────────────────────────────────────

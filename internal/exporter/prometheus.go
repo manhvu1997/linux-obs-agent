@@ -217,8 +217,11 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 		for _, id := range p.mgr.ActiveModules() {
 			report.ActiveModules = append(report.ActiveModules, string(id))
 		}
-		// CPU hotspots from the kernel-side perf counts map.
+		// CPU hotspots: legacy flat list sorted by sample count.
 		report.CPUHotspots = p.mgr.CPUTopPIDs(topPIDsN)
+		// CPU profile v2: fully aggregated, symbolized, LLM-ready.
+		// Nil when cpu_profile module is not active.
+		report.CPUProfileReport = p.mgr.BuildCPUProfileReport()
 	}
 
 	// Top processes from /proc.

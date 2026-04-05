@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
+	"github.com/manhvu1997/linux-obs-agent/internal/cpuprofile"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/cpu_profile"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/disk_write"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/io_latency"
@@ -273,4 +274,20 @@ func (m *Manager) DiskTopWriters(n int) []model.DiskWriteProcess {
 		return nil
 	}
 	return l.TopWriters(n)
+}
+
+// BuildCPUProfileReport builds a fully-aggregated, symbolized CPUProfileReport
+// from the active cpu_profile eBPF loader.  Returns nil when the loader is not
+// active or has no data.
+//
+// This is called on-demand from GET /api/diagnose; symbol resolution (kallsyms
+// + ELF) adds a few milliseconds on first call but is cached thereafter.
+func (m *Manager) BuildCPUProfileReport() *model.CPUProfileReport {
+	m.mu.Lock()
+	l := m.cpuLoader
+	m.mu.Unlock()
+	if l == nil {
+		return nil
+	}
+	return cpuprofile.BuildReport(l)
 }
