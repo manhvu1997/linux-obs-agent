@@ -88,14 +88,30 @@ func (l *Loader) Start(ctx context.Context) error {
 	}
 	l.rd = rd
 
-	// Attach all four tracepoints.
+	// Attach dirty-page tracepoint: try writeback_dirty_folio first (kernel >= ~5.18
+	// converted the page cache from struct page to struct folio and renamed the
+	// tracepoint).  Fall back to writeback_dirty_page for older kernels.
+	dirtyLnk, dirtyErr := link.Tracepoint("writeback", "writeback_dirty_folio",
+		l.objs.TpWritebackDirtyFolio, nil)
+	dirtyName := "writeback_dirty_folio"
+	if dirtyErr != nil {
+		dirtyLnk, dirtyErr = link.Tracepoint("writeback", "writeback_dirty_page",
+			l.objs.TpWritebackDirtyPage, nil)
+		dirtyName = "writeback_dirty_page"
+	}
+	if dirtyErr != nil {
+		l.cleanup()
+		return fmt.Errorf("writeback: attaching dirty page/folio tracepoint: %w", dirtyErr)
+	}
+	l.links = append(l.links, dirtyLnk)
+
+	// Attach remaining tracepoints.
 	type tpEntry struct {
 		group string
 		name  string
 		prog  *ebpf.Program
 	}
 	tps := []tpEntry{
-		{"writeback", "writeback_dirty_page", l.objs.TpWritebackDirtyPage},
 		{"writeback", "writeback_start", l.objs.TpWritebackStart},
 		{"vmscan", "mm_vmscan_direct_reclaim_begin", l.objs.TpDirectReclaimBegin},
 		{"vmscan", "mm_vmscan_direct_reclaim_end", l.objs.TpDirectReclaimEnd},
@@ -112,7 +128,8 @@ func (l *Loader) Start(ctx context.Context) error {
 
 	slog.Info("writeback: started",
 		"threshold_ns", l.thresholdNs,
-		"hooks", "writeback_dirty_page,writeback_start,direct_reclaim_begin,direct_reclaim_end")
+		"dirty_hook", dirtyName,
+		"hooks", "writeback_start,direct_reclaim_begin,direct_reclaim_end")
 	go l.consume(ctx)
 	return nil
 }

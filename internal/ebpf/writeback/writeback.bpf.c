@@ -129,15 +129,10 @@ const volatile __u64 slow_reclaim_threshold_ns = 100000000ULL; /* 100 ms */
 // ─── Tracepoint programs ──────────────────────────────────────────────────────
 
 /*
- * writeback_dirty_page: fires in the context of the process that dirtied the
- * page (via __set_page_dirty / folio_mark_dirty).  Increments the per-PID
- * dirty_pages counter.
- *
- * High-frequency path (can fire 100k+/s).  The only work done here is a single
- * LRU map lookup + atomic increment, keeping overhead minimal.
+ * __wb_dirty_impl: shared body for both dirty-tracking tracepoints.
+ * Factored out to avoid duplication between the page and folio variants.
  */
-SEC("tracepoint/writeback/writeback_dirty_page")
-int tp_writeback_dirty_page(void *ctx)
+static __always_inline int __wb_dirty_impl(void)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 tgid     = (__u32)(pid_tgid >> 32);
@@ -157,6 +152,31 @@ int tp_writeback_dirty_page(void *ctx)
         bpf_map_update_elem(&wb_pid_stats, &tgid, &new_val, BPF_NOEXIST);
     }
     return 0;
+}
+
+/*
+ * writeback_dirty_page: fires on kernels < ~5.18 (page-based page cache).
+ * Removed upstream when the page cache was converted to use struct folio.
+ *
+ * High-frequency path (can fire 100k+/s).  Only a single LRU map lookup +
+ * atomic increment is performed to keep overhead minimal.
+ */
+SEC("tracepoint/writeback/writeback_dirty_page")
+int tp_writeback_dirty_page(void *ctx)
+{
+    return __wb_dirty_impl();
+}
+
+/*
+ * writeback_dirty_folio: fires on kernels >= ~5.18 (folio-based page cache).
+ * Replaces writeback_dirty_page after struct folio was introduced.
+ * Semantically identical for our purposes – we only care that a page/folio
+ * was dirtied by the current process.
+ */
+SEC("tracepoint/writeback/writeback_dirty_folio")
+int tp_writeback_dirty_folio(void *ctx)
+{
+    return __wb_dirty_impl();
 }
 
 /*

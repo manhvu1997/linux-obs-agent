@@ -357,3 +357,54 @@ Loader changed from `link.Tracepoint(...)` to `link.AttachTracing(...)`.
 | 13 | tcp_retransmit.bpf.c | `drop_reason=0`, corrupted `location` | Switch `handle_kfree_skb` to `BPF_PROG` with typed args |
 | 14 | tcp_retransmit.bpf.c | IP extraction fragile when `network_header=0` | Use `skb->sk` first; fallback with `nh_off==0` guard |
 | 15 | io_latency.bpf.c + loader.go | `bad CO-RE relocation: invalid func unknown#N` | Replace `tracepoint/block/*` with `fentry/blk_mq_start_request` + `fentry/blk_mq_end_request` |
+| 16 | writeback/loader.go | `attaching tracepoint writeback/writeback_dirty_page: no such file or directory` on kernel 6.8 | See below |
+
+---
+
+### Bug 16 – `writeback_dirty_page` tracepoint removed in kernel ≥ 5.18
+
+**Symptom (kernel 6.8.0-1015-gcp):**
+```
+level=ERROR msg="writeback analyzer error"
+err="writeback: attaching tracepoint writeback/writeback_dirty_page:
+     reading file \"/sys/kernel/tracing/events/writeback/writeback_dirty_page/id\":
+     open /sys/kernel/tracing/events/writeback/writeback_dirty_page/id: no such file or directory"
+```
+Works fine on kernel 5.15.0-1083-gcp.
+
+**Root cause:**
+In Linux kernel ~5.18, the page-cache layer was converted from `struct page` to
+`struct folio`.  As part of that change the `writeback/writeback_dirty_page`
+tracepoint was removed and replaced by `writeback/writeback_dirty_folio`.
+Kernel 5.15 still exposes `writeback_dirty_page`; kernel 6.8 only has
+`writeback_dirty_folio`.
+
+**Fix (`writeback.bpf.c` + `loader.go`):**
+
+*C side* — added a second eBPF program with an identical body, attached to the
+folio tracepoint.  Shared via a `static __always_inline` helper to avoid
+duplication:
+```c
+static __always_inline int __wb_dirty_impl(void) { /* increment dirty_pages */ }
+
+SEC("tracepoint/writeback/writeback_dirty_page")   // kernel < 5.18
+int tp_writeback_dirty_page(void *ctx) { return __wb_dirty_impl(); }
+
+SEC("tracepoint/writeback/writeback_dirty_folio")  // kernel >= 5.18
+int tp_writeback_dirty_folio(void *ctx) { return __wb_dirty_impl(); }
+```
+Both programs are compiled into the object; the BPF verifier accepts both on
+any kernel because neither program reads tracepoint context arguments.
+
+*Go side* — `loader.go Start()` tries `writeback_dirty_folio` first; falls back
+to `writeback_dirty_page` if the tracepoint doesn't exist:
+```go
+dirtyLnk, dirtyErr := link.Tracepoint("writeback", "writeback_dirty_folio",
+    l.objs.TpWritebackDirtyFolio, nil)
+if dirtyErr != nil {
+    dirtyLnk, dirtyErr = link.Tracepoint("writeback", "writeback_dirty_page",
+        l.objs.TpWritebackDirtyPage, nil)
+}
+```
+The active tracepoint name is logged at startup (`dirty_hook` field) so it is
+visible in production logs.
