@@ -23,6 +23,7 @@ import (
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/mongo"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
 )
@@ -40,6 +41,7 @@ type PrometheusExporter struct {
 	diskScanner       *diskscanner.Scanner
 	fsyncAnalyzer     *fsync.Analyzer
 	writebackAnalyzer *writeback.Analyzer
+	mongoAnalyzer     *mongo.Analyzer
 
 	// CPU
 	cpuUsage     prometheus.Gauge
@@ -154,6 +156,13 @@ func (p *PrometheusExporter) RegisterWritebackAnalyzer(a *writeback.Analyzer) {
 	p.writebackAnalyzer = a
 }
 
+// RegisterMongoAnalyzer wires the MongoDB slow-query analyzer so /api/diagnose
+// includes the latest MongoAnalysis snapshot.
+// Only populated when MongoDB tracing is enabled (MONGODB_TRACING_ENABLED=true).
+func (p *PrometheusExporter) RegisterMongoAnalyzer(a *mongo.Analyzer) {
+	p.mongoAnalyzer = a
+}
+
 // RecordEBPFEvent increments the per-module event counter.
 func (p *PrometheusExporter) RecordEBPFEvent(ev model.EBPFEvent) {
 	p.ebpfEventsTotal.WithLabelValues(string(ev.Type)).Inc()
@@ -259,6 +268,12 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 	// experienced a direct-reclaim stall longer than cfg.ReclaimSpikeNs.
 	if p.writebackAnalyzer != nil {
 		report.WritebackReport = p.writebackAnalyzer.Latest()
+	}
+
+	// MongoDB slow-query analysis: latest snapshot from the always-on tracer.
+	// Only non-nil when MongoDB tracing is enabled and queries have been observed.
+	if p.mongoAnalyzer != nil {
+		report.MongoReport = p.mongoAnalyzer.Latest()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

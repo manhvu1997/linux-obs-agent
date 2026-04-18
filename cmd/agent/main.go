@@ -37,6 +37,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/exporter"
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/mongo"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/trigger"
 	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
@@ -71,6 +72,7 @@ func main() {
 		"arch", runtime.GOARCH,
 		"cpus", runtime.NumCPU(),
 		"ebpf_enabled", cfg.EBPF.Enabled,
+		"mongo_tracing_enabled", cfg.Mongo.Enabled,
 	)
 
 	// Root context wired to OS signals (SIGTERM / SIGINT for systemd).
@@ -132,6 +134,19 @@ func main() {
 		}
 	}()
 
+	// ── MongoDB slow-query tracer (always-on when enabled) ─────────────────
+	// Hooks connect/write/read/close syscalls to track queries to MongoDB
+	// (port 27017 by default).  Slow queries (> cfg.Mongo.SlowQueryThresholdMs)
+	// are emitted as events and aggregated per-PID in an in-kernel LRU map.
+	// Results are available via GET /api/diagnose as mongo_report.
+	// Enable with MONGODB_TRACING_ENABLED=true or mongo.enabled: true in config.
+	mongoAnalyzer := mongo.NewAnalyzer(&cfg.Mongo, coll)
+	go func() {
+		if err := mongoAnalyzer.Start(ctx); err != nil {
+			slog.Error("mongo analyzer error", "err", err)
+		}
+	}()
+
 	// ── Prometheus exporter ─────────────────────────────────────────────────
 	var promExp *exporter.PrometheusExporter
 	if cfg.Agent.MetricsAddr != "" {
@@ -148,6 +163,7 @@ func main() {
 		promExp.RegisterDiskScanner(diskScanner)
 		promExp.RegisterFsyncAnalyzer(fsyncAnalyzer)
 		promExp.RegisterWritebackAnalyzer(writebackAnalyzer)
+		promExp.RegisterMongoAnalyzer(mongoAnalyzer)
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)

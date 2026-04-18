@@ -16,24 +16,24 @@ ARG VERSION=dev
 ARG TARGETARCH=amd64
 
 # Install build dependencies
-RUN apt-get update \
-    && apt-get install -y software-properties-common \
-    && add-apt-repository ppa:longsleep/golang-backports \
-    && apt-get install -y --no-install-recommends \
-    # eBPF toolchain
-    clang \
-    llvm \
-    libbpf-dev \
-    linux-headers-generic \
-    linux-tools-generic \
-    linux-image-generic \
-    # Go toolchain
-    golang-1.26 \
-    # Utilities
-    ca-certificates \
-    git \
-    make \
-    && rm -rf /var/lib/apt/lists/*
+RUN sed -i 's|http://archive.ubuntu.com|http://mirror.kakao.com|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com|http://mirror.kakao.com|g' /etc/apt/sources.list && \
+    echo 'Acquire::Retries "5"; Acquire::http::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:longsleep/golang-backports && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        clang \
+        llvm \
+        libbpf-dev \
+        linux-headers-generic \
+        linux-tools-generic \
+        golang-1.26 \
+        ca-certificates \
+        git \
+        make && \
+    rm -rf /var/lib/apt/lists/*
 
 # symlink so `go` is on PATH
 RUN ln -sf /usr/lib/go-1.26/bin/go /usr/local/bin/go
