@@ -509,7 +509,6 @@ type DirEntry struct {
 type DirSnapshot struct {
 	ScannedAt time.Time  `json:"scanned_at"`
 	Top10     []DirEntry `json:"top10"`
-	All       []DirEntry `json:"all"`
 }
 
 // DiskGrowthEvent is emitted when a directory grows faster than the threshold.
