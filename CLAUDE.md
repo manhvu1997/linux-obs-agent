@@ -1027,5 +1027,90 @@ for _, e := range events {
     )
 }
 ```
+## 16. MySQL Slow Query Tracer
+
+### Overview
+
+The MySQL tracer is an **always-on server-side** analyzer that attaches uprobes directly to the running `mysqld` binary. Unlike the MongoDB tracer (which hooks client-side syscalls), this tracer hooks `dispatch_command` inside mysqld itself — capturing the exact SQL text before it executes, with no wire-protocol parsing and full TLS compatibility.
+
+### Hook mechanism
+
+```
+uprobe: mysqld!dispatch_command(THD *thd, COM_DATA *com_data, enum command)
+    │  command == COM_QUERY (3)?  No → return 0 (zero overhead)
+    │  Yes:
+    │  start_ts = bpf_ktime_get_ns()
+    │  query_str = com_data[0..7]   (COM_QUERY_DATA.query_str at union offset 0)
+    │  bpf_probe_read_user_str(pending.query, 256, query_str)
+    │  mysql_pending[tid] = {start_ts, query, comm}
+    │
+uretprobe: mysqld!dispatch_command
+    │  pending = mysql_pending[tid]
+    │  latency_ns = now - pending.start_ts
+    │  delete mysql_pending[tid]
+    │
+    ├── mysql_pid_stats[tgid]:   total_queries++, total_latency_ns += Δ, ...
+    │
+    └── if latency_ns > slow_query_threshold_ns:
+            push mysql_slow_event_t → RINGBUF
+```
+
+### Configuration (`mysql:` section in config.yaml)
+
+```yaml
+mysql:
+  enabled: true
+  mysqld_path: /usr/sbin/mysqld      # path to mysqld binary for uprobe
+  slow_query_threshold_ms: 100       # emit ringbuf event when query > 100 ms
+  poll_interval: 5s
+  top_n: 20
+  stale_seconds: 60
+  max_recent_queries: 100
+```
+
+Environment variable overrides: `MYSQL_TRACING_ENABLED=true`, `MYSQL_SLOW_QUERY_THRESHOLD_MS=50`, `MYSQL_MYSQLD_PATH=/usr/bin/mysqld`.
+
+### GET /api/diagnose — MySQLReport field
+
+```bash
+curl -s http://localhost:9200/api/diagnose | jq .mysql_report
+```
+
+```json
+{
+  "type": "mysql_analysis",
+  "timestamp": "2026-04-19T10:00:00Z",
+  "slow_threshold_ms": 100,
+  "mysqld_path": "/usr/sbin/mysqld",
+  "recent_slow_queries": [
+    {
+      "pid": 1234, "tid": 1234,
+      "latency_ms": 532.1,
+      "query": "SELECT * FROM users WHERE id = 1",
+      "comm": "mysqld"
+    }
+  ],
+  "top_processes": [
+    {
+      "pid": 1234, "comm": "mysqld",
+      "total_queries": 500, "slow_queries": 12,
+      "avg_latency_ms": 45.2, "max_latency_ms": 532.1
+    }
+  ]
+}
+```
+
+### Verify uprobes are loaded
+
+```bash
+sudo bpftool prog list | grep -E 'uprobe|kprobe'
+# Expected:
+#   kprobe  name uprobe_dispatch     (uprobe type shows as kprobe in bpftool)
+#   kprobe  name uretprobe_dispatch
+
+sudo bpftool map show name mysql_pid_stats
+sudo bpftool map show name mysql_pending
+```
+
 ## 15. Review output
 Use codex to review output of this code each change

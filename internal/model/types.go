@@ -309,6 +309,11 @@ type DiagnoseReport struct {
 	// Only populated when MongoDB tracing is enabled
 	// (MONGODB_TRACING_ENABLED=true or mongo.enabled: true in config).
 	MongoReport *MongoAnalysis `json:"mongo_report,omitempty"`
+
+	// MySQLReport contains MySQL slow query analysis from server-side uprobe tracing.
+	// Only populated when MySQL tracing is enabled (mysql.enabled: true in config
+	// or MYSQL_TRACING_ENABLED=true).
+	MySQLReport *MySQLAnalysis `json:"mysql_report,omitempty"`
 }
 
 // ─── Fsync Tracer ─────────────────────────────────────────────────────────────
@@ -542,6 +547,48 @@ type DiskDiagnoseReport struct {
 	Snapshot     *DirSnapshot       `json:"snapshot,omitempty"`
 	GrowthEvents []DiskGrowthEvent  `json:"growth_events,omitempty"`
 	TopWriters   []DiskWriteProcess `json:"top_writers,omitempty"`
+}
+
+// ─── MySQL Slow Query Tracer ──────────────────────────────────────────────────
+
+// EventMySQLQuery is the EBPFEventType for MySQL slow-query outliers captured
+// via server-side uprobes on dispatch_command in mysqld.
+const EventMySQLQuery EBPFEventType = "mysql_query"
+
+// MySQLSlowEvent is emitted when a single MySQL query (COM_QUERY) exceeds the
+// configured slow threshold. The query text is captured directly from the mysqld
+// binary at dispatch_command entry — no wire-protocol parsing required.
+type MySQLSlowEvent struct {
+	PID       uint32    `json:"pid"`
+	TID       uint32    `json:"tid"`
+	LatencyMs float64   `json:"latency_ms"`
+	Query     string    `json:"query"`
+	Comm      string    `json:"comm"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// MySQLProcessStats holds aggregated per-PID query statistics enriched with
+// /proc metadata by the userspace analyzer.
+type MySQLProcessStats struct {
+	PID          uint32  `json:"pid"`
+	Comm         string  `json:"comm"`
+	Cmdline      string  `json:"cmdline,omitempty"`
+	CgroupPath   string  `json:"cgroup_path,omitempty"`
+	TotalQueries uint64  `json:"total_queries"`
+	SlowQueries  uint64  `json:"slow_queries"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+	MaxLatencyMs float64 `json:"max_latency_ms"`
+}
+
+// MySQLAnalysis is the full MySQL diagnostic report returned by
+// GET /api/diagnose when MySQL tracing is enabled.
+type MySQLAnalysis struct {
+	Type              string             `json:"type"`      // always "mysql_analysis"
+	Timestamp         time.Time          `json:"timestamp"`
+	SlowThresholdMs   uint64             `json:"slow_threshold_ms"`
+	MysqldPath        string             `json:"mysqld_path"`
+	RecentSlowQueries []MySQLSlowEvent   `json:"recent_slow_queries"`
+	TopProcesses      []MySQLProcessStats `json:"top_processes"`
 }
 
 // ─── DB Inspector (sidecar) ───────────────────────────────────────────────────
