@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -21,6 +22,7 @@ type Config struct {
 	DiskScan  DiskScanConfig  `yaml:"disk_scan"`
 	Fsync     FsyncConfig     `yaml:"fsync"`
 	Writeback WritebackConfig `yaml:"writeback"`
+	Mongo     MongoConfig     `yaml:"mongo"`
 }
 
 type AgentConfig struct {
@@ -163,6 +165,32 @@ type DiskScanConfig struct {
 	SkipNFS bool `yaml:"skip_nfs"`
 }
 
+// MongoConfig controls the eBPF MongoDB slow-query tracer.
+// When enabled, the tracer hooks sys_enter_connect/write/read/close to detect
+// MongoDB connections (by destination port) and measures per-query latency.
+// Slow queries (latency > SlowQueryThresholdMs) are reported via GET /api/diagnose.
+//
+// Feature flag: set MONGODB_TRACING_ENABLED=true or mongo.enabled: true.
+type MongoConfig struct {
+	// Enabled is the master switch for the MongoDB tracer.
+	// Default false – zero overhead when disabled.
+	Enabled bool `yaml:"enabled"`
+	// Port is the MongoDB server port to watch for connections.
+	// Default 27017.
+	Port uint32 `yaml:"port"`
+	// SlowQueryThresholdMs: report queries that take longer than this (milliseconds).
+	// Default 2000 ms = 2 s.  Set via MONGODB_SLOW_QUERY_THRESHOLD_MS.
+	SlowQueryThresholdMs uint64 `yaml:"slow_query_threshold_ms"`
+	// PollInterval: how often to batch-read the in-kernel LRU stats map.
+	PollInterval time.Duration `yaml:"poll_interval"`
+	// TopN: max number of processes to include per MongoAnalysis.
+	TopN int `yaml:"top_n"`
+	// StaleSeconds: ignore LRU entries not updated within this window.
+	StaleSeconds int `yaml:"stale_seconds"`
+	// MaxRecentQueries: max slow-query events to keep in the recent ring.
+	MaxRecentQueries int `yaml:"max_recent_queries"`
+}
+
 // Defaults returns a Config with sensible production defaults.
 func Defaults() *Config {
 	return &Config{
@@ -228,6 +256,15 @@ func Defaults() *Config {
 			MemThreshold:           85.0,
 			ReclaimSpikeNs:         10_000_000, // 10 ms – publish snapshot on any spike > 10 ms
 		},
+		Mongo: MongoConfig{
+			Enabled:              false, // off by default; zero overhead when disabled
+			Port:                 27017,
+			SlowQueryThresholdMs: 2000, // 2 s
+			PollInterval:         5 * time.Second,
+			TopN:                 20,
+			StaleSeconds:         60,
+			MaxRecentQueries:     100,
+		},
 	}
 }
 
@@ -235,6 +272,7 @@ func Defaults() *Config {
 func Load(path string) (*Config, error) {
 	cfg := Defaults()
 	if path == "" {
+		applyMongoEnvOverrides(cfg)
 		return cfg, nil
 	}
 
@@ -245,10 +283,34 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
+	applyMongoEnvOverrides(cfg)
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return cfg, nil
+}
+
+// applyMongoEnvOverrides applies environment variable overrides for the MongoDB
+// tracer.  This allows enabling/configuring MongoDB tracing at runtime without
+// modifying the config file (useful in containerised environments).
+//
+//	MONGODB_TRACING_ENABLED=true|1|yes   – enable the tracer
+//	MONGODB_SLOW_QUERY_THRESHOLD_MS=N    – slow threshold in milliseconds
+//	MONGODB_PORT=N                       – MongoDB port to watch (default 27017)
+func applyMongoEnvOverrides(cfg *Config) {
+	if v := os.Getenv("MONGODB_TRACING_ENABLED"); v != "" {
+		cfg.Mongo.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("MONGODB_SLOW_QUERY_THRESHOLD_MS"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			cfg.Mongo.SlowQueryThresholdMs = n
+		}
+	}
+	if v := os.Getenv("MONGODB_PORT"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			cfg.Mongo.Port = uint32(n)
+		}
+	}
 }
 
 func (c *Config) validate() error {

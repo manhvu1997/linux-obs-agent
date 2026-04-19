@@ -137,3 +137,36 @@ writeback:
   # Default 10 000 000 ns = 10 ms — catches serious memory pressure spikes.
   # Set to 0 to disable reclaim-spike-based publishing (use mem_threshold only).
   reclaim_spike_ns: 10000000
+
+# ─── MongoDB slow-query tracer ────────────────────────────────────────────────
+# Always-on (when enabled).  Hooks connect/write/read/close syscalls to detect
+# connections to MongoDB (by destination port) and measures per-query latency.
+# Slow queries are reported in GET /api/diagnose as mongo_report.
+#
+# Feature flag: set MONGODB_TRACING_ENABLED=true env var OR mongo.enabled: true.
+# Other env vars: MONGODB_SLOW_QUERY_THRESHOLD_MS=N, MONGODB_PORT=N
+mongo:
+  # Master switch.  Default false = zero overhead when MongoDB is not in use.
+  enabled: false
+
+  # MongoDB server port to watch.  Connections to this port are tracked.
+  port: 27017
+
+  # Report queries that take longer than this many milliseconds.
+  # Set low (e.g. 100) during debugging; set high (e.g. 5000) in production.
+  # Override with MONGODB_SLOW_QUERY_THRESHOLD_MS env var.
+  slow_query_threshold_ms: 2000
+
+  # How often the Go analyzer batch-reads the in-kernel LRU stats map.
+  poll_interval: 5s
+
+  # Max number of MongoDB processes to include in the MongoAnalysis report.
+  top_n: 20
+
+  # Ignore LRU map entries whose last_seen timestamp is older than this many
+  # seconds.  Prevents reporting processes that have already exited.
+  stale_seconds: 60
+
+  # How many individual slow-query events to keep in the recent ring.
+  # These events include op_type, collection, latency, PID, FD, dest_addr.
+  max_recent_queries: 100

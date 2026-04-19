@@ -1,0 +1,178 @@
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# db-inspector sidecar — Kubernetes sidecar container spec
+#
+# Add the db-inspector container to your existing application Deployment.
+# The sidecar exposes GET /api/inspect on port 9201 with database slow-query
+# diagnostics from eBPF syscall tracepoints.
+#
+# Requirements:
+#   hostPID: true         — see /proc/[pid] for all processes on the node
+#   CAP_BPF               — load eBPF programs
+#   CAP_PERFMON           — open perf_event file descriptors
+#   CAP_SYS_ADMIN         — pin programs to /sys/fs/bpf (older kernels)
+#   CAP_SYS_PTRACE        — read /proc/[pid]/cmdline + cgroup for enrichment
+#
+# Example: patch your Deployment with this sidecar container + volumes.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ─── ConfigMap ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-inspector-config
+  # Change namespace to match your application namespace.
+  namespace: default
+data:
+  config.yaml: |
+    log_level: info
+    listen_addr: ":9201"
+    mongo:
+      enabled: true
+      port: 27017
+      slow_query_threshold_ms: 500
+      poll_interval: 5s
+      top_n: 20
+      stale_seconds: 60
+      max_recent_queries: 100
+
+---
+# ─── Example Deployment (patch your own) ─────────────────────────────────────
+# This shows exactly which fields to add/change in your existing Deployment.
+# Merge the spec.template sections below into your app's Deployment manifest.
+#
+# kubectl patch deployment <your-app> --patch-file db-inspector-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: your-app-with-db-inspector   # replace with your app name
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: your-app
+  template:
+    metadata:
+      labels:
+        app: your-app
+      annotations:
+        # Prometheus will scrape /api/inspect for alerting rules.
+        db-inspector/scrape: "true"
+        db-inspector/port: "9201"
+    spec:
+      # Required: the sidecar must see all /proc/[pid] entries on the node
+      # to resolve process metadata and to populate the mongod_pids eBPF map.
+      hostPID: true
+
+      containers:
+        # ── Your application container (unchanged) ───────────────────────────
+        - name: your-app
+          image: your-app:latest
+          # ... (all your existing fields)
+
+        # ── db-inspector sidecar ─────────────────────────────────────────────
+        - name: db-inspector
+          image: ghcr.io/youorg/db-inspector:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config
+            - /etc/db-inspector/config.yaml
+
+          ports:
+            - name: inspect
+              containerPort: 9201
+              protocol: TCP
+
+          env:
+            # Alternative to setting mongo.enabled in config — useful for
+            # enabling/disabling without a ConfigMap rollout.
+            - name: MONGODB_TRACING_ENABLED
+              value: "true"
+            # Optional: lower threshold in staging, raise in production.
+            # - name: MONGODB_SLOW_QUERY_THRESHOLD_MS
+            #   value: "200"
+
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+
+          securityContext:
+            runAsUser: 0    # Root required for eBPF load
+            capabilities:
+              add:
+                - BPF
+                - PERFMON
+                - SYS_ADMIN     # pin to /sys/fs/bpf; needed on kernels <5.8
+                - SYS_PTRACE    # read /proc/[pid]/cmdline, cgroup
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+
+          volumeMounts:
+            - name: db-inspector-config
+              mountPath: /etc/db-inspector
+              readOnly: true
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+            - name: sys
+              mountPath: /sys
+              readOnly: false   # /sys/fs/bpf needs write access
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9201
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9201
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+      volumes:
+        - name: db-inspector-config
+          configMap:
+            name: db-inspector-config
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+
+---
+# ─── Service (expose /api/inspect within the cluster) ────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: db-inspector
+  namespace: default
+  labels:
+    app: db-inspector
+spec:
+  selector:
+    app: your-app   # matches the pod label of the Deployment above
+  ports:
+    - name: inspect
+      port: 9201
+      targetPort: 9201

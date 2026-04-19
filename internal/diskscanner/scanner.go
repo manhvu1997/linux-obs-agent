@@ -151,7 +151,6 @@ func (s *Scanner) scan() {
 	snap := &model.DirSnapshot{
 		ScannedAt: start,
 		Top10:     top10,
-		All:       entries,
 	}
 
 	// Swap snapshots and detect growth under a single lock.
@@ -160,7 +159,7 @@ func (s *Scanner) scan() {
 	s.curr = snap
 	var growthEvents []model.DiskGrowthEvent
 	if s.prev != nil {
-		growthEvents = s.detectGrowth(s.prev.All, snap.All)
+		growthEvents = s.detectGrowth(s.prev.Top10, snap.Top10)
 	}
 	s.growth = growthEvents
 	s.mu.Unlock()

@@ -304,6 +304,11 @@ type DiagnoseReport struct {
 	// Top offenders are sorted by dirty pages generated (descending) and
 	// enriched with cmdline, cgroup, and application-type classification.
 	WritebackReport *WritebackAnalysis `json:"writeback_report,omitempty"`
+
+	// MongoReport contains MongoDB slow query analysis.
+	// Only populated when MongoDB tracing is enabled
+	// (MONGODB_TRACING_ENABLED=true or mongo.enabled: true in config).
+	MongoReport *MongoAnalysis `json:"mongo_report,omitempty"`
 }
 
 // ─── Fsync Tracer ─────────────────────────────────────────────────────────────
@@ -446,6 +451,51 @@ type WritebackAnalysis struct {
 	TopOffenders []WritebackOffender `json:"top_offenders"`
 }
 
+// ─── MongoDB Slow Query Tracer ────────────────────────────────────────────────
+
+// EventMongoQuery is the EBPFEventType for MongoDB slow-query outliers.
+const EventMongoQuery EBPFEventType = "mongo_query"
+
+// MongoSlowEvent is emitted when a single MongoDB query exceeds the configured
+// slow threshold.  Contains the operation type, collection, and destination so
+// the on-call engineer immediately sees which query was slow.
+type MongoSlowEvent struct {
+	PID        uint32  `json:"pid"`
+	TID        uint32  `json:"tid"`
+	FD         uint32  `json:"fd"`
+	RequestID  uint32  `json:"request_id"`
+	LatencyMs  float64 `json:"latency_ms"`
+	OpType     string  `json:"op_type"`    // "find","insert","update","delete","aggregate",""
+	Collection string  `json:"collection"` // empty when traffic is TLS-encrypted
+	DestAddr   string  `json:"dest_addr"`  // "ip:port" of the MongoDB server
+	Comm       string  `json:"comm"`
+}
+
+// MongoProcessStats holds aggregated per-PID query statistics enriched with
+// /proc metadata by the userspace analyzer.
+type MongoProcessStats struct {
+	PID          uint32  `json:"pid"`
+	Comm         string  `json:"comm"`
+	Cmdline      string  `json:"cmdline,omitempty"`
+	CgroupPath   string  `json:"cgroup_path,omitempty"`
+	TotalQueries uint64  `json:"total_queries"`
+	SlowQueries  uint64  `json:"slow_queries"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+	MaxLatencyMs float64 `json:"max_latency_ms"`
+}
+
+// MongoAnalysis is the full MongoDB diagnostic report returned by
+// GET /api/diagnose when MongoDB tracing is enabled.
+type MongoAnalysis struct {
+	Type              string              `json:"type"`               // always "mongo_analysis"
+	Timestamp         time.Time           `json:"timestamp"`
+	SlowThresholdMs   uint64              `json:"slow_threshold_ms"`
+	// RecentSlowQueries: last N slow queries with full detail.
+	RecentSlowQueries []MongoSlowEvent    `json:"recent_slow_queries"`
+	// TopProcesses: per-PID aggregated stats sorted by slow_queries desc.
+	TopProcesses      []MongoProcessStats `json:"top_processes"`
+}
+
 // ─── Disk Scanner ─────────────────────────────────────────────────────────────
 
 // DirEntry holds the aggregated size for one scanned directory.
@@ -459,7 +509,6 @@ type DirEntry struct {
 type DirSnapshot struct {
 	ScannedAt time.Time  `json:"scanned_at"`
 	Top10     []DirEntry `json:"top10"`
-	All       []DirEntry `json:"all"`
 }
 
 // DiskGrowthEvent is emitted when a directory grows faster than the threshold.
@@ -493,4 +542,22 @@ type DiskDiagnoseReport struct {
 	Snapshot     *DirSnapshot       `json:"snapshot,omitempty"`
 	GrowthEvents []DiskGrowthEvent  `json:"growth_events,omitempty"`
 	TopWriters   []DiskWriteProcess `json:"top_writers,omitempty"`
+}
+
+// ─── DB Inspector (sidecar) ───────────────────────────────────────────────────
+
+// DBInspectReport holds the diagnostic snapshot for one database type.
+// The Database field identifies which backend (e.g. "mongo", "mysql").
+// Only the relevant *Report field is populated; all others are omitted.
+type DBInspectReport struct {
+	Database    string         `json:"database"`
+	MongoReport *MongoAnalysis `json:"mongo_report,omitempty"`
+	// MySQLReport *MySQLAnalysis `json:"mysql_report,omitempty"` // future
+}
+
+// InspectReport is the full response body of GET /api/inspect exposed by the
+// db-inspector sidecar.  Contains one entry per enabled database tracer.
+type InspectReport struct {
+	Timestamp time.Time         `json:"timestamp"`
+	Databases []DBInspectReport `json:"databases"`
 }
