@@ -543,3 +543,21 @@ type DiskDiagnoseReport struct {
 	GrowthEvents []DiskGrowthEvent  `json:"growth_events,omitempty"`
 	TopWriters   []DiskWriteProcess `json:"top_writers,omitempty"`
 }
+
+// ─── DB Inspector (sidecar) ───────────────────────────────────────────────────
+
+// DBInspectReport holds the diagnostic snapshot for one database type.
+// The Database field identifies which backend (e.g. "mongo", "mysql").
+// Only the relevant *Report field is populated; all others are omitted.
+type DBInspectReport struct {
+	Database    string         `json:"database"`
+	MongoReport *MongoAnalysis `json:"mongo_report,omitempty"`
+	// MySQLReport *MySQLAnalysis `json:"mysql_report,omitempty"` // future
+}
+
+// InspectReport is the full response body of GET /api/inspect exposed by the
+// db-inspector sidecar.  Contains one entry per enabled database tracer.
+type InspectReport struct {
+	Timestamp time.Time         `json:"timestamp"`
+	Databases []DBInspectReport `json:"databases"`
+}

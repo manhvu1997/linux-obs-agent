@@ -2,18 +2,23 @@
 # Makefile for linux-obs-agent
 #
 # Targets:
-#   make generate   – compile eBPF C programs and generate Go scaffolding
-#   make build      – build the obs-agent binary
-#   make all        – generate + build
-#   make vmlinux    – download/generate vmlinux.h via bpftool
-#   make clean      – remove build artifacts
-#   make lint       – run golangci-lint
-#   make image      – build Docker image
+#   make generate         – compile eBPF C programs and generate Go scaffolding
+#   make build            – build the obs-agent binary
+#   make build-inspector  – build the db-inspector sidecar binary
+#   make all              – generate + build + build-inspector
+#   make vmlinux          – download/generate vmlinux.h via bpftool
+#   make clean            – remove build artifacts
+#   make lint             – run golangci-lint
+#   make image            – build obs-agent Docker image
+#   make image-inspector  – build db-inspector Docker image
 # ──────────────────────────────────────────────────────────────────────────────
 
-BINARY        := obs-agent
-BUILD_DIR     := ./build
-CMD_DIR       := ./cmd/agent
+BINARY          := obs-agent
+INSPECTOR_BINARY := db-inspector
+BUILD_DIR       := ./build
+CMD_DIR         := ./cmd/agent
+INSPECTOR_DIR   := ./cmd/db-inspector
+INSPECTOR_REPO  ?= ghcr.io/youorg/db-inspector
 HEADERS_DIR   := ./internal/ebpf/headers
 
 # Compiler settings
@@ -31,11 +36,11 @@ GOOS          := linux
 IMAGE_REPO    ?= ghcr.io/youorg/obs-agent
 IMAGE_TAG     ?= latest
 
-.PHONY: all generate build clean lint image vmlinux deps
+.PHONY: all generate build build-inspector clean lint image image-inspector vmlinux deps
 
 # ─── Default ──────────────────────────────────────────────────────────────────
 
-all: generate build
+all: generate build build-inspector
 
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 
@@ -85,6 +90,24 @@ build:
 		-o $(BUILD_DIR)/$(BINARY) $(CMD_DIR)
 	@echo ">>> Binary: $(BUILD_DIR)/$(BINARY)"
 	@ls -lh $(BUILD_DIR)/$(BINARY)
+
+# ─── DB Inspector ────────────────────────────────────────────────────────────
+
+build-inspector:
+	@echo ">>> Building $(INSPECTOR_BINARY)"
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) \
+		$(GO) build $(GOFLAGS) \
+		-ldflags "-s -w \
+			-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" \
+		-o $(BUILD_DIR)/$(INSPECTOR_BINARY) $(INSPECTOR_DIR)
+	@echo ">>> Binary: $(BUILD_DIR)/$(INSPECTOR_BINARY)"
+	@ls -lh $(BUILD_DIR)/$(INSPECTOR_BINARY)
+
+image-inspector:
+	docker build -t $(INSPECTOR_REPO):$(IMAGE_TAG) \
+		--build-arg VERSION=$(shell git describe --tags --always) \
+		-f deploy/Dockerfile.db-inspector .
 
 # ─── Clean ────────────────────────────────────────────────────────────────────
 

@@ -7,20 +7,21 @@
 
 ## Table of Contents
 
-1. [Architecture Overview](README.md#1-architecture-overview)
-2. [Project Structure](README.md#2-project-structure)
-3. [Module Reference](README.md#3-module-reference)
-4. [eBPF Programs](README.md#4-ebpf-programs)
-5. [Trigger Engine](README.md#5-trigger-engine)
-6. [Fsync Tracer](README.md#6-fsync-tracer)
-7. [Data Flow](README.md#7-data-flow)
-8. [Build Pipeline](README.md#8-build-pipeline)
-9. [Installation & Running](README.md#9-installation--running)
-10. [Kubernetes Deployment](README.md#10-kubernetes-deployment)
-11. [Security & Capabilities](README.md#11-security--capabilities)
-12. [Prometheus Metrics](README.md#12-prometheus-metrics)
-13. [Performance Budget](README.md#13-performance-budget)
-14. [Extending the Agent](README.md#14-extending-the-agent)
+1. [Architecture Overview](#1-architecture-overview)
+2. [Project Structure](#2-project-structure)
+3. [Module Reference](#3-module-reference)
+4. [eBPF Programs](#4-ebpf-programs)
+5. [Trigger Engine](#5-trigger-engine)
+6. [Fsync Tracer](#6-fsync-tracer)
+7. [DB Inspector Sidecar](#7-db-inspector-sidecar)
+8. [Data Flow](#8-data-flow)
+9. [Build Pipeline](#9-build-pipeline)
+10. [Installation & Running](#10-installation--running)
+11. [Kubernetes Deployment](#11-kubernetes-deployment)
+12. [Security & Capabilities](#12-security--capabilities)
+13. [Prometheus Metrics](#13-prometheus-metrics)
+14. [Performance Budget](#14-performance-budget)
+15. [Extending the Agent](#15-extending-the-agent)
 
 ---
 
@@ -87,64 +88,84 @@
 
 ```
 linux-obs-agent/
-├── cmd/agent/
-│   └── main.go                  ← daemon entry point, signal handling
+├── cmd/
+│   ├── agent/
+│   │   └── main.go                  ← daemon entry point, signal handling
+│   └── db-inspector/
+│       └── main.go                  ← sidecar entry point: /healthz + /api/inspect
 │
 ├── internal/
 │   ├── config/
-│   │   └── config.go            ← YAML config with defaults + validation
+│   │   ├── config.go                ← YAML config with defaults + validation
+│   │   └── db_inspector_config.go   ← slim config for db-inspector sidecar
 │   │
 │   ├── model/
-│   │   └── types.go             ← all data structs (metrics, events, snapshot)
+│   │   └── types.go                 ← all data structs (metrics, events, snapshot,
+│   │                                   DBInspectReport, InspectReport)
 │   │
 │   ├── collector/
-│   │   ├── collector.go         ← orchestrator: runs all scrapers every 5s
-│   │   ├── cpu.go               ← /proc/stat → CPUMetrics (delta-based)
-│   │   └── system.go            ← /proc/meminfo, /proc/diskstats, /proc/net/dev
+│   │   ├── collector.go             ← orchestrator: runs all scrapers every 5s
+│   │   ├── cpu.go                   ← /proc/stat → CPUMetrics (delta-based)
+│   │   └── system.go                ← /proc/meminfo, /proc/diskstats, /proc/net/dev
 │   │
 │   ├── ebpf/
-│   │   ├── manager.go           ← module lifecycle: lazy start, auto-stop, cool-down
+│   │   ├── manager.go               ← module lifecycle: lazy start, auto-stop, cool-down
 │   │   ├── cpu_profile/
-│   │   │   ├── cpu_profile.bpf.c ← eBPF C: perf_event sampling + stack traces
-│   │   │   ├── gen.go           ← //go:generate bpf2go directive
-│   │   │   └── loader.go        ← Go: load, attach perf_event per CPU, consume ringbuf
+│   │   │   ├── cpu_profile.bpf.c    ← eBPF C: perf_event sampling + stack traces
+│   │   │   ├── gen.go               ← //go:generate bpf2go directive
+│   │   │   └── loader.go            ← Go: load, attach perf_event per CPU, consume ringbuf
 │   │   ├── io_latency/
-│   │   │   ├── io_latency.bpf.c  ← eBPF C: block_rq_issue/complete latency
+│   │   │   ├── io_latency.bpf.c     ← eBPF C: block_rq_issue/complete latency
 │   │   │   ├── gen.go
 │   │   │   └── loader.go
 │   │   ├── runqlat/
-│   │   │   ├── runqlat.bpf.c    ← eBPF C: sched_wakeup → sched_switch delta
+│   │   │   ├── runqlat.bpf.c        ← eBPF C: sched_wakeup → sched_switch delta
 │   │   │   ├── gen.go
 │   │   │   └── loader.go
 │   │   ├── tcp_retransmit/
 │   │   │   ├── tcp_retransmit.bpf.c ← eBPF C: tp_btf/tcp_retransmit_skb
 │   │   │   ├── gen.go
 │   │   │   └── loader.go
-│   │   └── fsync/               ← NEW: always-on fsync latency tracer
-│   │       ├── fsync.bpf.c      ← eBPF C: kprobe/kretprobe + LRU_HASH aggregation
+│   │   ├── fsync/                   ← always-on fsync latency tracer
+│   │   │   ├── fsync.bpf.c          ← eBPF C: kprobe/kretprobe + LRU_HASH aggregation
+│   │   │   ├── gen.go
+│   │   │   └── loader.go            ← Go: attach kprobes, TopOffenders() map poll
+│   │   └── mongo_query/             ← client-side MongoDB query latency tracer
+│   │       ├── mongo_query.bpf.c    ← eBPF C: syscall tracepoints on connect/write/read
 │   │       ├── gen.go
-│   │       └── loader.go        ← Go: attach kprobes, TopOffenders() map poll
+│   │       └── loader.go            ← Go: track connections to port 27017, parse OP_MSG
 │   │
 │   ├── trigger/
-│   │   └── engine.go            ← threshold evaluator → calls ebpf.Manager.Activate
+│   │   └── engine.go                ← threshold evaluator → calls ebpf.Manager.Activate
 │   │
-│   ├── fsync/                   ← NEW: userspace fsync analysis loop
-│   │   └── analyzer.go          ← polls LRU map, enriches PIDs, publishes FsyncAnalysis
+│   ├── fsync/
+│   │   └── analyzer.go              ← polls LRU map, enriches PIDs, publishes FsyncAnalysis
+│   │
+│   ├── mongo/
+│   │   └── analyzer.go              ← polls mongo_query eBPF maps, publishes MongoAnalysis
+│   │
+│   ├── dbinspector/                 ← extensible DB inspector interface + registry
+│   │   ├── inspector.go             ← DBInspector interface (Name/Start/Report)
+│   │   ├── registry.go              ← Registry: Register, StartAll, Report
+│   │   └── mongo.go                 ← MongoInspector adapter (wraps mongo.Analyzer)
 │   │
 │   ├── process/
-│   │   └── inspector.go         ← /proc/[pid] scanner, top-N CPU/RSS, K8s metadata
+│   │   └── inspector.go             ← /proc/[pid] scanner, top-N CPU/RSS, K8s metadata
 │   │
 │   └── exporter/
-│       ├── exporter.go          ← HTTP batch+gzip exporter with retry
-│       └── prometheus.go        ← :9200/metrics + GET /api/diagnose (now incl. fsync)
+│       ├── exporter.go              ← HTTP batch+gzip exporter with retry
+│       └── prometheus.go            ← :9200/metrics + GET /api/diagnose (incl. fsync)
 │
 ├── deploy/
-│   ├── Dockerfile               ← multi-stage: clang builder + distroless runtime
-│   ├── obs-agent.service        ← systemd unit (capabilities, cgroups limits)
-│   ├── config.yaml.example      ← annotated config reference
-│   └── daemonset.yaml           ← Kubernetes DaemonSet + ServiceMonitor
+│   ├── Dockerfile                   ← multi-stage: clang builder + distroless runtime
+│   ├── Dockerfile.db-inspector      ← same builder, produces slim db-inspector binary
+│   ├── obs-agent.service            ← systemd unit (capabilities, cgroups limits)
+│   ├── config.yaml.example          ← annotated config reference
+│   ├── daemonset.yaml               ← Kubernetes DaemonSet + ServiceMonitor
+│   ├── db-inspector.yaml            ← Kubernetes sidecar ConfigMap + Deployment + Service
+│   └── db-inspector-config.yaml.example ← annotated db-inspector config reference
 │
-├── Makefile                     ← generate / build / install / image targets
+├── Makefile                         ← generate / build / build-inspector / install / image
 └── go.mod
 ```
 
@@ -153,10 +174,10 @@ linux-obs-agent/
 ## 3. Module Reference
 
 ### `internal/config`
-Single source of truth for all tunable parameters. `config.Defaults()` returns a valid config; `config.Load(path)` merges a YAML file on top. Fields use `time.Duration` so the YAML can say `60s` or `1m`.
+Single source of truth for all tunable parameters. `config.Defaults()` returns a valid config; `config.Load(path)` merges a YAML file on top. Fields use `time.Duration` so the YAML can say `60s` or `1m`. `config.LoadDBInspector(path)` loads the slim sidecar config (log level, listen addr, mongo settings only).
 
 ### `internal/model`
-Pure data structs – no methods, no imports except `time`. Everything the agent produces is defined here. The `Snapshot` struct is the wire format sent to the central server.
+Pure data structs – no methods, no imports except `time`. Everything the agent produces is defined here. The `Snapshot` struct is the wire format sent to the central server. `DBInspectReport` and `InspectReport` are the wire types for the db-inspector `/api/inspect` endpoint.
 
 ### `internal/collector`
 Always-on. Reads `/proc` every `collect.interval` (default 5s). The `Collector.Metrics` channel is buffered to 4 so a slow consumer doesn't block scraping. Delta-based rates (bytes/s, ops/s) are computed from two consecutive samples.
@@ -172,6 +193,12 @@ Scans all `/proc/[pid]` directories every `process.scan_interval`. Uses a two-sa
 
 ### `internal/fsync`
 Always-on fsync analysis loop. `Analyzer.Start()` loads the eBPF module at agent startup and runs a `time.Ticker` every `fsync.poll_interval` (default 5 s). On each tick it batch-reads the in-kernel LRU map, enriches each PID entry with `/proc/<pid>/cmdline` and cgroup path, classifies known workloads (databases, log agents, antivirus), and atomically stores the result as a `*model.FsyncAnalysis`. The snapshot is only published when the system is under pressure (`CPU > cpu_threshold OR Mem > mem_threshold`), so `GET /api/diagnose` always reflects the most-recent high-pressure picture.
+
+### `internal/mongo`
+MongoDB slow-query analysis loop. `Analyzer.Start()` loads the `mongo_query` eBPF module and runs a poll ticker. On each tick it reads the in-kernel LRU stats map and recent slow-query events, enriches PIDs via `/proc`, and atomically stores a `*model.MongoAnalysis`. Accepts a `nil` collector — when nil, the snapshot is always published regardless of CPU/mem pressure (sidecar mode).
+
+### `internal/dbinspector`
+Extensible registry for database inspectors. `DBInspector` is a three-method interface (`Name()`, `Start()`, `Report()`). `Registry.StartAll()` launches each inspector in its own goroutine. `Registry.Report()` aggregates all inspector snapshots into a single `*model.InspectReport`. Adding a new database requires only a new adapter file implementing `DBInspector` — zero changes to existing code.
 
 ### `internal/exporter`
 Two export paths:
@@ -490,7 +517,152 @@ sudo bpftool map dump name fsync_stats
 
 ---
 
-## 7. Data Flow
+## 7. DB Inspector Sidecar
+
+### Overview
+
+`db-inspector` is a **slim sidecar binary** that deploys alongside application pods and exposes a single `GET /api/inspect` endpoint with per-database slow-query diagnostics. Unlike the full `obs-agent` DaemonSet (which has CPU profiler, IO latency, fsync tracer, trigger engine, proc collector, etc.), the sidecar contains only the MongoDB query tracer and a minimal HTTP server.
+
+**Why a separate binary instead of configuring obs-agent:**
+- Config-disabling still boots all components; a dedicated binary is smaller with zero dead code
+- The sidecar's public API surface is intentionally narrow (`/healthz`, `/api/inspect`)
+- Does not require node-level deployment — one sidecar per application pod
+
+### Architecture
+
+```
+Pod:
+  ┌─────────────────────┐    ┌──────────────────────────────────────────┐
+  │  app container      │    │  db-inspector sidecar                    │
+  │  (mongodb client)   │    │                                          │
+  │                     │    │  DBInspector Registry                    │
+  │  connects →         │    │  ┌─────────────────────────────────────┐ │
+  │    mongodb:27017    │◄───┤  │ MongoInspector                      │ │
+  └─────────────────────┘    │  │  └── mongo.Analyzer (eBPF)          │ │
+                             │  │       hooks: connect/write/read/close│ │
+                             │  │       tracks connections to :27017   │ │
+                             │  └─────────────────────────────────────┘ │
+                             │  ┌─────────────────────────────────────┐ │
+                             │  │ (MySQLInspector) ← future           │ │
+                             │  └─────────────────────────────────────┘ │
+                             │                                          │
+                             │  GET /api/inspect  →  InspectReport     │
+                             │  GET /healthz      →  "ok"              │
+                             └──────────────────────────────────────────┘
+         hostPID: true, CAP_BPF, CAP_PERFMON, CAP_SYS_PTRACE, CAP_SYS_ADMIN
+```
+
+### DBInspector Interface
+
+```go
+// internal/dbinspector/inspector.go
+type DBInspector interface {
+    Name() string                        // "mongo", "mysql", ...
+    Start(ctx context.Context) error     // blocks until ctx cancelled
+    Report() *model.DBInspectReport      // nil = no data yet
+}
+```
+
+### GET /api/inspect Response
+
+```json
+{
+  "timestamp": "2026-04-18T10:00:00Z",
+  "databases": [
+    {
+      "database": "mongo",
+      "mongo_report": {
+        "type": "mongo_analysis",
+        "timestamp": "2026-04-18T10:00:00Z",
+        "slow_threshold_ms": 500,
+        "recent_slow_queries": [
+          {
+            "pid": 1234, "tid": 1234, "fd": 7,
+            "latency_ms": 3512.4,
+            "op_type": "find",
+            "collection": "users",
+            "dest_addr": "127.0.0.1:27017",
+            "comm": "app-server"
+          }
+        ],
+        "top_processes": [
+          {
+            "pid": 1234, "comm": "app-server",
+            "total_queries": 500, "slow_queries": 12,
+            "avg_latency_ms": 45.2, "max_latency_ms": 3512.4
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+### Configuration
+
+```yaml
+# deploy/db-inspector-config.yaml.example
+log_level: info
+listen_addr: ":9201"
+
+mongo:
+  enabled: true
+  port: 27017
+  slow_query_threshold_ms: 500
+  poll_interval: 5s
+  top_n: 20
+  stale_seconds: 60
+  max_recent_queries: 100
+```
+
+Environment variable overrides: `MONGODB_TRACING_ENABLED=true`, `MONGODB_SLOW_QUERY_THRESHOLD_MS=200`.
+
+### Kubernetes Deployment
+
+```bash
+# Apply ConfigMap + example Deployment patch + Service
+kubectl apply -f deploy/db-inspector.yaml
+
+# Health check
+kubectl exec -it <pod> -c db-inspector -- wget -qO- localhost:9201/healthz
+
+# Inspect slow queries
+kubectl exec -it <pod> -c db-inspector -- \
+    wget -qO- localhost:9201/api/inspect | jq '.databases[0].mongo_report'
+```
+
+Required pod-level settings (see `deploy/db-inspector.yaml`):
+- `spec.hostPID: true` — sidecar must see `/proc/[pid]` for all node processes
+- Container capabilities: `CAP_BPF`, `CAP_PERFMON`, `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`
+- Volume mounts: `/proc` (read-only), `/sys` (writable), `/sys/fs/bpf`, `/sys/kernel/debug`
+
+### Build
+
+```bash
+# Binary
+make build-inspector
+# Produces: ./build/db-inspector
+
+# Docker image
+make image-inspector IMAGE_TAG=v1.0.0
+```
+
+### Extending to New Databases
+
+To add MySQL (or any other database):
+
+1. `internal/ebpf/mysql_query/` — new eBPF C file + loader (hooks on port 3306)
+2. `internal/mysql/analyzer.go` — same pattern as `internal/mongo/analyzer.go`
+3. `internal/dbinspector/mysql.go` — 10-line adapter implementing `DBInspector`
+4. Add `MySQLConfig` to `DBInspectorConfig` in `internal/config/db_inspector_config.go`
+5. Add `if cfg.MySQL.Enabled { registry.Register(dbinspector.NewMySQLInspector(&cfg.MySQL)) }` in `cmd/db-inspector/main.go`
+6. Add `MySQLReport *MySQLAnalysis` to `model.DBInspectReport`
+
+Zero changes to existing code for each new database.
+
+---
+
+## 8. Data Flow
 
 ```
 /proc polling (5s)
@@ -539,7 +711,7 @@ sudo bpftool map dump name fsync_stats
 
 ---
 
-## 8. Build Pipeline
+## 9. Build Pipeline
 
 ### Prerequisites
 
@@ -636,7 +808,7 @@ curl -s localhost:9200/metrics | grep obs_agent
 
 ---
 
-## 9. Installation & Running
+## 10. Installation & Running
 
 ### Bare metal / VM
 
@@ -687,7 +859,7 @@ fio --name=test --ioengine=libaio --rw=randread --bs=4k \
 
 ---
 
-## 10. Kubernetes Deployment
+## 11. Kubernetes Deployment
 
 ```bash
 # Deploy
@@ -731,7 +903,7 @@ obs_agent_mem_available_bytes / obs_agent_mem_total_bytes
 
 ---
 
-## 11. Security & Capabilities
+## 12. Security & Capabilities
 
 ### Required Linux Capabilities
 
@@ -768,7 +940,7 @@ All eBPF programs are verified by the kernel before loading:
 
 ---
 
-## 12. Prometheus Metrics
+## 13. Prometheus Metrics
 
 All metrics are prefixed with `obs_agent_`.
 
@@ -799,7 +971,7 @@ All metrics are prefixed with `obs_agent_`.
 
 ---
 
-## 13. Performance Budget
+## 14. Performance Budget
 
 | Component | CPU | Memory |
 |---|---|---|
@@ -822,7 +994,7 @@ All measurements are on a 4-core 8GB VM under moderate load. The systemd unit en
 
 ---
 
-## 14. Extending the Agent
+## 15. Extending the Agent
 
 ### Adding a new eBPF module
 

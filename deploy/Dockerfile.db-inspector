@@ -1,0 +1,81 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Multi-stage Dockerfile for db-inspector sidecar
+#
+# Identical build environment to the main obs-agent Dockerfile but produces
+# the slim db-inspector binary (only MongoDB/database tracers, no CPU/IO/fsync
+# modules, no trigger engine, no proc collector).
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ─── Stage 1: Builder ────────────────────────────────────────────────────────
+FROM --platform=linux/amd64 ubuntu:24.04 AS builder
+
+ARG VERSION=dev
+ARG TARGETARCH=amd64
+
+RUN sed -i 's|http://archive.ubuntu.com|http://mirror.kakao.com|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com|http://mirror.kakao.com|g' /etc/apt/sources.list && \
+    echo 'Acquire::Retries "5"; Acquire::http::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:longsleep/golang-backports && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        clang \
+        llvm \
+        libbpf-dev \
+        linux-headers-generic \
+        linux-tools-generic \
+        golang-1.26 \
+        ca-certificates \
+        git \
+        make && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/lib/go-1.26/bin/go /usr/local/bin/go
+
+RUN BPFTOOL=$(find /usr/lib/linux-tools -name bpftool 2>/dev/null | head -1) \
+    && [ -n "$BPFTOOL" ] && ln -sf "$BPFTOOL" /usr/local/bin/bpftool || true
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN go mod tidy
+
+RUN mkdir -p internal/ebpf/headers && \
+    VMLINUZ=$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1) && \
+    { [ -f /sys/kernel/btf/vmlinux ] && \
+        bpftool btf dump file /sys/kernel/btf/vmlinux format c \
+        > internal/ebpf/headers/vmlinux.h 2>/dev/null; } || \
+    { [ -n "$VMLINUZ" ] && \
+        bpftool btf dump file "$VMLINUZ" format c \
+        > internal/ebpf/headers/vmlinux.h 2>/dev/null; } || \
+    echo "Warning: bpftool vmlinux generation failed – using pre-built headers"
+
+RUN make generate
+
+# Build the db-inspector binary (static, no CGO)
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+    go build \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /db-inspector ./cmd/db-inspector
+
+# ─── Stage 2: Runtime ────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+LABEL org.opencontainers.image.title="db-inspector"
+LABEL org.opencontainers.image.description="eBPF-powered database slow-query sidecar"
+LABEL org.opencontainers.image.url="https://github.com/manhvu1997/linux-obs-agent"
+
+COPY --from=builder /db-inspector /db-inspector
+COPY --from=builder /build/deploy/db-inspector-config.yaml.example /etc/db-inspector/config.yaml
+
+USER root
+
+EXPOSE 9201
+
+ENTRYPOINT ["/db-inspector"]
+CMD ["-config", "/etc/db-inspector/config.yaml"]

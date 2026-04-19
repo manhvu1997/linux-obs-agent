@@ -1,0 +1,35 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# db-inspector sidecar configuration
+# ──────────────────────────────────────────────────────────────────────────────
+
+log_level: info        # debug | info | warn | error
+listen_addr: ":9201"   # GET /healthz  and  GET /api/inspect
+
+# ─── MongoDB slow-query tracer ────────────────────────────────────────────────
+# Hooks connect/write/read/close syscalls on the APPLICATION side to detect
+# queries sent to MongoDB (by destination port) and measures per-query latency.
+# Enable with MONGODB_TRACING_ENABLED=true env var OR mongo.enabled: true.
+mongo:
+  # Master switch. Default false = zero overhead when MongoDB is not in use.
+  enabled: true
+
+  # MongoDB server port to watch. Connections to this port are tracked.
+  port: 27017
+
+  # Report queries that take longer than this many milliseconds.
+  # Set low (e.g. 100) during debugging; set high (e.g. 2000) in production.
+  # Override with MONGODB_SLOW_QUERY_THRESHOLD_MS env var.
+  slow_query_threshold_ms: 500
+
+  # How often to batch-read the in-kernel LRU stats map.
+  poll_interval: 5s
+
+  # Max number of processes to include in the MongoAnalysis report.
+  top_n: 20
+
+  # Ignore LRU map entries whose last_seen timestamp is older than this many
+  # seconds. Prevents reporting processes that have already exited.
+  stale_seconds: 60
+
+  # How many individual slow-query events to keep in the recent ring.
+  max_recent_queries: 100
