@@ -38,6 +38,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mongo"
+	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/trigger"
 	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
@@ -73,6 +74,7 @@ func main() {
 		"cpus", runtime.NumCPU(),
 		"ebpf_enabled", cfg.EBPF.Enabled,
 		"mongo_tracing_enabled", cfg.Mongo.Enabled,
+		"mysql_tracing_enabled", cfg.MySQL.Enabled,
 	)
 
 	// Root context wired to OS signals (SIGTERM / SIGINT for systemd).
@@ -147,6 +149,18 @@ func main() {
 		}
 	}()
 
+	// ── MySQL slow-query tracer (server-side uprobe on mysqld) ─────────────
+	// Attaches uprobes to dispatch_command in the mysqld binary to capture
+	// slow queries (COM_QUERY latency > cfg.MySQL.SlowQueryThresholdMs) directly
+	// on the server.  Results are available via GET /api/diagnose as mysql_report.
+	// Enable with MYSQL_TRACING_ENABLED=true or mysql.enabled: true in config.
+	mysqlAnalyzer := mysql.NewAnalyzer(&cfg.MySQL, coll)
+	go func() {
+		if err := mysqlAnalyzer.Start(ctx); err != nil {
+			slog.Error("mysql analyzer error", "err", err)
+		}
+	}()
+
 	// ── Prometheus exporter ─────────────────────────────────────────────────
 	var promExp *exporter.PrometheusExporter
 	if cfg.Agent.MetricsAddr != "" {
@@ -164,6 +178,7 @@ func main() {
 		promExp.RegisterFsyncAnalyzer(fsyncAnalyzer)
 		promExp.RegisterWritebackAnalyzer(writebackAnalyzer)
 		promExp.RegisterMongoAnalyzer(mongoAnalyzer)
+		promExp.RegisterMySQLAnalyzer(mysqlAnalyzer)
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)

@@ -24,6 +24,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mongo"
+	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
 )
@@ -42,6 +43,7 @@ type PrometheusExporter struct {
 	fsyncAnalyzer     *fsync.Analyzer
 	writebackAnalyzer *writeback.Analyzer
 	mongoAnalyzer     *mongo.Analyzer
+	mysqlAnalyzer     *mysql.Analyzer
 
 	// CPU
 	cpuUsage     prometheus.Gauge
@@ -163,6 +165,13 @@ func (p *PrometheusExporter) RegisterMongoAnalyzer(a *mongo.Analyzer) {
 	p.mongoAnalyzer = a
 }
 
+// RegisterMySQLAnalyzer wires the MySQL slow-query analyzer so /api/diagnose
+// includes the latest MySQLAnalysis snapshot.
+// Only populated when MySQL tracing is enabled (MYSQL_TRACING_ENABLED=true).
+func (p *PrometheusExporter) RegisterMySQLAnalyzer(a *mysql.Analyzer) {
+	p.mysqlAnalyzer = a
+}
+
 // RecordEBPFEvent increments the per-module event counter.
 func (p *PrometheusExporter) RecordEBPFEvent(ev model.EBPFEvent) {
 	p.ebpfEventsTotal.WithLabelValues(string(ev.Type)).Inc()
@@ -274,6 +283,12 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 	// Only non-nil when MongoDB tracing is enabled and queries have been observed.
 	if p.mongoAnalyzer != nil {
 		report.MongoReport = p.mongoAnalyzer.Latest()
+	}
+
+	// MySQL slow-query analysis: latest snapshot from the server-side uprobe tracer.
+	// Only non-nil when MySQL tracing is enabled and queries have been observed.
+	if p.mysqlAnalyzer != nil {
+		report.MySQLReport = p.mysqlAnalyzer.Latest()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

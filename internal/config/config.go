@@ -23,6 +23,7 @@ type Config struct {
 	Fsync     FsyncConfig     `yaml:"fsync"`
 	Writeback WritebackConfig `yaml:"writeback"`
 	Mongo     MongoConfig     `yaml:"mongo"`
+	MySQL     MySQLConfig     `yaml:"mysql"`
 }
 
 type AgentConfig struct {
@@ -191,6 +192,32 @@ type MongoConfig struct {
 	MaxRecentQueries int `yaml:"max_recent_queries"`
 }
 
+// MySQLConfig controls the eBPF MySQL slow-query tracer.
+// When enabled, uprobes are attached to dispatch_command in the mysqld binary to
+// capture COM_QUERY calls and their latency directly on the server side.
+// Slow queries (latency > SlowQueryThresholdMs) are reported via GET /api/diagnose.
+//
+// Feature flag: set MYSQL_TRACING_ENABLED=true or mysql.enabled: true.
+type MySQLConfig struct {
+	// Enabled is the master switch for the MySQL tracer.
+	// Default false – zero overhead when disabled.
+	Enabled bool `yaml:"enabled"`
+	// MysqldPath is the absolute path to the mysqld binary for uprobe attachment.
+	// Default "/usr/sbin/mysqld".  Set via MYSQL_MYSQLD_PATH.
+	MysqldPath string `yaml:"mysqld_path"`
+	// SlowQueryThresholdMs: report queries that take longer than this (milliseconds).
+	// Default 100 ms.  Set via MYSQL_SLOW_QUERY_THRESHOLD_MS.
+	SlowQueryThresholdMs uint64 `yaml:"slow_query_threshold_ms"`
+	// PollInterval: how often to batch-read the in-kernel LRU stats map.
+	PollInterval time.Duration `yaml:"poll_interval"`
+	// TopN: max number of processes to include per MySQLAnalysis.
+	TopN int `yaml:"top_n"`
+	// StaleSeconds: ignore LRU entries not updated within this window.
+	StaleSeconds int `yaml:"stale_seconds"`
+	// MaxRecentQueries: max slow-query events to keep in the recent ring.
+	MaxRecentQueries int `yaml:"max_recent_queries"`
+}
+
 // Defaults returns a Config with sensible production defaults.
 func Defaults() *Config {
 	return &Config{
@@ -265,6 +292,15 @@ func Defaults() *Config {
 			StaleSeconds:         60,
 			MaxRecentQueries:     100,
 		},
+		MySQL: MySQLConfig{
+			Enabled:              false, // off by default; zero overhead when disabled
+			MysqldPath:           "/usr/sbin/mysqld",
+			SlowQueryThresholdMs: 100, // 100 ms
+			PollInterval:         5 * time.Second,
+			TopN:                 20,
+			StaleSeconds:         60,
+			MaxRecentQueries:     100,
+		},
 	}
 }
 
@@ -273,6 +309,7 @@ func Load(path string) (*Config, error) {
 	cfg := Defaults()
 	if path == "" {
 		applyMongoEnvOverrides(cfg)
+		applyMySQLEnvOverrides(cfg)
 		return cfg, nil
 	}
 
@@ -284,6 +321,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 	applyMongoEnvOverrides(cfg)
+	applyMySQLEnvOverrides(cfg)
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -310,6 +348,27 @@ func applyMongoEnvOverrides(cfg *Config) {
 		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
 			cfg.Mongo.Port = uint32(n)
 		}
+	}
+}
+
+// applyMySQLEnvOverrides applies environment variable overrides for the MySQL
+// tracer.  This allows enabling/configuring MySQL tracing at runtime without
+// modifying the config file.
+//
+//	MYSQL_TRACING_ENABLED=true|1|yes        – enable the tracer
+//	MYSQL_SLOW_QUERY_THRESHOLD_MS=N         – slow threshold in milliseconds
+//	MYSQL_MYSQLD_PATH=/path/to/mysqld       – path to mysqld binary
+func applyMySQLEnvOverrides(cfg *Config) {
+	if v := os.Getenv("MYSQL_TRACING_ENABLED"); v != "" {
+		cfg.MySQL.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("MYSQL_SLOW_QUERY_THRESHOLD_MS"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			cfg.MySQL.SlowQueryThresholdMs = n
+		}
+	}
+	if v := os.Getenv("MYSQL_MYSQLD_PATH"); v != "" {
+		cfg.MySQL.MysqldPath = v
 	}
 }
 

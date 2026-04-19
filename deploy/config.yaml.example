@@ -170,3 +170,11 @@ mongo:
   # How many individual slow-query events to keep in the recent ring.
   # These events include op_type, collection, latency, PID, FD, dest_addr.
   max_recent_queries: 100
+mysql:
+  enabled: false
+  mysqld_path: /usr/sbin/mysqld      # path to mysqld binary for uprobe
+  slow_query_threshold_ms: 2000       # emit ringbuf event when query > 100 ms
+  poll_interval: 5s
+  top_n: 5
+  stale_seconds: 60
+  max_recent_queries: 20
