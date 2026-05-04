@@ -14,8 +14,8 @@ RestartSec=5s
 # Drop ALL capabilities first, then add only what is needed.
 # This avoids running as full root while still being able to load eBPF programs.
 
-User=obs-agent
-Group=obs-agent
+User=root
+Group=root
 
 # Required for eBPF:
 #   CAP_BPF         – create BPF maps & load programs (kernel ≥5.8)
@@ -27,8 +27,8 @@ Group=obs-agent
 # Optional (for K8s metadata):
 #   CAP_DAC_READ_SEARCH – read /proc/[pid]/environ of other processes
 
-AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE
-CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_IPC_LOCK
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_IPC_LOCK
 
 # Lock down the rest of the process environment.
 NoNewPrivileges=yes
