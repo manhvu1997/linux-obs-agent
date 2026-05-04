@@ -1,0 +1,52 @@
+# Staging obs-agent configuration
+# Applied to: obs_agents_staging group
+
+---
+# Balanced settings for staging (more verbose than prod, less aggressive than dev)
+obs_agent:
+  log_level: "info"
+  metrics_addr: ":9200"
+
+# Standard eBPF settings
+obs_agent_ebpf:
+  enabled: true
+  active_duration: "90s"
+  cool_down: "150s"
+  sample_hz: 99
+
+# Mid-range thresholds
+obs_agent_trigger:
+  cpu_usage_percent: 85.0
+  iowait_percent: 25.0
+  load_normalised: 1.5
+  ctx_switch_delta: 150000
+  net_error_delta: 150
+
+# Standard fsync settings
+obs_agent_fsync:
+  enabled: true
+  slow_threshold_us: 2000
+  cpu_threshold: 85.0
+  mem_threshold: 85.0
+
+# Standard resource limits
+obs_agent_limits:
+  memory_max: "250M"
+  cpu_quota: "12%"
+
+# MongoDB enabled for testing
+obs_agent_mongo:
+  enabled: true
+  slow_query_threshold_ms: 1000  # Stricter than prod
+  top_n: 10
+
+# Optional: staging collector
+obs_agent_exporter:
+  url: ""
+  # url: "https://central-collector.staging.example.com:8080"
+  batch_size: 300
+  flush_interval: "45s"
+  compress: true
+
+obs_agent_environment:
+  ENVIRONMENT: "staging"

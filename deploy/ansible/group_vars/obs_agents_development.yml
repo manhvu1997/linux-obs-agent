@@ -1,0 +1,60 @@
+# Development obs-agent configuration
+# Applied to: obs_agents_development group
+
+---
+# Verbose settings for development and debugging
+obs_agent:
+  log_level: "debug"          # Full debug output
+  metrics_addr: ":9200"
+
+# Aggressive eBPF settings for dev
+obs_agent_ebpf:
+  enabled: true
+  active_duration: "60s"      # Shorter active window for iteration
+  cool_down: "60s"            # Shorter cool-down for testing
+  sample_hz: 99
+
+# Lower thresholds to catch more issues early
+obs_agent_trigger:
+  cpu_usage_percent: 70.0
+  iowait_percent: 15.0
+  load_normalised: 1.0
+  ctx_switch_delta: 50000     # Lower threshold
+  net_error_delta: 50         # Very low for testing
+
+# Lower fsync thresholds
+obs_agent_fsync:
+  enabled: true
+  slow_threshold_us: 500      # 0.5ms - catch all slowness
+  poll_interval: "2s"         # More frequent polling
+  cpu_threshold: 70.0
+  mem_threshold: 70.0
+
+# Development resource limits (more generous)
+obs_agent_limits:
+  memory_max: "500M"          # Higher for debugging
+  cpu_quota: "25%"            # Allow more CPU for testing
+
+# MySQL enabled for local testing
+obs_agent_mysql:
+  enabled: true
+  slow_query_threshold_ms: 100
+
+# MongoDB enabled for local testing
+obs_agent_mongo:
+  enabled: true
+  slow_query_threshold_ms: 500
+  top_n: 20
+
+# Send metrics to local collector for testing
+obs_agent_exporter:
+  url: ""
+  # url: "http://localhost:8080"  # Local dev collector
+  batch_size: 50              # Smaller batches
+  flush_interval: "10s"       # More frequent flushes
+  compress: false             # Disable compression for debugging
+
+# Development environment
+obs_agent_environment:
+  ENVIRONMENT: "development"
+  DEBUG: "true"
