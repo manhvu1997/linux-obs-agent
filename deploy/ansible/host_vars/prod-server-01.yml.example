@@ -1,0 +1,37 @@
+# Example host-specific variables for a single server
+# Copy to host_vars/your-server-01.yml and customize
+
+---
+# Override any group variables for this specific host
+
+# Custom node name (instead of auto-detected hostname)
+obs_agent:
+  node_name: "prod-server-01.example.com"
+
+# MongoDB on this specific host with custom settings
+obs_agent_mongo:
+  enabled: true
+  slow_query_threshold_ms: 500
+  top_n: 10
+
+# MySQL also enabled on this host
+obs_agent_mysql:
+  enabled: true
+  mysqld_path: "/usr/sbin/mysqld"
+  slow_query_threshold_ms: 1000
+
+# Send metrics to a custom collector endpoint
+obs_agent_exporter:
+  url: "https://central-collector.prod.example.com:8080"
+  batch_size: 1000
+
+# Host-specific resource limits
+obs_agent_limits:
+  memory_max: "500M"  # This high-memory server
+  cpu_quota: "20%"    # Allow more CPU
+
+# Custom environment variables
+obs_agent_environment:
+  CUSTOM_LABEL: "prod-01"
+  TEAM: "platform"
+  REGION: "us-west-2"

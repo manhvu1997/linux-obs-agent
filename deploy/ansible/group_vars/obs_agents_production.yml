@@ -1,0 +1,46 @@
+# Production obs-agent configuration
+# Applied to: obs_agents_production group
+
+---
+# More conservative settings for production
+obs_agent:
+  log_level: "warn"           # Reduce noise in production
+  metrics_addr: ":9200"
+
+# Lower CPU/IO noise thresholds
+obs_agent_ebpf:
+  enabled: true
+  active_duration: "120s"     # Longer active window for diagnosis
+  cool_down: "180s"           # Longer cool-down between triggers
+  sample_hz: 99
+
+# Higher thresholds to avoid false positives
+obs_agent_trigger:
+  cpu_usage_percent: 90.0     # Only trigger on sustained high CPU
+  iowait_percent: 30.0
+  load_normalised: 2.0
+  ctx_switch_delta: 200000    # Higher threshold for prod
+  net_error_delta: 200        # More tolerant
+
+# Increased limits for production workloads
+obs_agent_fsync:
+  slow_threshold_us: 5000     # 5ms threshold (less noise)
+  cpu_threshold: 90.0
+  mem_threshold: 90.0
+
+# Conservative resource limits
+obs_agent_limits:
+  memory_max: "300M"          # More headroom for high-load prod
+  cpu_quota: "15%"            # Slightly higher allowance
+
+# Optional: central metrics collection
+obs_agent_exporter:
+  url: ""                     # Set to your central server
+  # url: "https://central-collector.prod.example.com:8080"
+  batch_size: 500             # Larger batches
+  flush_interval: "60s"       # Less frequent flushes
+  compress: true
+
+# Production logging
+obs_agent_environment:
+  # LOG_LEVEL: "warn"  # Can also be set via env

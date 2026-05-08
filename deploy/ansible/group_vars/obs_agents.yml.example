@@ -1,0 +1,175 @@
+# Example group variables for obs-agent deployment
+# Copy to group_vars/obs_agents.yml and customize for your environment
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Basic Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Deploy binary from local build
+obs_agent_binary_source: "local"
+obs_agent_version: "latest"
+
+# Service control
+obs_agent_service_enabled: true
+obs_agent_service_state: "started"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent Settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent:
+  log_level: "info"
+  metrics_addr: ":9200"
+  node_name: ""  # empty = auto-detect
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Collectors Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_collect:
+  interval: "5s"
+  disk_devices: []    # empty = monitor all non-partition devices
+  net_interfaces: []  # empty = monitor all non-loopback interfaces
+
+# ─────────────────────────────────────────────────────────────────────────────
+# eBPF Module Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_ebpf:
+  enabled: true
+  active_duration: "60s"   # how long each module stays active after trigger
+  cool_down: "120s"        # minimum time before re-triggering
+  slow_io_threshold_us: 10000
+  runqlat_threshold_us: 50000
+  sample_hz: 99            # CPU sampling frequency (Hz)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trigger Rules (when to activate eBPF modules)
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_trigger:
+  cpu_usage_percent: 85.0      # activate cpu_profile
+  iowait_percent: 20.0         # activate io_latency
+  load_normalised: 1.5         # activate io_latency + runqlat
+  ctx_switch_delta: 100000     # activate runqlat
+  net_error_delta: 100         # activate tcp_retransmit
+  eval_interval: "10s"         # how often to evaluate
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Process Inspector Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_process:
+  top_n: 20           # number of top processes to track
+  scan_interval: "10s"
+  include_io: true    # requires CAP_SYS_PTRACE
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP Exporter (optional: send metrics to central server)
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_exporter:
+  url: ""                      # empty = disabled (only Prometheus scrape)
+  # url: "https://collector.internal:8080"  # example
+  batch_size: 200
+  flush_interval: "30s"
+  compress: true
+  timeout: "10s"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fsync Tracer Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_fsync:
+  enabled: true
+  slow_threshold_us: 1000      # emit events when fsync > 1ms
+  poll_interval: "5s"
+  top_n: 20
+  stale_seconds: 60            # ignore processes not seen in last 60s
+  cpu_threshold: 85.0          # publish snapshot when CPU exceeds this
+  mem_threshold: 85.0          # publish snapshot when memory exceeds this
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Writeback Tracer Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_writeback:
+  enabled: true
+  slow_reclaim_threshold_ns: 100000000  # 100ms
+  poll_interval: "5s"
+  top_n: 20
+  stale_seconds: 60
+  mem_threshold: 85.0
+  reclaim_spike_ns: 10000000   # 10ms spike detection
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MongoDB Tracer Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_mongo:
+  enabled: false  # set to true if using MongoDB on this host
+  port: 27017
+  slow_query_threshold_ms: 2000
+  poll_interval: "5s"
+  top_n: 20
+  stale_seconds: 60
+  max_recent_queries: 100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MySQL Tracer Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_mysql:
+  enabled: false  # set to true if using MySQL on this host
+  mysqld_path: "/usr/sbin/mysqld"
+  slow_query_threshold_ms: 2000
+  poll_interval: "5s"
+  top_n: 5
+  stale_seconds: 60
+  max_recent_queries: 20
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resource Limits
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_limits:
+  nofile: 65536
+  memlock: "infinity"
+  memory_max: "200M"   # hard limit before OOM kill
+  cpu_quota: "10%"     # cap at 10% CPU
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security & Capabilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_capabilities:
+  ambient:
+    - "CAP_BPF"
+    - "CAP_PERFMON"
+    - "CAP_SYS_ADMIN"
+    - "CAP_SYS_PTRACE"
+  bounding_set:
+    - "CAP_BPF"
+    - "CAP_PERFMON"
+    - "CAP_SYS_ADMIN"
+    - "CAP_SYS_PTRACE"
+
+obs_agent_security:
+  no_new_privileges: true
+  protect_system: "strict"
+  protect_home: "read-only"
+  private_tmp: true
+  private_devices: false
+  read_write_paths:
+    - "/sys/fs/bpf"
+    - "/sys/kernel/debug"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Extra Environment Variables
+# ─────────────────────────────────────────────────────────────────────────────
+
+obs_agent_environment:
+  # Add custom env vars as needed:
+  # DEBUG: "true"
+  # CUSTOM_LABEL: "production"

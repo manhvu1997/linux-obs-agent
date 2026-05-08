@@ -1,0 +1,105 @@
+---
+# obs-agent Ansible deployment playbook
+# Usage:
+#   ansible-playbook -i inventory/hosts site.yml
+#   ansible-playbook -i inventory/hosts site.yml --tags install,config
+#   ansible-playbook -i inventory/hosts site.yml -e "obs_agent.log_level=debug"
+
+- name: Deploy obs-agent to Linux hosts
+  hosts: obs_agents
+  gather_facts: true
+  become: true
+  become_method: sudo
+
+  pre_tasks:
+    - name: Display deployment information
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════════╗
+          ║              obs-agent Ansible Deployment                     ║
+          ╚═══════════════════════════════════════════════════════════════╝
+          Deployment Target: {{ inventory_hostname }}
+          Deployment Date: {{ ansible_date_time.iso8601 }}
+          Ansible User: {{ ansible_user_id }}
+          Binary Source: {{ obs_agent_binary_source }}
+          Config Path: {{ obs_agent_config_path }}
+          Service Enabled: {{ obs_agent_service_enabled }}
+          Service State: {{ obs_agent_service_state }}
+      tags:
+        - always
+
+    - name: Validate required variables
+      assert:
+        that:
+          - obs_agent_user is defined
+          - obs_agent_group is defined
+          - obs_agent_binary_path is defined
+          - obs_agent_config_path is defined
+        fail_msg: "Missing required variables"
+      tags:
+        - always
+
+  roles:
+    - role: obs-agent
+      tags:
+        - install
+        - config
+        - service
+        - validate
+
+  post_tasks:
+    - name: Post-deployment validation
+      block:
+        - name: Check service is running
+          systemd:
+            name: obs-agent
+          register: service_check
+
+        - name: Display final status
+          debug:
+            msg: |
+              ╔═══════════════════════════════════════════════════════════════╗
+              ║         obs-agent Deployment Completed Successfully          ║
+              ╚═══════════════════════════════════════════════════════════════╝
+              Service Status: {{ service_check.status.ActiveState }}
+              Service Enabled: {{ service_check.status.UnitFileState }}
+              PID: {{ service_check.status.MainPID }}
+              Uptime: {{ service_check.status.ActiveEnterTimestamp }}
+              Memory: {{ service_check.status.MemoryCurrent | default('N/A') }}
+
+              Configuration:
+                - Config File: {{ obs_agent_config_path }}
+                - Log Level: {{ obs_agent.log_level }}
+                - Metrics Port: {{ obs_agent.metrics_addr }}
+
+              Access Points:
+                - Metrics: http://{{ ansible_default_ipv4.address }}:9200/metrics
+                - Diagnose API: http://{{ ansible_default_ipv4.address }}:9200/api/diagnose
+                - Logs: journalctl -u obs-agent -f
+
+              Next Steps:
+                1. Verify metrics are being collected:
+                   curl -s http://localhost:9200/metrics | head -20
+                2. Check diagnostics API:
+                   curl -s http://localhost:9200/api/diagnose | jq .
+                3. View recent logs:
+                   sudo journalctl -u obs-agent -n 50 -f
+      tags:
+        - always
+
+  handlers:
+    - name: reload systemd and restart obs-agent
+      systemd:
+        daemon_reload: true
+        name: obs-agent
+        state: restarted
+
+    - name: restart obs-agent
+      systemd:
+        name: obs-agent
+        state: restarted
+
+    - name: reload obs-agent
+      systemd:
+        name: obs-agent
+        state: reloaded

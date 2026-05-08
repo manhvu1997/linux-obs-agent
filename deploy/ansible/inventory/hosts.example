@@ -1,0 +1,66 @@
+# obs-agent Ansible inventory example
+# Copy to inventory/hosts and customize for your environment
+
+[obs_agents]
+# List all servers where obs-agent should be deployed
+
+# Production servers - standard config
+prod-server-01.example.com    ansible_host=10.0.1.10   env=production
+prod-server-02.example.com    ansible_host=10.0.1.11   env=production
+prod-server-03.example.com    ansible_host=10.0.1.12   env=production
+
+# Staging servers - with MongoDB enabled
+staging-server-01.example.com ansible_host=10.0.2.10  env=staging mongo_enabled=true
+staging-server-02.example.com ansible_host=10.0.2.11  env=staging mongo_enabled=true
+
+# Development servers - debug mode
+dev-server-01.example.com     ansible_host=10.0.3.10   env=development debug=true
+
+# Localhost (for testing)
+# localhost ansible_connection=local
+
+[obs_agents:vars]
+# Default variables for the group
+
+# SSH settings
+ansible_user=admin
+ansible_become_user=root
+ansible_become=yes
+
+# Connection timeouts
+ansible_connection_timeout=30
+ansible_command_timeout=60
+
+# Python interpreter (auto-detected by default)
+# ansible_python_interpreter=/usr/bin/python3
+
+[obs_agents_production]
+# Production-specific group
+prod-server-01.example.com
+prod-server-02.example.com
+prod-server-03.example.com
+
+[obs_agents_production:vars]
+obs_agent.log_level=warn
+obs_agent.metrics_addr=":9200"
+obs_agent_limits.memory_max=200M
+obs_agent_limits.cpu_quota=10%
+
+[obs_agents_staging]
+# Staging-specific group
+staging-server-01.example.com
+staging-server-02.example.com
+
+[obs_agents_staging:vars]
+obs_agent.log_level=info
+obs_agent_mongo.enabled=true
+obs_agent_mongo.slow_query_threshold_ms=1000
+
+[obs_agents_development]
+# Development-specific group
+dev-server-01.example.com
+
+[obs_agents_development:vars]
+obs_agent.log_level=debug
+obs_agent_ebpf.sample_hz=50
+obs_agent_trigger.cpu_usage_percent=70.0
