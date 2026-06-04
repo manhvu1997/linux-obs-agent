@@ -92,14 +92,29 @@ struct {
 } fsync_stats SEC(".maps");
 
 /*
- * events: ringbuf for slow-fsync notifications.
- * 256 KB is sufficient for ~1600 events before consumer must drain.
- * Events are discarded (not blocking) if the buffer is full.
+ * events: slow-fsync notification channel.
+ *
+ * BPF_MAP_TYPE_RINGBUF (kernel >= 5.8) is used when compiled with -DUSE_RINGBUF:
+ *   single shared buffer, zero-copy reserve/submit, lowest overhead.
+ * BPF_MAP_TYPE_PERF_EVENT_ARRAY (kernel >= 3.4) is the compat fallback:
+ *   per-CPU buffers, slightly higher overhead, works on kernels 3.4–5.7.
+ *
+ * max_entries for the compat map is 0 here and set by userspace at load time
+ * to ebpf.PossibleCPU() so it always covers all CPUs on the host.
  */
+#ifdef USE_RINGBUF
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 18); /* 256 KB */
 } events SEC(".maps");
+#else
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, 0); /* overridden at load time to ebpf.PossibleCPU() */
+} events SEC(".maps");
+#endif
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -129,7 +144,7 @@ static __always_inline void record_entry(void)
  * 3. Updates the per-PID LRU stats map (atomic).
  * 4. Emits a ringbuf event if latency exceeds slow_fsync_threshold_us.
  */
-static __always_inline void record_exit(__u8 syscall_nr)
+static __always_inline void record_exit(void *ctx, __u8 syscall_nr)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 tid      = (__u32)(pid_tgid & 0xffffffffULL);
@@ -168,11 +183,12 @@ static __always_inline void record_exit(__u8 syscall_nr)
         bpf_map_update_elem(&fsync_stats, &tgid, &new_val, BPF_NOEXIST);
     }
 
-    // ── Emit slow-event to ringbuf (drop-safe) ────────────────────────────
+    // ── Emit slow-event (drop-safe) ──────────────────────────────────────
     __u64 latency_us = latency_ns / 1000ULL;
     if (latency_us < slow_fsync_threshold_us)
         return;
 
+#ifdef USE_RINGBUF
     struct fsync_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
     if (!ev)
         return; /* ring full – drop rather than block */
@@ -184,6 +200,17 @@ static __always_inline void record_exit(__u8 syscall_nr)
     ev->syscall_nr    = syscall_nr;
     bpf_get_current_comm(&ev->comm, sizeof(ev->comm));
     bpf_ringbuf_submit(ev, 0);
+#else
+    struct fsync_event ev;
+    __builtin_memset(&ev, 0, sizeof(ev));
+    ev.pid           = tid;
+    ev.tgid          = tgid;
+    ev.latency_us    = latency_us;
+    ev.timestamp_ns  = now;
+    ev.syscall_nr    = syscall_nr;
+    bpf_get_current_comm(&ev.comm, sizeof(ev.comm));
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &ev, sizeof(ev));
+#endif
 }
 
 // ─── Programs ─────────────────────────────────────────────────────────────────
@@ -198,7 +225,7 @@ int kprobe_fsync(struct pt_regs *ctx)
 SEC("kretprobe/__x64_sys_fsync")
 int kretprobe_fsync(struct pt_regs *ctx)
 {
-    record_exit(0);
+    record_exit(ctx, 0);
     return 0;
 }
 
@@ -212,7 +239,7 @@ int kprobe_fdatasync(struct pt_regs *ctx)
 SEC("kretprobe/__x64_sys_fdatasync")
 int kretprobe_fdatasync(struct pt_regs *ctx)
 {
-    record_exit(1);
+    record_exit(ctx, 1);
     return 0;
 }
 
@@ -226,7 +253,7 @@ int kprobe_sync_file_range(struct pt_regs *ctx)
 SEC("kretprobe/__x64_sys_sync_file_range")
 int kretprobe_sync_file_range(struct pt_regs *ctx)
 {
-    record_exit(2);
+    record_exit(ctx, 2);
     return 0;
 }
 

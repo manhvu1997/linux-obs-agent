@@ -5,12 +5,16 @@
 // latency) are aggregated in-kernel inside a BPF_MAP_TYPE_LRU_HASH.
 // TopDirtyProducers() does a single batch map read every poll interval – no
 // per-event userspace wakeup.  Only direct-reclaim outlier events (latency >
-// slow_reclaim_threshold_ns) are emitted to the ringbuf.
+// slow_reclaim_threshold_ns) are emitted to the ring buffer.
+//
+// Kernel compatibility:
+//   - kernel >= 5.8: uses BPF_MAP_TYPE_RINGBUF (lower overhead, single buffer)
+//   - kernel <  5.8: uses BPF_MAP_TYPE_PERF_EVENT_ARRAY (per-CPU, kernel >= 3.4)
 //
 // # Lifecycle
 //
 //	l := NewLoader(100_000_000)       // 100 ms slow-reclaim threshold
-//	err := l.Start(ctx)               // attach tracepoints, start ringbuf consumer
+//	err := l.Start(ctx)               // attach tracepoints, start event consumer
 //	offenders := l.TopDirtyProducers(10, 0)  // poll every 5 s
 //	l.Stop()
 package writeback
@@ -29,6 +33,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
@@ -36,21 +41,67 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 )
 
+// eventReader is a unified interface over ringbuf.Reader and perf.Reader.
+type eventReader interface {
+	Read() (rawSample []byte, err error)
+	Close() error
+}
+
+type ringbufEventReader struct{ r *ringbuf.Reader }
+
+func (w *ringbufEventReader) Read() ([]byte, error) {
+	rec, err := w.r.Read()
+	if errors.Is(err, ringbuf.ErrClosed) {
+		return nil, errReaderClosed
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec.RawSample, nil
+}
+func (w *ringbufEventReader) Close() error { return w.r.Close() }
+
+type perfEventReader struct{ r *perf.Reader }
+
+func (w *perfEventReader) Read() ([]byte, error) {
+	rec, err := w.r.Read()
+	if errors.Is(err, perf.ErrClosed) {
+		return nil, errReaderClosed
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec.RawSample, nil
+}
+func (w *perfEventReader) Close() error { return w.r.Close() }
+
+var errReaderClosed = errors.New("reader closed")
+
 // Loader manages the writeback eBPF module lifecycle.
 type Loader struct {
 	thresholdNs uint64
 
-	objs  WritebackObjects
+	// Exactly one of objs / objsCompat is populated after Start().
+	objs       WritebackObjects
+	objsCompat WritebackCompatObjects
+
+	// pidStatsMap and sysCountMap point to the maps from whichever object set is active.
+	pidStatsMap *ebpf.Map
+	sysCountMap *ebpf.Map
+
 	links []link.Link
-	rd    *ringbuf.Reader
+	rd    eventReader // ringbuf on kernel >= 5.8, perf on older kernels
+
+	// useCompat is set when the compat (PERF_EVENT_ARRAY) path is active.
+	useCompat bool
 
 	// SlowEvents receives outlier direct-reclaim events (latency > threshold).
-	// Buffered to 256 so the consume goroutine never blocks the ringbuf reader.
+	// Buffered to 256 so the consume goroutine never blocks the reader.
 	SlowEvents chan model.EBPFEvent
 }
 
 // NewLoader creates a Loader.  thresholdNs is the minimum direct-reclaim
-// latency in nanoseconds that causes a ringbuf event (0 → default 100 ms).
+// latency in nanoseconds that causes an event (0 → default 100 ms).
 func NewLoader(thresholdNs uint64) *Loader {
 	if thresholdNs == 0 {
 		thresholdNs = 100_000_000 // 100 ms
@@ -61,14 +112,37 @@ func NewLoader(thresholdNs uint64) *Loader {
 	}
 }
 
+// kernelSupportsRingbuf reports whether the running kernel supports
+// BPF_MAP_TYPE_RINGBUF (added in Linux 5.8).
+func kernelSupportsRingbuf() bool {
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return false
+	}
+	ver := strings.TrimSpace(string(data))
+	var major, minor int
+	fmt.Sscanf(ver, "%d.%d", &major, &minor)
+	return major > 5 || (major == 5 && minor >= 8)
+}
+
 // Start loads the eBPF objects, sets the reclaim threshold, attaches all four
-// tracepoints, and launches the ringbuf consumer goroutine.
+// tracepoints, and launches the event consumer goroutine.
+//
+// On kernel >= 5.8 the RINGBUF-compiled objects are used; on older kernels
+// the PERF_EVENT_ARRAY compat objects are loaded automatically.
 func (l *Loader) Start(ctx context.Context) error {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("writeback: removing memlock: %w", err)
 	}
+	if kernelSupportsRingbuf() {
+		return l.startRingbuf(ctx)
+	}
+	l.useCompat = true
+	return l.startPerfEvent(ctx)
+}
 
-	// Load spec before LoadAndAssign so we can rewrite const volatile vars.
+// startRingbuf loads the RINGBUF-compiled objects (kernel >= 5.8).
+func (l *Loader) startRingbuf(ctx context.Context) error {
 	spec, err := LoadWriteback()
 	if err != nil {
 		return fmt.Errorf("writeback: loading eBPF spec: %w", err)
@@ -79,59 +153,119 @@ func (l *Loader) Start(ctx context.Context) error {
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return fmt.Errorf("writeback: loading eBPF objects: %w", err)
 	}
+	l.pidStatsMap = l.objs.WbPidStats
+	l.sysCountMap = l.objs.WbSysCount
 
-	// Open ringbuf reader before attaching probes – avoids missing early events.
 	rd, err := ringbuf.NewReader(l.objs.Events)
 	if err != nil {
 		l.objs.Close()
 		return fmt.Errorf("writeback: opening ringbuf: %w", err)
 	}
-	l.rd = rd
+	l.rd = &ringbufEventReader{rd}
 
-	// Attach dirty-page tracepoint: try writeback_dirty_folio first (kernel >= ~5.18
-	// converted the page cache from struct page to struct folio and renamed the
-	// tracepoint).  Fall back to writeback_dirty_page for older kernels.
+	dirtyName, err := l.attachTracepoints(
+		l.objs.TpWritebackDirtyFolio, l.objs.TpWritebackDirtyPage,
+		l.objs.TpWritebackStart,
+		l.objs.TpDirectReclaimBegin, l.objs.TpDirectReclaimEnd,
+	)
+	if err != nil {
+		l.cleanup()
+		return err
+	}
+
+	slog.Info("writeback: started (ringbuf)",
+		"threshold_ns", l.thresholdNs, "dirty_hook", dirtyName)
+	go l.consume(ctx)
+	return nil
+}
+
+// startPerfEvent loads the PERF_EVENT_ARRAY compat objects (kernel < 5.8).
+func (l *Loader) startPerfEvent(ctx context.Context) error {
+	spec, err := LoadWritebackCompat()
+	if err != nil {
+		return fmt.Errorf("writeback: loading eBPF compat spec: %w", err)
+	}
+	if err := spec.Variables["slow_reclaim_threshold_ns"].Set(l.thresholdNs); err != nil {
+		slog.Warn("writeback: could not set slow_reclaim_threshold_ns", "err", err)
+	}
+
+	// PERF_EVENT_ARRAY requires max_entries >= number of possible CPUs.
+	nCPU, cpuErr := ebpf.PossibleCPU()
+	if cpuErr != nil || nCPU <= 0 {
+		nCPU = 128
+	}
+	spec.Maps["events"].MaxEntries = uint32(nCPU)
+
+	if err := spec.LoadAndAssign(&l.objsCompat, nil); err != nil {
+		return fmt.Errorf("writeback: loading eBPF objects: %w", err)
+	}
+	l.pidStatsMap = l.objsCompat.WbPidStats
+	l.sysCountMap = l.objsCompat.WbSysCount
+
+	pr, err := perf.NewReader(l.objsCompat.Events, os.Getpagesize())
+	if err != nil {
+		l.objsCompat.Close()
+		return fmt.Errorf("writeback: opening perf reader: %w", err)
+	}
+	l.rd = &perfEventReader{pr}
+
+	dirtyName, err := l.attachTracepoints(
+		l.objsCompat.TpWritebackDirtyFolio, l.objsCompat.TpWritebackDirtyPage,
+		l.objsCompat.TpWritebackStart,
+		l.objsCompat.TpDirectReclaimBegin, l.objsCompat.TpDirectReclaimEnd,
+	)
+	if err != nil {
+		l.cleanup()
+		return err
+	}
+
+	slog.Info("writeback: started (perf compat)",
+		"threshold_ns", l.thresholdNs, "dirty_hook", dirtyName)
+	go l.consume(ctx)
+	return nil
+}
+
+// attachTracepoints attaches the four writeback/vmscan tracepoints.
+// It tries writeback_dirty_folio first (kernel >= 5.18) and falls back to
+// writeback_dirty_page for older kernels.
+func (l *Loader) attachTracepoints(
+	tpDirtyFolio, tpDirtyPage,
+	tpWbStart,
+	tpReclaimBegin, tpReclaimEnd *ebpf.Program,
+) (dirtyName string, err error) {
+	// Try writeback_dirty_folio first (kernel >= ~5.18), fall back to page.
 	dirtyLnk, dirtyErr := link.Tracepoint("writeback", "writeback_dirty_folio",
-		l.objs.TpWritebackDirtyFolio, nil)
-	dirtyName := "writeback_dirty_folio"
+		tpDirtyFolio, nil)
+	dirtyName = "writeback_dirty_folio"
 	if dirtyErr != nil {
 		dirtyLnk, dirtyErr = link.Tracepoint("writeback", "writeback_dirty_page",
-			l.objs.TpWritebackDirtyPage, nil)
+			tpDirtyPage, nil)
 		dirtyName = "writeback_dirty_page"
 	}
 	if dirtyErr != nil {
-		l.cleanup()
-		return fmt.Errorf("writeback: attaching dirty page/folio tracepoint: %w", dirtyErr)
+		return "", fmt.Errorf("writeback: attaching dirty page/folio tracepoint: %w", dirtyErr)
 	}
 	l.links = append(l.links, dirtyLnk)
 
-	// Attach remaining tracepoints.
 	type tpEntry struct {
 		group string
 		name  string
 		prog  *ebpf.Program
 	}
 	tps := []tpEntry{
-		{"writeback", "writeback_start", l.objs.TpWritebackStart},
-		{"vmscan", "mm_vmscan_direct_reclaim_begin", l.objs.TpDirectReclaimBegin},
-		{"vmscan", "mm_vmscan_direct_reclaim_end", l.objs.TpDirectReclaimEnd},
+		{"writeback", "writeback_start", tpWbStart},
+		{"vmscan", "mm_vmscan_direct_reclaim_begin", tpReclaimBegin},
+		{"vmscan", "mm_vmscan_direct_reclaim_end", tpReclaimEnd},
 	}
 	for _, tp := range tps {
 		lnk, lerr := link.Tracepoint(tp.group, tp.name, tp.prog, nil)
 		if lerr != nil {
-			l.cleanup()
-			return fmt.Errorf("writeback: attaching tracepoint %s/%s: %w",
+			return "", fmt.Errorf("writeback: attaching tracepoint %s/%s: %w",
 				tp.group, tp.name, lerr)
 		}
 		l.links = append(l.links, lnk)
 	}
-
-	slog.Info("writeback: started",
-		"threshold_ns", l.thresholdNs,
-		"dirty_hook", dirtyName,
-		"hooks", "writeback_start,direct_reclaim_begin,direct_reclaim_end")
-	go l.consume(ctx)
-	return nil
+	return dirtyName, nil
 }
 
 // Stop detaches all tracepoints and releases all kernel resources.
@@ -149,7 +283,11 @@ func (l *Loader) cleanup() {
 		l.rd.Close()
 		l.rd = nil
 	}
-	l.objs.Close()
+	if l.useCompat {
+		l.objsCompat.Close()
+	} else {
+		l.objs.Close()
+	}
 }
 
 // ─── Map polling ──────────────────────────────────────────────────────────────
@@ -204,7 +342,7 @@ func (l *Loader) TopReclaimers(n int, staleNs uint64) []WritebackPIDStat {
 func (l *Loader) SysWritebackCount() uint64 {
 	var key uint32
 	var cnt uint64
-	if err := l.objs.WbSysCount.Lookup(&key, &cnt); err != nil {
+	if err := l.sysCountMap.Lookup(&key, &cnt); err != nil {
 		return 0
 	}
 	return cnt
@@ -220,7 +358,7 @@ func (l *Loader) topPIDs(n int, staleNs uint64, less func(a, b WritebackPIDStat)
 	var key uint32
 	var val WritebackWbPidVal // bpf2go-generated type
 
-	iter := l.objs.WbPidStats.Iterate()
+	iter := l.pidStatsMap.Iterate()
 	for iter.Next(&key, &val) {
 		// Skip stale entries.  Guard: if monotonicNowNs returned 0 (clock
 		// failure), skip the stale check entirely.
@@ -251,10 +389,11 @@ func (l *Loader) topPIDs(n int, staleNs uint64, less func(a, b WritebackPIDStat)
 	return all
 }
 
-// ─── Ringbuf consumer ─────────────────────────────────────────────────────────
+// ─── Event consumer ───────────────────────────────────────────────────────────
 
-// consume reads slow direct-reclaim events from the ringbuf and forwards them
-// to SlowEvents.  Exits when ctx is cancelled or the reader is closed (Stop).
+// consume reads slow direct-reclaim events from the ring buffer (or perf buffer
+// in compat mode) and forwards them to SlowEvents.
+// Exits when ctx is cancelled or the reader is closed (Stop).
 func (l *Loader) consume(ctx context.Context) {
 	for {
 		select {
@@ -263,17 +402,17 @@ func (l *Loader) consume(ctx context.Context) {
 		default:
 		}
 
-		rec, err := l.rd.Read()
+		raw_bytes, err := l.rd.Read()
 		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
+			if errors.Is(err, errReaderClosed) {
 				return
 			}
-			slog.Warn("writeback: ringbuf read error", "err", err)
+			slog.Warn("writeback: event read error", "err", err)
 			continue
 		}
 
 		var raw WritebackWbSlowEvent // bpf2go-generated type
-		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &raw); err != nil {
+		if err := binary.Read(bytes.NewReader(raw_bytes), binary.LittleEndian, &raw); err != nil {
 			continue
 		}
 
@@ -285,9 +424,9 @@ func (l *Loader) consume(ctx context.Context) {
 			PID:       raw.Tgid,
 			Comm:      comm,
 			Data: model.WritebackSlowEvent{
-				PID:             raw.Tgid,
-				TID:             raw.Pid,
-				Comm:            comm,
+				PID:              raw.Tgid,
+				TID:              raw.Pid,
+				Comm:             comm,
 				ReclaimLatencyNs: raw.ReclaimLatencyNs,
 			},
 		}:

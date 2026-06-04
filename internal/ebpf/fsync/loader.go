@@ -5,12 +5,16 @@
 // BPF_MAP_TYPE_LRU_HASH (10 240 entries, auto-eviction).  TopOffenders() does
 // a single batch map read every poll interval – no per-event userspace wakeup.
 // Only outlier events (latency > slow_fsync_threshold_us) are emitted to the
-// ringbuf, so at 10 k+ fsync/s the ringbuf consumer runs rarely.
+// ring buffer, so at 10 k+ fsync/s the ring buffer consumer runs rarely.
+//
+// Kernel compatibility:
+//   - kernel >= 5.8: uses BPF_MAP_TYPE_RINGBUF (lower overhead, single buffer)
+//   - kernel <  5.8: uses BPF_MAP_TYPE_PERF_EVENT_ARRAY (per-CPU, kernel >= 3.4)
 //
 // # Lifecycle
 //
 //	l := NewLoader(5000)       // 5 ms slow threshold
-//	err := l.Start(ctx)       // attach kprobes, start ringbuf consumer
+//	err := l.Start(ctx)       // attach kprobes, start event consumer
 //	offenders := l.TopOffenders(10, 0)  // poll every 5 s
 //	l.Stop()
 package fsync
@@ -29,6 +33,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
@@ -36,21 +41,68 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 )
 
+// eventReader is a unified interface over ringbuf.Reader and perf.Reader.
+// It lets the consume goroutine work identically regardless of which
+// underlying map type the kernel supports.
+type eventReader interface {
+	Read() (rawSample []byte, err error)
+	Close() error
+}
+
+type ringbufEventReader struct{ r *ringbuf.Reader }
+
+func (w *ringbufEventReader) Read() ([]byte, error) {
+	rec, err := w.r.Read()
+	if errors.Is(err, ringbuf.ErrClosed) {
+		return nil, errReaderClosed
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec.RawSample, nil
+}
+func (w *ringbufEventReader) Close() error { return w.r.Close() }
+
+type perfEventReader struct{ r *perf.Reader }
+
+func (w *perfEventReader) Read() ([]byte, error) {
+	rec, err := w.r.Read()
+	if errors.Is(err, perf.ErrClosed) {
+		return nil, errReaderClosed
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec.RawSample, nil
+}
+func (w *perfEventReader) Close() error { return w.r.Close() }
+
+var errReaderClosed = errors.New("reader closed")
+
 // Loader manages the fsync eBPF module lifecycle.
 type Loader struct {
 	thresholdUs uint64
 
-	objs  FsyncObjects
+	// Exactly one of objs / objsCompat is populated after Start().
+	objs       FsyncObjects
+	objsCompat FsyncCompatObjects
+
+	// statsMap points to FsyncStats from whichever object set is active.
+	statsMap *ebpf.Map
+
 	links []link.Link
-	rd    *ringbuf.Reader
+	rd    eventReader // ringbuf on kernel >= 5.8, perf on older kernels
+
+	// useCompat is set when the compat (PERF_EVENT_ARRAY) path is active.
+	useCompat bool
 
 	// SlowEvents receives outlier events (latency > threshold).
-	// Buffered to 256 so the consume goroutine never blocks the ringbuf reader.
+	// Buffered to 256 so the consume goroutine never blocks the reader.
 	SlowEvents chan model.EBPFEvent
 }
 
 // NewLoader creates a Loader.  thresholdUs is the minimum fsync latency in
-// microseconds that causes a ringbuf event (0 → default 5 000 µs = 5 ms).
+// microseconds that causes an event (0 → default 5 000 µs = 5 ms).
 func NewLoader(thresholdUs uint64) *Loader {
 	if thresholdUs == 0 {
 		thresholdUs = 5000
@@ -61,15 +113,38 @@ func NewLoader(thresholdUs uint64) *Loader {
 	}
 }
 
+// kernelSupportsRingbuf reports whether the running kernel supports
+// BPF_MAP_TYPE_RINGBUF (added in Linux 5.8).
+func kernelSupportsRingbuf() bool {
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return false
+	}
+	ver := strings.TrimSpace(string(data))
+	// Format: "5.4.0-1093-gcp"  →  parse major.minor
+	var major, minor int
+	fmt.Sscanf(ver, "%d.%d", &major, &minor)
+	return major > 5 || (major == 5 && minor >= 8)
+}
+
 // Start loads the eBPF objects, sets the latency threshold, attaches all six
-// kprobe/kretprobe hooks, and launches the ringbuf consumer goroutine.
+// kprobe/kretprobe hooks, and launches the event consumer goroutine.
+//
+// On kernel >= 5.8 the RINGBUF-compiled objects are used; on older kernels
+// the PERF_EVENT_ARRAY compat objects are loaded automatically.
 func (l *Loader) Start(ctx context.Context) error {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("fsync: removing memlock: %w", err)
 	}
+	if kernelSupportsRingbuf() {
+		return l.startRingbuf(ctx)
+	}
+	l.useCompat = true
+	return l.startPerfEvent(ctx)
+}
 
-	// Load spec before LoadAndAssign so we can rewrite const volatile vars.
-	// After LoadAndAssign the rodata section is read-only.
+// startRingbuf loads the RINGBUF-compiled objects (kernel >= 5.8).
+func (l *Loader) startRingbuf(ctx context.Context) error {
 	spec, err := LoadFsync()
 	if err != nil {
 		return fmt.Errorf("fsync: loading eBPF spec: %w", err)
@@ -80,28 +155,90 @@ func (l *Loader) Start(ctx context.Context) error {
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return fmt.Errorf("fsync: loading eBPF objects: %w", err)
 	}
+	l.statsMap = l.objs.FsyncStats
 
-	// Open ringbuf reader before attaching probes – avoids missing early events.
 	rd, err := ringbuf.NewReader(l.objs.Events)
 	if err != nil {
 		l.objs.Close()
 		return fmt.Errorf("fsync: opening ringbuf: %w", err)
 	}
-	l.rd = rd
+	l.rd = &ringbufEventReader{rd}
 
-	// Attach kprobe/kretprobe pairs for the three syscalls.
+	if err := l.attachProbes(
+		l.objs.KprobeFsync, l.objs.KretprobeFsync,
+		l.objs.KprobeFdatasync, l.objs.KretprobeFdatasync,
+		l.objs.KprobeSyncFileRange, l.objs.KretprobeSyncFileRange,
+	); err != nil {
+		l.cleanup()
+		return err
+	}
+
+	slog.Info("fsync: started (ringbuf)", "threshold_us", l.thresholdUs)
+	go l.consume(ctx)
+	return nil
+}
+
+// startPerfEvent loads the PERF_EVENT_ARRAY compat objects (kernel < 5.8).
+func (l *Loader) startPerfEvent(ctx context.Context) error {
+	spec, err := LoadFsyncCompat()
+	if err != nil {
+		return fmt.Errorf("fsync: loading eBPF compat spec: %w", err)
+	}
+	if err := spec.Variables["slow_fsync_threshold_us"].Set(l.thresholdUs); err != nil {
+		slog.Warn("fsync: could not set slow_fsync_threshold_us", "err", err)
+	}
+
+	// PERF_EVENT_ARRAY requires max_entries >= number of possible CPUs.
+	nCPU, cpuErr := ebpf.PossibleCPU()
+	if cpuErr != nil || nCPU <= 0 {
+		nCPU = 128
+	}
+	spec.Maps["events"].MaxEntries = uint32(nCPU)
+
+	if err := spec.LoadAndAssign(&l.objsCompat, nil); err != nil {
+		return fmt.Errorf("fsync: loading eBPF objects: %w", err)
+	}
+	l.statsMap = l.objsCompat.FsyncStats
+
+	pr, err := perf.NewReader(l.objsCompat.Events, os.Getpagesize())
+	if err != nil {
+		l.objsCompat.Close()
+		return fmt.Errorf("fsync: opening perf reader: %w", err)
+	}
+	l.rd = &perfEventReader{pr}
+
+	if err := l.attachProbes(
+		l.objsCompat.KprobeFsync, l.objsCompat.KretprobeFsync,
+		l.objsCompat.KprobeFdatasync, l.objsCompat.KretprobeFdatasync,
+		l.objsCompat.KprobeSyncFileRange, l.objsCompat.KretprobeSyncFileRange,
+	); err != nil {
+		l.cleanup()
+		return err
+	}
+
+	slog.Info("fsync: started (perf compat)", "threshold_us", l.thresholdUs)
+	go l.consume(ctx)
+	return nil
+}
+
+// attachProbes attaches the six kprobe/kretprobe pairs.
+func (l *Loader) attachProbes(
+	kprobeFsync, kretprobeFsync,
+	kprobeFdatasync, kretprobeFdatasync,
+	kprobeSyncFileRange, kretprobeSyncFileRange *ebpf.Program,
+) error {
 	type probeEntry struct {
 		sym  string
 		prog *ebpf.Program
 		ret  bool
 	}
 	hooks := []probeEntry{
-		{"__x64_sys_fsync", l.objs.KprobeFsync, false},
-		{"__x64_sys_fsync", l.objs.KretprobeFsync, true},
-		{"__x64_sys_fdatasync", l.objs.KprobeFdatasync, false},
-		{"__x64_sys_fdatasync", l.objs.KretprobeFdatasync, true},
-		{"__x64_sys_sync_file_range", l.objs.KprobeSyncFileRange, false},
-		{"__x64_sys_sync_file_range", l.objs.KretprobeSyncFileRange, true},
+		{"__x64_sys_fsync", kprobeFsync, false},
+		{"__x64_sys_fsync", kretprobeFsync, true},
+		{"__x64_sys_fdatasync", kprobeFdatasync, false},
+		{"__x64_sys_fdatasync", kretprobeFdatasync, true},
+		{"__x64_sys_sync_file_range", kprobeSyncFileRange, false},
+		{"__x64_sys_sync_file_range", kretprobeSyncFileRange, true},
 	}
 	for _, h := range hooks {
 		var lnk link.Link
@@ -112,16 +249,10 @@ func (l *Loader) Start(ctx context.Context) error {
 			lnk, lerr = link.Kprobe(h.sym, h.prog, nil)
 		}
 		if lerr != nil {
-			l.cleanup()
 			return fmt.Errorf("fsync: attaching %s (ret=%v): %w", h.sym, h.ret, lerr)
 		}
 		l.links = append(l.links, lnk)
 	}
-
-	slog.Info("fsync: started",
-		"threshold_us", l.thresholdUs,
-		"hooks", "fsync,fdatasync,sync_file_range")
-	go l.consume(ctx)
 	return nil
 }
 
@@ -140,7 +271,11 @@ func (l *Loader) cleanup() {
 		l.rd.Close()
 		l.rd = nil
 	}
-	l.objs.Close()
+	if l.useCompat {
+		l.objsCompat.Close()
+	} else {
+		l.objs.Close()
+	}
 }
 
 // ─── Map polling ──────────────────────────────────────────────────────────────
@@ -177,20 +312,19 @@ func monotonicNowNs() uint64 {
 // staleNs is the maximum age of the last seen timestamp before an entry is
 // ignored (pass 0 for the default 60 s window).
 //
-// This is a pure batch read: no per-event wakeup, no ringbuf involvement.
+// This is a pure batch read: no per-event wakeup, no ring buffer involvement.
 func (l *Loader) TopOffenders(n int, staleNs uint64) []FsyncPIDStat {
 	if staleNs == 0 {
 		staleNs = 60 * uint64(time.Second)
 	}
 	// Use CLOCK_MONOTONIC — same time base as bpf_ktime_get_ns() in the kernel.
-	// Do NOT use time.Now().UnixNano() (wall clock since 1970 ≫ boot-relative ns).
 	now := monotonicNowNs()
 
 	var all []FsyncPIDStat
 	var key uint32
 	var val FsyncFsyncPidVal // bpf2go-generated type
 
-	iter := l.objs.FsyncStats.Iterate()
+	iter := l.statsMap.Iterate()
 	for iter.Next(&key, &val) {
 		// Skip stale entries.  Guard: if monotonicNowNs returned 0 (clock
 		// failure), skip the stale check entirely rather than wrapping around.
@@ -222,12 +356,13 @@ func (l *Loader) TopOffenders(n int, staleNs uint64) []FsyncPIDStat {
 	return all
 }
 
-// ─── Ringbuf consumer ─────────────────────────────────────────────────────────
+// ─── Event consumer ───────────────────────────────────────────────────────────
 
 var syscallNames = [3]string{"fsync", "fdatasync", "sync_file_range"}
 
-// consume reads slow-fsync events from the ringbuf and forwards them to
-// SlowEvents.  Exits when ctx is cancelled or the reader is closed (Stop).
+// consume reads slow-fsync events from the ring buffer (or perf buffer in compat
+// mode) and forwards them to SlowEvents.
+// Exits when ctx is cancelled or the reader is closed (Stop).
 func (l *Loader) consume(ctx context.Context) {
 	for {
 		select {
@@ -236,17 +371,17 @@ func (l *Loader) consume(ctx context.Context) {
 		default:
 		}
 
-		rec, err := l.rd.Read()
+		raw_bytes, err := l.rd.Read()
 		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
+			if errors.Is(err, errReaderClosed) {
 				return
 			}
-			slog.Warn("fsync: ringbuf read error", "err", err)
+			slog.Warn("fsync: event read error", "err", err)
 			continue
 		}
 
 		var raw FsyncFsyncEvent // bpf2go-generated type
-		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &raw); err != nil {
+		if err := binary.Read(bytes.NewReader(raw_bytes), binary.LittleEndian, &raw); err != nil {
 			continue
 		}
 

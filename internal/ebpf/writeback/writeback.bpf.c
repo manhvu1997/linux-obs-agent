@@ -108,14 +108,29 @@ struct {
 } wb_sys_count SEC(".maps");
 
 /*
- * events: ringbuf for slow direct-reclaim outlier notifications.
- * 256 KB ≈ 1600 events before consumer must drain.
- * Events are dropped (not blocking) when the buffer is full.
+ * events: slow direct-reclaim outlier notification channel.
+ *
+ * BPF_MAP_TYPE_RINGBUF (kernel >= 5.8) is used when compiled with -DUSE_RINGBUF:
+ *   single shared buffer, zero-copy reserve/submit, lowest overhead.
+ * BPF_MAP_TYPE_PERF_EVENT_ARRAY (kernel >= 3.4) is the compat fallback:
+ *   per-CPU buffers, works on kernels 3.4–5.7.
+ *
+ * max_entries for the compat map is 0 here and set by userspace at load time
+ * to ebpf.PossibleCPU() so it always covers all CPUs on the host.
  */
+#ifdef USE_RINGBUF
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 18); /* 256 KB */
 } events SEC(".maps");
+#else
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, 0); /* overridden at load time to ebpf.PossibleCPU() */
+} events SEC(".maps");
+#endif
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -250,10 +265,11 @@ int tp_direct_reclaim_end(void *ctx)
         bpf_map_update_elem(&wb_pid_stats, &tgid, &new_val, BPF_NOEXIST);
     }
 
-    /* ── Emit slow-event to ringbuf (drop-safe) ────────────────────────────── */
+    /* ── Emit slow-event (drop-safe) ────────────────────────────────────────── */
     if (latency_ns < slow_reclaim_threshold_ns)
         return 0;
 
+#ifdef USE_RINGBUF
     struct wb_slow_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
     if (!ev)
         return 0; /* ring full – drop rather than block */
@@ -264,6 +280,16 @@ int tp_direct_reclaim_end(void *ctx)
     ev->timestamp_ns       = now;
     bpf_get_current_comm(&ev->comm, sizeof(ev->comm));
     bpf_ringbuf_submit(ev, 0);
+#else
+    struct wb_slow_event ev;
+    __builtin_memset(&ev, 0, sizeof(ev));
+    ev.pid                = tid;
+    ev.tgid               = tgid;
+    ev.reclaim_latency_ns = latency_ns;
+    ev.timestamp_ns       = now;
+    bpf_get_current_comm(&ev.comm, sizeof(ev.comm));
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &ev, sizeof(ev));
+#endif
     return 0;
 }
 
