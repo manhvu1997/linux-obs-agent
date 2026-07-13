@@ -314,6 +314,80 @@ type DiagnoseReport struct {
 	// Only populated when MySQL tracing is enabled (mysql.enabled: true in config
 	// or MYSQL_TRACING_ENABLED=true).
 	MySQLReport *MySQLAnalysis `json:"mysql_report,omitempty"`
+
+	// Diagnosis is the synthesized root-cause analysis correlating every section
+	// above (metrics, processes, CPU profile, fsync/writeback, disk, network) into
+	// a single hypothesis: which resource is under pressure, which process is
+	// responsible, what activity causes it, and whether the behavior is normal,
+	// inefficient, a misconfiguration, a system bottleneck, or an application bug.
+	// Always populated by the correlation engine; Severity is "normal" when no
+	// pressure is detected.
+	Diagnosis *Diagnosis `json:"diagnosis,omitempty"`
+}
+
+// ─── Root-Cause Diagnosis ─────────────────────────────────────────────────────
+
+// Diagnosis is the output of the correlation engine (internal/diagnose).
+// It is a pure function of a DiagnoseReport's evidence and adds no kernel or
+// background overhead — it is computed synchronously on each /api/diagnose call.
+type Diagnosis struct {
+	Type      string    `json:"type"` // always "rca"
+	Timestamp time.Time `json:"timestamp"`
+	// Summary is a one-line human-readable conclusion.
+	Summary string `json:"summary"`
+	// PrimaryResource is the resource under the most pressure:
+	// "cpu" | "memory" | "disk" | "network" | "scheduler" | "none".
+	PrimaryResource string `json:"primary_resource"`
+	// Severity: "critical" | "warning" | "info" | "normal".
+	Severity string `json:"severity"`
+	// Findings are all correlated observations, highest confidence first.
+	Findings []Finding `json:"findings"`
+	// RootCause is the single most likely explanation; nil when Severity=="normal".
+	RootCause *RootCauseHypothesis `json:"root_cause,omitempty"`
+}
+
+// Finding is one correlated observation linking a resource, a responsible
+// process, the activity driving the pressure, and a causal explanation.
+type Finding struct {
+	// Resource: "cpu" | "memory" | "disk" | "network" | "scheduler".
+	Resource string `json:"resource"`
+	// Process is the responsible process when one could be attributed.
+	Process *Culprit `json:"process,omitempty"`
+	// Activity: the specific behavior, e.g. "cpu_bound", "syscall_bound",
+	// "excessive_fsync", "disk_write_pressure", "memory_pressure", "swapping",
+	// "tcp_retransmits", "runqueue_saturation", "ctx_switch_thrash".
+	Activity string `json:"activity"`
+	// Behavior classifies the nature of the workload: "normal" | "inefficient" |
+	// "misconfiguration" | "bottleneck" | "application_bug".
+	Behavior string `json:"behavior"`
+	// Explanation is the causal chain in prose (process → activity → resource).
+	Explanation string `json:"explanation"`
+	// Evidence lists the concrete metrics/events that support this finding.
+	Evidence []string `json:"evidence"`
+	// Confidence in [0,1].
+	Confidence float64 `json:"confidence"`
+}
+
+// Culprit identifies a process held responsible for a finding.
+type Culprit struct {
+	PID        uint32 `json:"pid"`
+	PPID       uint32 `json:"ppid,omitempty"`
+	Comm       string `json:"comm"`
+	Cmdline    string `json:"cmdline,omitempty"`
+	CgroupPath string `json:"cgroup_path,omitempty"`
+	// AppType is a best-effort workload class: "database" | "log_agent" |
+	// "antivirus" | "messaging" | "".
+	AppType string `json:"app_type,omitempty"`
+}
+
+// RootCauseHypothesis is the engine's single best explanation, with actionable
+// remediation hints.
+type RootCauseHypothesis struct {
+	Statement       string   `json:"statement"`
+	Resource        string   `json:"resource"`
+	Process         *Culprit `json:"process,omitempty"`
+	Confidence      float64  `json:"confidence"`
+	Recommendations []string `json:"recommendations,omitempty"`
 }
 
 // ─── Fsync Tracer ─────────────────────────────────────────────────────────────

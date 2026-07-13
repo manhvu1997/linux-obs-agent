@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
+	"github.com/manhvu1997/linux-obs-agent/internal/diagnose"
 	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
@@ -291,7 +292,24 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 		report.MySQLReport = p.mysqlAnalyzer.Latest()
 	}
 
+	// Correlate every section above into a single root-cause hypothesis.
+	// This is a pure, in-memory computation over the report just assembled —
+	// no kernel work, no goroutines, no extra polling.
+	report.Diagnosis = diagnose.Analyze(&report)
+
 	w.Header().Set("Content-Type", "application/json")
+
+	// view=rca returns ONLY the synthesized diagnosis object, for callers (e.g.
+	// an LLM/alerting pipeline) that want valid JSON containing nothing but the
+	// root-cause analysis. Default returns the full report with the embedded
+	// diagnosis field for backward compatibility.
+	if r.URL.Query().Get("view") == "rca" {
+		if err := json.NewEncoder(w).Encode(report.Diagnosis); err != nil {
+			slog.Warn("diagnose: encode error", "err", err)
+		}
+		return
+	}
+
 	if err := json.NewEncoder(w).Encode(report); err != nil {
 		slog.Warn("diagnose: encode error", "err", err)
 	}
