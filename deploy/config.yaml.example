@@ -24,8 +24,9 @@ ebpf:
   cool_down: 120s
   # IO latency events below this threshold are suppressed (reduces noise).
   slow_io_threshold_us: 10000    # 1 ms
-  # Run-queue latency events below this threshold are suppressed.
-  runqlat_threshold_us: 50000    # 5 ms
+  # DEPRECATED: use runq.process_threshold_us instead. Only consulted when
+  # runq.process_threshold_us is 0, so existing configs keep working.
+  runqlat_threshold_us: 5000     # 5 ms
   # CPU profiling sample frequency (perf_event Hz).
   # Lower = less overhead.  99 Hz ≈ 0.1% CPU on a modern server.
   sample_hz: 99
@@ -45,6 +46,56 @@ trigger:
   net_error_delta: 100
   # How often the trigger engine evaluates these rules.
   eval_interval: 10s
+
+# ─── Run-queue analysis (two-level threshold) ─────────────────────────────────
+#
+#   Level 1 (node)    – node_cpu_threshold / node_load_threshold decide when the
+#                       runqlat eBPF module is loaded at all.  While the node is
+#                       healthy nothing runs and `runqueue_report` is absent
+#                       from GET /api/diagnose entirely.
+#   Level 2 (process) – process_threshold_us decides which processes are listed
+#                       as offenders.  Each one carries a `profile_url` you can
+#                       follow for an on-demand CPU profile (see `profile:`).
+runq:
+  enabled: true
+  # Level 1: load runqlat once node CPU usage exceeds this percent.
+  node_cpu_threshold: 85.0
+  # Level 1: load runqlat once load1/NumCPU exceeds this ratio.  CPU% alone
+  # misses run-queue oversubscription, which shows as high load + moderate CPU.
+  node_load_threshold: 1.5
+  # Level 2: report a process once its MAX run-queue wait reaches this many
+  # microseconds.  Also pushed into the kernel as the ringbuf event threshold,
+  # so `slow_events` counts exactly the level-2 breaches.
+  process_threshold_us: 10000    # 10 ms
+  # In-kernel aggregation floor.  Waits below this are still counted in the
+  # global histogram but do not touch the per-process map.  sched_switch fires
+  # 100k-500k/s, so this gate is what keeps the module cheap — lower it only if
+  # sub-100us waits genuinely matter to you.
+  track_min_us: 100
+  # Max offenders per report.
+  top_n: 20
+  # Ignore processes not seen within this window.
+  stale_seconds: 60
+
+# ─── On-demand per-process CPU profiling ──────────────────────────────────────
+#
+# GET /api/profile?pid=N[&duration=10s][&format=json|folded]
+#
+# Nothing runs in the background: sampling happens only while a request is in
+# flight, is filtered to the target PID in-kernel, and is cached per-PID so a
+# user clicking through several processes does not re-profile the same one.
+# Profiling is single-flight agent-wide; a concurrent request gets HTTP 429.
+profile:
+  enabled: true
+  # Sampling window when ?duration= is omitted.
+  default_duration: 10s
+  # Longer ?duration= values are rejected with HTTP 400.
+  max_duration: 30s
+  # How long a completed profile is reused for the same PID.
+  cache_ttl: 60s
+  # counts / stack_traces map size for targeted profiles.  Smaller than the
+  # system-wide default (10240) because one process has far fewer stacks.
+  max_map_entries: 2048
 
 # ─── Process inspection ───────────────────────────────────────────────────────
 process:

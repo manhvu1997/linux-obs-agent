@@ -22,6 +22,8 @@
 13. [Prometheus Metrics](#13-prometheus-metrics)
 14. [Performance Budget](#14-performance-budget)
 15. [Extending the Agent](#15-extending-the-agent)
+16. [MySQL Slow Query Tracer](#16-mysql-slow-query-tracer)
+17. [Run-Queue Analysis & On-Demand CPU Profiling](#17-run-queue-analysis--on-demand-cpu-profiling)
 
 ---
 
@@ -110,18 +112,21 @@ linux-obs-agent/
 │   │
 │   ├── ebpf/
 │   │   ├── manager.go               ← module lifecycle: lazy start, auto-stop, cool-down
+│   │   ├── profiler.go              ← on-demand ProfilePID: cache → reuse → sample
 │   │   ├── cpu_profile/
 │   │   │   ├── cpu_profile.bpf.c    ← eBPF C: perf_event sampling + stack traces
+│   │   │   │                          (target_tgid filter, emit_events gate)
 │   │   │   ├── gen.go               ← //go:generate bpf2go directive
-│   │   │   └── loader.go            ← Go: load, attach perf_event per CPU, consume ringbuf
+│   │   │   └── loader.go            ← Go: Config/New, perf_event per CPU, ringbuf
 │   │   ├── io_latency/
 │   │   │   ├── io_latency.bpf.c     ← eBPF C: block_rq_issue/complete latency
 │   │   │   ├── gen.go
 │   │   │   └── loader.go
 │   │   ├── runqlat/
-│   │   │   ├── runqlat.bpf.c        ← eBPF C: sched_wakeup → sched_switch delta
+│   │   │   ├── runqlat.bpf.c        ← eBPF C: sched_wakeup → sched_switch delta,
+│   │   │   │                          global histogram + per-TGID LRU aggregate
 │   │   │   ├── gen.go
-│   │   │   └── loader.go
+│   │   │   └── loader.go            ← Go: Histogram(), TopOffenders() map poll
 │   │   ├── tcp_retransmit/
 │   │   │   ├── tcp_retransmit.bpf.c ← eBPF C: tp_btf/tcp_retransmit_skb
 │   │   │   ├── gen.go
@@ -137,6 +142,18 @@ linux-obs-agent/
 │   │
 │   ├── trigger/
 │   │   └── engine.go                ← threshold evaluator → calls ebpf.Manager.Activate
+│   │
+│   ├── procinfo/
+│   │   └── procinfo.go              ← shared /proc readers (cmdline, cgroup)
+│   │
+│   ├── runq/
+│   │   └── report.go                ← level-2 run-queue report builder (on-demand)
+│   │
+│   ├── cpuprofile/
+│   │   ├── report.go                ← BuildReport / BuildReportForPID (symbolized)
+│   │   ├── folded.go                ← WriteFolded: flamegraph-ready folded stacks
+│   │   ├── kallsyms.go              ← kernel symbol resolution (/proc/kallsyms)
+│   │   └── usersym.go               ← user symbol resolution (ELF + /proc/pid/maps)
 │   │
 │   ├── fsync/
 │   │   └── analyzer.go              ← polls LRU map, enriches PIDs, publishes FsyncAnalysis
@@ -154,7 +171,7 @@ linux-obs-agent/
 │   │
 │   └── exporter/
 │       ├── exporter.go              ← HTTP batch+gzip exporter with retry
-│       └── prometheus.go            ← :9200/metrics + GET /api/diagnose (incl. fsync)
+│       └── prometheus.go            ← :9200/metrics, GET /api/diagnose, GET /api/profile
 │
 ├── deploy/
 │   ├── Dockerfile                   ← multi-stage: clang builder + distroless runtime
@@ -184,6 +201,12 @@ Always-on. Reads `/proc` every `collect.interval` (default 5s). The `Collector.M
 
 ### `internal/ebpf/manager`
 Central eBPF lifecycle controller. Maintains a `moduleState` per module (active/inactive, lastStop for cool-down). `Activate()` is idempotent – calling it twice while a module is active is a no-op. Auto-stop is implemented via `context.WithTimeout`.
+
+### `internal/runq`
+On-demand builder for the level-2 run-queue report. `BuildReport(loader, metrics, opts)` reads the per-TGID LRU map, filters to processes whose **max** wait breached `process_threshold_us`, enriches each with `/proc` cmdline + cgroup, and folds the global histogram into non-empty labelled buckets. No goroutine, no polling — called from `GET /api/diagnose` only, mirroring `internal/cpuprofile`.
+
+### `internal/cpuprofile`
+Symbolization and report building for the CPU profiler. `BuildReport` aggregates all processes; `BuildReportForPID` scopes to one (skipping the 1 %-of-system noise floor, since a single target is 100 % of its own profile). `WriteFolded` streams folded stacks straight to an `http.ResponseWriter` for flamegraph rendering. Kernel symbols come from `/proc/kallsyms`, user symbols from ELF + `/proc/<pid>/maps`, both cached with periodic eviction.
 
 ### `internal/trigger`
 Stateless evaluator that runs every `trigger.eval_interval`. Reads the latest `NodeMetrics` snapshot from the collector (non-blocking `Latest()` call) and calls `manager.Activate()` when thresholds are breached. The manager handles cool-down so the trigger engine can fire freely.
@@ -233,7 +256,15 @@ SEC("perf_event") profile_cpu(ctx)
 - `counts` (HASH, 10240 entries) – aggregated sample counts per unique stack
 - `events` (RINGBUF, 256KB) – per-sample events for real-time hot-PID detection
 
-**Go side**: `Loader.TopPIDs(n)` iterates `counts` and returns the top-N by sample count, ready for flamegraph generation.
+**Config globals**:
+- `target_tgid` (default 0 = system-wide) – restricts sampling to one process, **compared against TGID** so every thread of the target is captured. Set by the on-demand profiler (§17).
+- `emit_events` (default 1) – when 0, the per-sample ringbuf write is skipped entirely and `counts` is the only data source. Targeted profiles set this to 0: the ringbuf duplicates data already in `counts`, and consuming it costs two `stack_traces` lookups per sample in userspace.
+
+**Go side**:
+- `cpu_profile.New(Config{...})` – explicit construction (`NewLoader(hz)` remains the system-wide default used by the trigger engine). `MaxEntries` shrinks the `counts` / `stack_traces` maps for targeted runs.
+- `Loader.TopPIDs(n)` returns the top-N `(pid, stack)` entries by sample count. Note this is per unique stack key, **not** per process — use `cpuprofile.BuildReport` for the per-process view.
+- `cpuprofile.BuildReport(l)` / `BuildReportForPID(l, tgid)` – symbolized, aggregated report.
+- `cpuprofile.WriteFolded(l, tgid, w)` – streams folded stacks for flamegraph rendering.
 
 ### 4.2 IO Latency (`io_latency.bpf.c`)
 
@@ -264,19 +295,32 @@ block_rq_complete (driver signals done)
 
 ```
 sched_wakeup / sched_wakeup_new
-    │  start[pid] = bpf_ktime_get_ns()
-    │
+    │  start[pid] = bpf_ktime_get_ns()      (LRU_HASH – tasks that wake and
+    │                                        then exit never reach switch)
 sched_switch (next task gets CPU)
     │  lat_us = (now - start[next->pid]) / 1000
     │  delete start[next->pid]
     │
-    ├── hist[log2(lat_us)]++
+    ├── hist[log2(lat_us)]++                ← every switch, unconditionally
     │
-    └── if lat_us > runqlat_threshold_us:
+    ├── if lat_us >= runq_track_min_us:     ← aggregation floor (default 100us)
+    │       runq_stats[tgid]:               (LRU_HASH, 8192 entries)
+    │         tracked_switches++    (atomic)
+    │         total_latency_ns += Δ (atomic)
+    │         slow_events++         (atomic, when >= runqlat_threshold_us)
+    │         max_latency_ns = max(Δ)
+    │         last_seen_ts = now
+    │         comm = next->comm
+    │
+    └── if lat_us >= runqlat_threshold_us:
             push runq_event → RINGBUF
 ```
 
 **Why tp_btf?** `tp_btf` programs receive typed kernel structs directly (via BTF), avoiding the need to cast raw tracepoint arguments. This is more portable than raw tracepoints.
+
+**Why the `runq_track_min_us` floor?** `sched_switch` fires 100k–500k times/s on a busy host. Aggregating every one of them into the per-process map would cost a lookup plus three atomics per switch. The floor skips the sub-100 µs waits that carry no diagnostic signal, removing >90 % of the map writes — while the global histogram still counts every switch, so no distribution fidelity is lost.
+
+**Configurable thresholds**: both `runqlat_threshold_us` and `runq_track_min_us` are `const volatile` globals rewritten at load time via `spec.Variables[...].Set(v)`.
 
 ### 4.4 TCP Retransmit (`tcp_retransmit.bpf.c`)
 
@@ -744,6 +788,8 @@ bpftool btf dump file /sys/kernel/btf/vmlinux format c \
 
 `vmlinux.h` contains every kernel struct definition. It's generated from the running kernel's BTF (BPF Type Format) metadata at `/sys/kernel/btf/vmlinux`. This enables **CO-RE** – the eBPF programs are compiled once and run on any kernel that has BTF enabled (virtually all modern distributions).
 
+> **`-Wno-missing-declarations` is required.** `bpftool btf dump` on kernels ≥ 6.x emits nested forward declarations (`struct ns_tree;`, `union pipe_index;`, `struct __fs_path;`, …) that clang reports as *"declaration does not declare anything"*. With `-Werror` this fails every module's build. All `gen.go` cflags therefore carry `-Wno-missing-declarations`; `-Werror` is retained so genuine warnings in our own `.bpf.c` files still fail the build. If you add a new eBPF module, copy the full cflag string from an existing `gen.go`.
+
 #### Step 2: Compile eBPF C → Go scaffolding
 
 ```bash
@@ -1112,5 +1158,126 @@ sudo bpftool map show name mysql_pid_stats
 sudo bpftool map show name mysql_pending
 ```
 
-## 15. Review output
+## 17. Run-Queue Analysis & On-Demand CPU Profiling
+
+### Overview
+
+Answers the question *"which process is stalling, and why?"* using a **two-level threshold** scheme plus a click-through profiler. Nothing runs in the background: level 1 reuses the lazy `Manager.Activate` state machine, the level-2 report is built only when `/api/diagnose` is called, and profiling samples only while a request is in flight.
+
+```
+Level 1 (node)      cpu_usage% > runq.node_cpu_threshold
+                    OR load1/NumCPU > runq.node_load_threshold
+                         │  trigger engine → Manager.Activate(ModRunQLat)
+                         ▼
+Level 2 (process)   per-TGID MAX run-queue wait >= runq.process_threshold_us
+                         │  GET /api/diagnose → .runqueue_report.top_offenders[]
+                         ▼  each offender carries "profile_url"
+On demand           GET /api/profile?pid=N
+                    → PID-filtered perf_event sampling for N seconds
+                    → symbolized CPUProfileReport, or folded stacks for a flamegraph
+```
+
+**Why two levels?** Level 1 keeps the scheduler tracepoints unloaded on a healthy node (zero overhead). Level 2 keeps the report to the processes that actually stalled, instead of listing every process that ever ran. CPU% alone is not a sufficient level-1 gate — run-queue oversubscription typically presents as **high load with moderate CPU**, so either signal opens the gate.
+
+### GET /api/diagnose — RunQueueReport field
+
+Absent entirely when the node never breached level 1, or when no process breached level 2.
+
+```bash
+curl -s localhost:9200/api/diagnose | jq .runqueue_report
+```
+
+```json
+{
+  "type": "runqueue_analysis",
+  "timestamp": "2026-07-27T17:20:00Z",
+  "system": { "cpu_percent": 93.4, "load_normalised": 3.1, "num_cpu": 8 },
+  "thresholds": {
+    "node_cpu_percent": 85.0, "node_load": 1.5,
+    "process_us": 10000, "track_min_us": 100
+  },
+  "histogram": [
+    { "range": "128us-255us", "low_us": 127, "high_us": 254, "count": 84210 },
+    { "range": "8.19ms-16.38ms", "low_us": 8191, "high_us": 16382, "count": 312 }
+  ],
+  "top_offenders": [
+    {
+      "pid": 4821, "comm": "catalog",
+      "cmdline": "/app/catalog -config /etc/catalog.yaml",
+      "cgroup_path": "/kubepods/burstable/pod.../catalog",
+      "tracked_switches": 18432, "slow_events": 291,
+      "avg_latency_ms": 1.84, "max_latency_ms": 47.2,
+      "profile_url": "/api/profile?pid=4821"
+    }
+  ]
+}
+```
+
+> `avg_latency_ms` is the mean over **tracked** waits (≥ `track_min_us`), not over every context switch — sub-threshold waits are deliberately not aggregated in-kernel. `slow_events` counts waits ≥ `process_us`.
+
+### GET /api/profile — click-through per-process profile
+
+```bash
+# JSON (default): symbolized, aggregated, scoped to the one process
+curl -s "localhost:9200/api/profile?pid=4821&duration=5s" | jq .report
+
+# Folded stacks → flamegraph
+curl -s "localhost:9200/api/profile?pid=4821&format=folded" > out.folded
+flamegraph.pl out.folded > flame.svg      # or drop out.folded into speedscope.app
+```
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `pid` | — | required; the target process (all its threads are sampled) |
+| `duration` | `profile.default_duration` (10s) | capped at `profile.max_duration`; ignored on a cache hit |
+| `format` | `json` | `folded` streams flamegraph-ready text |
+
+| Condition | Status |
+|---|---|
+| success | 200 |
+| missing/invalid `pid`, or `duration` > max | 400 |
+| no such process | 404 |
+| another profile already sampling | 429 + `Retry-After` |
+| eBPF or `profile.enabled` off | 503 |
+
+**Resolution order in `Manager.ProfilePID`** (cheapest first):
+
+1. **Result cache** – a profile for the same PID within `profile.cache_ttl` is returned as-is (`"cached": true`). Clicking through a list of offenders and back costs nothing.
+2. **Reuse the live system-wide profiler** – if the trigger engine already activated `cpu_profile` (i.e. the node is hot, which is exactly when an operator clicks through), the target's stacks are already in its `counts` map. Extract them: **zero extra sampling, instant response** (`"reused": true`).
+3. **Dedicated PID-filtered profiler** – load a fresh `cpu_profile` instance with `target_tgid` set and `emit_events` off, sample for `duration`, build the report while the maps are still open, then tear it down.
+
+Deliberately independent of the `Activate`/cool-down state machine: an operator's click must never be silently swallowed by a cool-down window. Profiling is **single-flight agent-wide** — two concurrent perf_event sets would double the sampling cost on an already-stressed node.
+
+### Configuration
+
+See the `runq:` and `profile:` sections in `deploy/config.yaml.example`. Environment overrides: `RUNQ_ENABLED`, `RUNQ_NODE_CPU_THRESHOLD`, `RUNQ_NODE_LOAD_THRESHOLD`, `RUNQ_PROCESS_THRESHOLD_US`, `PROFILE_ENABLED`, `PROFILE_MAX_DURATION`.
+
+`runq.process_threshold_us` is the single source of truth: it is both the level-2 report filter and the value pushed into the kernel as `runqlat_threshold_us`, so `slow_events` counts exactly the level-2 breaches. The old `ebpf.runqlat_threshold_us` is deprecated and consulted only as a fallback when `runq.process_threshold_us` is 0.
+
+### Test
+
+```bash
+# Spike CPU and load to breach level 1
+stress-ng --cpu $(nproc) --fork 8 --timeout 120s &
+
+sudo bpftool map dump name runq_stats | head       # per-TGID entries appear
+curl -s localhost:9200/api/diagnose | jq '.runqueue_report.top_offenders[0]'
+
+PID=$(curl -s localhost:9200/api/diagnose | jq -r '.runqueue_report.top_offenders[0].pid')
+curl -s "localhost:9200/api/profile?pid=$PID&duration=5s" | jq '.report.processes[0]'
+```
+
+Negative check: with the node idle, `.runqueue_report` must be **absent** and `bpftool prog list | grep sched` must show nothing.
+
+### Overhead
+
+| Component | CPU | Memory |
+|---|---|---|
+| runqlat per-process aggregation (active, 200k switches/s, 100 µs floor) | ~0.02 % | ~0.5 MB (LRU map) |
+| Run-queue report build (per `/api/diagnose` call) | ~1 ms | — |
+| On-demand profile (only while sampling, PID-filtered) | ~0.1 % for `duration` | ~1.2 MB, freed at window end |
+
+---
+
+## 18. Review output
 Use codex to review output of this code each change

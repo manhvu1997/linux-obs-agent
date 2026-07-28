@@ -20,6 +20,8 @@ type Config struct {
 	Exporter  ExporterConfig  `yaml:"exporter"`
 	Process   ProcessConfig   `yaml:"process"`
 	DiskScan  DiskScanConfig  `yaml:"disk_scan"`
+	RunQueue  RunQueueConfig  `yaml:"runq"`
+	Profile   ProfileConfig   `yaml:"profile"`
 	Fsync     FsyncConfig     `yaml:"fsync"`
 	Writeback WritebackConfig `yaml:"writeback"`
 	Mongo     MongoConfig     `yaml:"mongo"`
@@ -54,7 +56,10 @@ type EBPFConfig struct {
 	CoolDown time.Duration `yaml:"cool_down"`
 	// SlowIOThresholdUs: IO events below this are not emitted (to reduce noise).
 	SlowIOThresholdUs uint64 `yaml:"slow_io_threshold_us"`
-	// RunQLat threshold before emitting events.
+	// RunQLatThresholdUs is the legacy run-queue event threshold.
+	// Deprecated: prefer runq.process_threshold_us, which is both the level-2
+	// report filter and the in-kernel event threshold. This field is used only
+	// as a fallback when runq.process_threshold_us is 0.
 	RunQLatThresholdUs uint64 `yaml:"runqlat_threshold_us"`
 	// SampleHz is the CPU profiling frequency.
 	SampleHz uint64 `yaml:"sample_hz"`
@@ -96,6 +101,58 @@ type ProcessConfig struct {
 	ScanInterval time.Duration `yaml:"scan_interval"`
 	// IncludeIO: read per-process IO (requires CAP_SYS_PTRACE on some kernels).
 	IncludeIO bool `yaml:"include_io"`
+}
+
+// RunQueueConfig controls the two-level run-queue analysis.
+//
+//	Level 1 (node)    – NodeCPUThreshold / NodeLoadThreshold decide when the
+//	                    runqlat eBPF module is loaded at all.  While the node
+//	                    is healthy nothing runs and there is zero overhead.
+//	Level 2 (process) – ProcessThresholdUs decides which processes appear in
+//	                    the `runqueue_report` of GET /api/diagnose.
+type RunQueueConfig struct {
+	// Enabled is the master switch for the level-1 trigger rule and the
+	// runqueue_report section of /api/diagnose.
+	Enabled bool `yaml:"enabled"`
+	// NodeCPUThreshold: load runqlat once node CPU usage exceeds this percent.
+	NodeCPUThreshold float64 `yaml:"node_cpu_threshold"`
+	// NodeLoadThreshold: load runqlat once load1/NumCPU exceeds this ratio.
+	// Catches run-queue oversubscription that CPU% alone misses (high load
+	// with low CPU, e.g. many runnable-but-starved tasks).
+	NodeLoadThreshold float64 `yaml:"node_load_threshold"`
+	// ProcessThresholdUs is the level-2 threshold: a process is reported when
+	// its MAX run-queue wait reaches this many microseconds.  This value is
+	// also pushed into the kernel as the ringbuf event threshold, so
+	// SlowEvents counts exactly the level-2 breaches.
+	ProcessThresholdUs uint64 `yaml:"process_threshold_us"`
+	// TrackMinUs is the in-kernel aggregation floor.  Waits below this are
+	// counted in the global histogram but do not touch the per-process map.
+	// sched_switch fires 100k-500k/s, so this gate is what keeps the module
+	// cheap; lower it only if sub-100us waits matter to you.
+	TrackMinUs uint64 `yaml:"track_min_us"`
+	// TopN caps the number of offenders in each report.
+	TopN int `yaml:"top_n"`
+	// StaleSeconds: ignore processes not seen within this window.
+	StaleSeconds int `yaml:"stale_seconds"`
+}
+
+// ProfileConfig controls on-demand per-process CPU profiling
+// (GET /api/profile?pid=N).  Nothing runs in the background: sampling happens
+// only while a request is in flight.
+type ProfileConfig struct {
+	// Enabled is the master switch for the /api/profile endpoint.
+	Enabled bool `yaml:"enabled"`
+	// DefaultDuration is the sampling window when ?duration= is omitted.
+	DefaultDuration time.Duration `yaml:"default_duration"`
+	// MaxDuration caps ?duration=; longer requests are rejected with 400.
+	MaxDuration time.Duration `yaml:"max_duration"`
+	// CacheTTL is how long a completed profile is reused for the same PID, so
+	// repeat clicks in a UI cost nothing.
+	CacheTTL time.Duration `yaml:"cache_ttl"`
+	// MaxMapEntries sizes the counts / stack_traces maps for targeted
+	// profiles.  Smaller than the system-wide default (10240) because a single
+	// process has far fewer unique stacks.
+	MaxMapEntries uint32 `yaml:"max_map_entries"`
 }
 
 // FsyncConfig controls the eBPF fsync latency tracer and its analyzer.
@@ -265,6 +322,22 @@ func Defaults() *Config {
 			ScanInterval:       10 * time.Minute,
 			SkipNFS:            true,
 		},
+		RunQueue: RunQueueConfig{
+			Enabled:            true,
+			NodeCPUThreshold:   85.0,
+			NodeLoadThreshold:  1.5,
+			ProcessThresholdUs: 10_000, // 10 ms max wait → level-2 breach
+			TrackMinUs:         100,    // skip sub-100us noise in-kernel
+			TopN:               20,
+			StaleSeconds:       60,
+		},
+		Profile: ProfileConfig{
+			Enabled:         true,
+			DefaultDuration: 10 * time.Second,
+			MaxDuration:     30 * time.Second,
+			CacheTTL:        60 * time.Second,
+			MaxMapEntries:   2048,
+		},
 		Fsync: FsyncConfig{
 			Enabled:         true,
 			SlowThresholdUs: 5000,            // 5 ms – only outliers hit the ringbuf
@@ -322,6 +395,8 @@ func Load(path string) (*Config, error) {
 	}
 	applyMongoEnvOverrides(cfg)
 	applyMySQLEnvOverrides(cfg)
+	applyRunQueueEnvOverrides(cfg)
+	applyProfileEnvOverrides(cfg)
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -372,6 +447,41 @@ func applyMySQLEnvOverrides(cfg *Config) {
 	}
 }
 
+func applyRunQueueEnvOverrides(cfg *Config) {
+	if v := os.Getenv("RUNQ_ENABLED"); v != "" {
+		cfg.RunQueue.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("RUNQ_NODE_CPU_THRESHOLD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			cfg.RunQueue.NodeCPUThreshold = f
+		}
+	}
+	if v := os.Getenv("RUNQ_NODE_LOAD_THRESHOLD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			cfg.RunQueue.NodeLoadThreshold = f
+		}
+	}
+	if v := os.Getenv("RUNQ_PROCESS_THRESHOLD_US"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			cfg.RunQueue.ProcessThresholdUs = n
+		}
+	}
+}
+
+func applyProfileEnvOverrides(cfg *Config) {
+	if v := os.Getenv("PROFILE_ENABLED"); v != "" {
+		cfg.Profile.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("PROFILE_MAX_DURATION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.Profile.MaxDuration = d
+			if cfg.Profile.DefaultDuration > d {
+				cfg.Profile.DefaultDuration = d
+			}
+		}
+	}
+}
+
 func (c *Config) validate() error {
 	if c.Collect.Interval < time.Second {
 		return fmt.Errorf("collect.interval must be >= 1s")
@@ -381,6 +491,17 @@ func (c *Config) validate() error {
 	}
 	if c.Process.TopN <= 0 {
 		return fmt.Errorf("process.top_n must be > 0")
+	}
+	if c.RunQueue.Enabled && c.RunQueue.TopN <= 0 {
+		return fmt.Errorf("runq.top_n must be > 0")
+	}
+	if c.Profile.Enabled {
+		if c.Profile.MaxDuration <= 0 || c.Profile.MaxDuration > 5*time.Minute {
+			return fmt.Errorf("profile.max_duration must be in (0, 5m]")
+		}
+		if c.Profile.DefaultDuration <= 0 || c.Profile.DefaultDuration > c.Profile.MaxDuration {
+			return fmt.Errorf("profile.default_duration must be in (0, profile.max_duration]")
+		}
 	}
 	return nil
 }

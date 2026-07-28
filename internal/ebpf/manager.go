@@ -43,8 +43,10 @@ type moduleState struct {
 
 // Manager owns all eBPF loaders and multiplexes their event channels.
 type Manager struct {
-	cfg    *config.EBPFConfig
-	Events chan model.EBPFEvent
+	cfg        *config.EBPFConfig
+	runqCfg    *config.RunQueueConfig
+	profileCfg *config.ProfileConfig
+	Events     chan model.EBPFEvent
 
 	mu      sync.Mutex
 	modules map[ModuleID]*moduleState
@@ -55,14 +57,42 @@ type Manager struct {
 	rqLoader   *runqlat.Loader
 	tcpLoader  *tcp_retransmit.Loader
 	diskLoader *disk_write.Loader
+
+	// On-demand per-process profiling state (see profiler.go).
+	prof profiler
 }
 
-func NewManager(cfg *config.EBPFConfig) *Manager {
+// NewManager creates the eBPF manager. runqCfg and profileCfg may be nil, in
+// which case run-queue reporting and on-demand profiling are unavailable but
+// every other module behaves as before.
+func NewManager(cfg *config.EBPFConfig, runqCfg *config.RunQueueConfig, profileCfg *config.ProfileConfig) *Manager {
 	return &Manager{
-		cfg:     cfg,
-		Events:  make(chan model.EBPFEvent, 2048),
-		modules: make(map[ModuleID]*moduleState),
+		cfg:        cfg,
+		runqCfg:    runqCfg,
+		profileCfg: profileCfg,
+		Events:     make(chan model.EBPFEvent, 2048),
+		modules:    make(map[ModuleID]*moduleState),
 	}
+}
+
+// runqThresholds returns the effective (event threshold, aggregation floor) in
+// microseconds for the runqlat module.
+func (m *Manager) runqThresholds() (thresholdUs, trackMinUs uint64) {
+	thresholdUs = m.cfg.RunQLatThresholdUs
+	if m.runqCfg != nil {
+		if m.runqCfg.ProcessThresholdUs > 0 {
+			thresholdUs = m.runqCfg.ProcessThresholdUs
+		}
+		trackMinUs = m.runqCfg.TrackMinUs
+	}
+	// The aggregation floor must never sit above the event threshold, or
+	// breaches between the two would be dropped before they are counted.
+	if thresholdUs > 0 && trackMinUs > thresholdUs {
+		slog.Warn("ebpf: runq.track_min_us above process threshold, clamping",
+			"track_min_us", trackMinUs, "process_threshold_us", thresholdUs)
+		trackMinUs = thresholdUs
+	}
+	return thresholdUs, trackMinUs
 }
 
 // Activate starts the given module (if not already active and not in cool-down).
@@ -175,7 +205,7 @@ func (m *Manager) startModule(ctx context.Context, id ModuleID) error {
 		go m.fanIn(ctx, l.Events)
 
 	case ModRunQLat:
-		l := runqlat.NewLoader(m.cfg.RunQLatThresholdUs)
+		l := runqlat.NewLoader(m.runqThresholds())
 		if err := l.Start(ctx); err != nil {
 			return err
 		}

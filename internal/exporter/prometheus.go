@@ -8,6 +8,8 @@ package exporter
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
+	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
@@ -26,6 +29,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/mongo"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
+	"github.com/manhvu1997/linux-obs-agent/internal/runq"
 	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
 )
 
@@ -44,6 +48,10 @@ type PrometheusExporter struct {
 	writebackAnalyzer *writeback.Analyzer
 	mongoAnalyzer     *mongo.Analyzer
 	mysqlAnalyzer     *mysql.Analyzer
+
+	// Run-queue / on-demand profiling config – set via RegisterRunQueueSources.
+	runqCfg    *config.RunQueueConfig
+	profileCfg *config.ProfileConfig
 
 	// CPU
 	cpuUsage     prometheus.Gauge
@@ -139,6 +147,16 @@ func (p *PrometheusExporter) RegisterDiagnosticSources(
 	p.httpExp = exp
 }
 
+// RegisterRunQueueSources wires the run-queue and on-demand profiling config
+// so /api/diagnose includes `runqueue_report` and /api/profile is served.
+func (p *PrometheusExporter) RegisterRunQueueSources(
+	runqCfg *config.RunQueueConfig,
+	profileCfg *config.ProfileConfig,
+) {
+	p.runqCfg = runqCfg
+	p.profileCfg = profileCfg
+}
+
 // RegisterDiskScanner wires the disk scanner so /api/diagnose includes
 // directory-growth data and top disk writers.
 func (p *PrometheusExporter) RegisterDiskScanner(s *diskscanner.Scanner) {
@@ -190,6 +208,8 @@ func (p *PrometheusExporter) Run(ctx context.Context) error {
 	})
 	// MCP / alerting diagnostic endpoint.
 	http.HandleFunc("/api/diagnose", p.handleDiagnose)
+	// On-demand per-process CPU profile (linked from each run-queue offender).
+	http.HandleFunc("/api/profile", p.handleProfile)
 
 	srv := &http.Server{Addr: p.addr}
 	go func() {
@@ -240,6 +260,18 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 		// CPU profile v2: fully aggregated, symbolized, LLM-ready.
 		// Nil when cpu_profile module is not active.
 		report.CPUProfileReport = p.mgr.BuildCPUProfileReport()
+		// Run-queue level-2 report. Nil when the node never breached level 1
+		// (runqlat not loaded) or no process breached level 2.
+		if p.runqCfg != nil && p.runqCfg.Enabled {
+			report.RunQueueReport = p.mgr.BuildRunQueueReport(report.Metrics, runq.Options{
+				TopN:               p.runqCfg.TopN,
+				StaleSeconds:       p.runqCfg.StaleSeconds,
+				ProcessThresholdUs: p.runqCfg.ProcessThresholdUs,
+				TrackMinUs:         p.runqCfg.TrackMinUs,
+				NodeCPUThreshold:   p.runqCfg.NodeCPUThreshold,
+				NodeLoadThreshold:  p.runqCfg.NodeLoadThreshold,
+			})
+		}
 	}
 
 	// Top processes from /proc.
@@ -294,6 +326,111 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(report); err != nil {
 		slog.Warn("diagnose: encode error", "err", err)
+	}
+}
+
+// handleProfile is called by GET /api/profile.
+//
+// It is the click-through target of the ProfileURL carried by every run-queue
+// offender in /api/diagnose: given a PID it samples that process's on-CPU
+// stacks and returns a symbolized, flamegraph-ready profile.
+//
+// Query parameters:
+//
+//	pid      – required, the process to profile
+//	duration – sampling window (default profile.default_duration, capped at
+//	           profile.max_duration).  Ignored on a cache hit.
+//	format   – "json" (default) or "folded" for flamegraph.pl / speedscope
+//
+// The request blocks for the sampling window. Profiling is single-flight
+// agent-wide; a concurrent request gets 429 rather than doubling the load on
+// an already-stressed node.
+func (p *PrometheusExporter) handleProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if p.mgr == nil || p.profileCfg == nil || !p.profileCfg.Enabled {
+		http.Error(w, "on-demand profiling is disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	pid, err := strconv.ParseUint(r.URL.Query().Get("pid"), 10, 32)
+	if err != nil || pid == 0 {
+		http.Error(w, "missing or invalid 'pid' parameter", http.StatusBadRequest)
+		return
+	}
+
+	duration := p.profileCfg.DefaultDuration
+	if s := r.URL.Query().Get("duration"); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			http.Error(w, "invalid 'duration' (expected e.g. 5s, 10s)", http.StatusBadRequest)
+			return
+		}
+		if d > p.profileCfg.MaxDuration {
+			http.Error(w, fmt.Sprintf("duration exceeds profile.max_duration (%s)",
+				p.profileCfg.MaxDuration), http.StatusBadRequest)
+			return
+		}
+		duration = d
+	}
+
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "json"
+	}
+	if format != "json" && format != "folded" {
+		http.Error(w, "invalid 'format' (expected json or folded)", http.StatusBadRequest)
+		return
+	}
+
+	res, err := p.mgr.ProfilePID(r.Context(), ebpfmgr.ProfileRequest{
+		PID:      uint32(pid),
+		Duration: duration,
+		Folded:   format == "folded",
+	})
+	switch {
+	case errors.Is(err, ebpfmgr.ErrNoSuchProcess):
+		http.Error(w, fmt.Sprintf("no such process: %d", pid), http.StatusNotFound)
+		return
+	case errors.Is(err, ebpfmgr.ErrProfileBusy):
+		w.Header().Set("Retry-After", strconv.Itoa(int(duration.Seconds())+1))
+		http.Error(w, "a profile is already running; retry shortly", http.StatusTooManyRequests)
+		return
+	case errors.Is(err, ebpfmgr.ErrProfileDisabled):
+		http.Error(w, "on-demand profiling is disabled", http.StatusServiceUnavailable)
+		return
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Client disconnected mid-window; nothing useful to send.
+		return
+	case err != nil:
+		slog.Warn("profile: failed", "pid", pid, "err", err)
+		http.Error(w, "profiling failed", http.StatusInternalServerError)
+		return
+	}
+
+	if format == "folded" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if _, err := w.Write(res.Folded); err != nil {
+			slog.Debug("profile: folded write error", "pid", pid, "err", err)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(model.ProfileResponse{
+		Type:       "pid_cpu_profile",
+		Timestamp:  time.Now(),
+		PID:        res.PID,
+		Comm:       res.Comm,
+		DurationMs: res.Duration.Milliseconds(),
+		SampleHz:   res.SampleHz,
+		Cached:     res.Cached,
+		Reused:     res.Reused,
+		Report:     res.Report,
+	}); err != nil {
+		slog.Warn("profile: encode error", "err", err)
 	}
 }
 

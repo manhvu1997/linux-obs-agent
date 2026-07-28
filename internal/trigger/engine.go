@@ -13,6 +13,7 @@
 //	ctxswitch/s > CtxSwitchDelta   → activate runqlat
 //	net errors/s > NetErrorDelta    → activate tcp_retransmit
 //	high load + low CPU             → suspect IO wait → activate io_latency + runqlat
+//	runq level 1 (CPU% or load)     → activate runqlat for per-process analysis
 package trigger
 
 import (
@@ -30,6 +31,7 @@ import (
 // Engine evaluates trigger rules and signals the eBPF manager.
 type Engine struct {
 	cfg     *config.TriggerConfig
+	runqCfg *config.RunQueueConfig
 	coll    *collector.Collector
 	manager *ebpf.Manager
 
@@ -38,9 +40,12 @@ type Engine struct {
 	firing map[ebpf.ModuleID]bool
 }
 
-func NewEngine(cfg *config.TriggerConfig, coll *collector.Collector, mgr *ebpf.Manager) *Engine {
+// NewEngine creates the trigger engine. runqCfg may be nil, in which case the
+// level-1 run-queue rule is skipped and the legacy rules alone govern runqlat.
+func NewEngine(cfg *config.TriggerConfig, runqCfg *config.RunQueueConfig, coll *collector.Collector, mgr *ebpf.Manager) *Engine {
 	return &Engine{
 		cfg:     cfg,
+		runqCfg: runqCfg,
 		coll:    coll,
 		manager: mgr,
 		firing:  make(map[ebpf.ModuleID]bool),
@@ -119,6 +124,31 @@ func (e *Engine) evalScheduler(ctx context.Context, m model.NodeMetrics) {
 	if normLoad > e.cfg.LoadNormalised {
 		e.fire(ctx, ebpf.ModRunQLat, "norm_load", normLoad, "threshold", e.cfg.LoadNormalised)
 	}
+
+	e.evalRunQueueLevel1(ctx, m, normLoad)
+}
+
+// evalRunQueueLevel1 is the node-wide gate of the two-level run-queue scheme.
+// Breaching it loads runqlat, which then aggregates per-process waits in-kernel;
+// the level-2 (per-process) filter is applied when the report is built.
+//
+// CPU% alone is not enough: run-queue oversubscription frequently shows up as
+// high load with moderate CPU, so either signal opens the gate.
+func (e *Engine) evalRunQueueLevel1(ctx context.Context, m model.NodeMetrics, normLoad float64) {
+	if e.runqCfg == nil || !e.runqCfg.Enabled {
+		return
+	}
+	cpuHot := e.runqCfg.NodeCPUThreshold > 0 && m.CPU.UsagePercent > e.runqCfg.NodeCPUThreshold
+	loadHot := e.runqCfg.NodeLoadThreshold > 0 && normLoad > e.runqCfg.NodeLoadThreshold
+	if !cpuHot && !loadHot {
+		return
+	}
+	e.fire(ctx, ebpf.ModRunQLat,
+		"level", 1,
+		"cpu_pct", m.CPU.UsagePercent,
+		"cpu_threshold", e.runqCfg.NodeCPUThreshold,
+		"norm_load", normLoad,
+		"load_threshold", e.runqCfg.NodeLoadThreshold)
 }
 
 func (e *Engine) evalNetwork(ctx context.Context, m model.NodeMetrics) {

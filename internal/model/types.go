@@ -279,6 +279,13 @@ type DiagnoseReport struct {
 	// and a system-wide kernel function aggregate.
 	CPUProfileReport *CPUProfileReport `json:"cpu_profile_report,omitempty"`
 
+	// RunQueueReport lists the processes whose run-queue wait breached the
+	// level-2 threshold, plus the global latency distribution.  Populated only
+	// when the runqlat module is active — i.e. when the node itself breached
+	// the level-1 threshold (CPU% or normalized load).  Each offender carries
+	// a ProfileURL for on-demand per-process CPU profiling.
+	RunQueueReport *RunQueueAnalysis `json:"runqueue_report,omitempty"`
+
 	// RecentEvents contains the last N eBPF events across all active modules.
 	// Each event carries PID, Comm, and module-specific fields:
 	//   cpu_profile   – stack IDs, sample count
@@ -360,6 +367,95 @@ type FsyncAnalysis struct {
 	Timestamp    time.Time       `json:"timestamp"`
 	System       FsyncSystemInfo `json:"system"`
 	TopOffenders []FsyncOffender `json:"top_offenders"`
+}
+
+// ─── Run-queue analysis (two-level threshold) ────────────────────────────────
+
+// RunQueueAnalysis is the run-queue diagnostic returned by GET /api/diagnose
+// as `runqueue_report`.
+//
+// It is produced by a two-level threshold scheme:
+//
+//	Level 1 (node)    – the runqlat eBPF module is only loaded once the node
+//	                    itself is stressed (CPU% or normalized load).  When the
+//	                    node is healthy this report is absent entirely.
+//	Level 2 (process) – a process is listed only when its MAX run-queue wait
+//	                    reached Thresholds.ProcessUs.
+type RunQueueAnalysis struct {
+	Type       string         `json:"type"` // always "runqueue_analysis"
+	Timestamp  time.Time      `json:"timestamp"`
+	System     RunQSystemInfo `json:"system"`
+	Thresholds RunQThresholds `json:"thresholds"`
+	// Histogram is the global run-queue latency distribution over every
+	// context switch.  Only non-empty buckets are included.
+	Histogram []RunQLatBucket `json:"histogram,omitempty"`
+	// TopOffenders are the level-2 breaches, sorted by max latency descending.
+	TopOffenders []RunQOffender `json:"top_offenders"`
+}
+
+// RunQSystemInfo is the node state that satisfied the level-1 threshold.
+type RunQSystemInfo struct {
+	CPUPercent     float64 `json:"cpu_percent"`
+	LoadNormalised float64 `json:"load_normalised"` // load1 / NumCPU
+	NumCPU         int     `json:"num_cpu"`
+}
+
+// RunQThresholds echoes the thresholds in force, so a consumer can interpret
+// the report without reading the agent's config.
+type RunQThresholds struct {
+	NodeCPUPercent float64 `json:"node_cpu_percent"`
+	NodeLoad       float64 `json:"node_load"`
+	ProcessUs      uint64  `json:"process_us"`
+	TrackMinUs     uint64  `json:"track_min_us"`
+}
+
+// RunQLatBucket is one log2 bucket of the global run-queue latency histogram.
+type RunQLatBucket struct {
+	Range  string `json:"range"` // human-readable, e.g. "4ms-8ms"
+	LowUs  uint64 `json:"low_us"`
+	HighUs uint64 `json:"high_us"`
+	Count  uint64 `json:"count"`
+}
+
+// RunQOffender is one process that breached the level-2 run-queue threshold.
+type RunQOffender struct {
+	PID        uint32 `json:"pid"`
+	Comm       string `json:"comm"`
+	Cmdline    string `json:"cmdline,omitempty"`
+	CgroupPath string `json:"cgroup_path,omitempty"`
+
+	// TrackedSwitches counts only waits at or above Thresholds.TrackMinUs —
+	// sub-threshold switches are deliberately not aggregated in-kernel.
+	TrackedSwitches uint64 `json:"tracked_switches"`
+	// SlowEvents counts waits at or above Thresholds.ProcessUs.
+	SlowEvents uint64 `json:"slow_events"`
+	// AvgLatencyMs is the mean over TRACKED waits, not over all switches.
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+	MaxLatencyMs float64 `json:"max_latency_ms"`
+
+	// ProfileURL is the on-demand CPU profile endpoint for this process.
+	// Following it samples the process for a few seconds and returns a
+	// symbolized, flamegraph-ready profile.
+	ProfileURL string `json:"profile_url"`
+}
+
+// ProfileResponse is the body of GET /api/profile?pid=N.
+type ProfileResponse struct {
+	Type       string    `json:"type"` // always "pid_cpu_profile"
+	Timestamp  time.Time `json:"timestamp"`
+	PID  uint32 `json:"pid"`
+	Comm string `json:"comm,omitempty"`
+	// DurationMs is the actual sampling window. Zero when Cached or Reused,
+	// since no new sampling was performed.
+	DurationMs int64  `json:"duration_ms"`
+	SampleHz   uint64 `json:"sample_hz"`
+	// Cached is true when this profile was served from the result cache.
+	Cached bool `json:"cached"`
+	// Reused is true when the profile was extracted from the already-running
+	// system-wide profiler instead of starting a new sampling window.
+	Reused bool `json:"reused"`
+	// Report holds a single process (the target). Nil when no samples landed.
+	Report *CPUProfileReport `json:"report,omitempty"`
 }
 
 // ─── CPU Profile V2 (aggregated, symbolized) ─────────────────────────────────

@@ -58,8 +58,16 @@ struct {
 
 // ─── Config (set via global variables from Go) ───────────────────────────────
 
-// Sampling filter: only emit for a specific PID (0 = all)
-const volatile __u32 target_pid = 0;
+// Sampling filter: only sample this process (0 = system-wide).
+// Compared against TGID (the userspace PID), so every thread of the target
+// process is sampled — matching what an operator means by "profile this PID".
+const volatile __u32 target_tgid = 0;
+
+// When 0, skip the per-sample ringbuf event entirely and rely solely on the
+// aggregated `counts` map. Targeted profiles set this to 0: the ringbuf event
+// duplicates data already in `counts`, and consuming it costs two
+// stack_traces lookups per sample in userspace.
+const volatile __u8 emit_events = 1;
 
 // ─── Program ─────────────────────────────────────────────────────────────────
 
@@ -75,8 +83,8 @@ int profile_cpu(struct bpf_perf_event_data *ctx)
     // Skip idle thread and kernel-only threads.
     if (tgid == 0) return 0;
 
-    // Optionally filter to a single pid.
-    if (target_pid && pid != target_pid) return 0;
+    // Optionally filter to a single process (all of its threads).
+    if (target_tgid && tgid != target_tgid) return 0;
 
     struct cpu_count_key key = {};
     key.pid  = pid;
@@ -96,6 +104,8 @@ int profile_cpu(struct bpf_perf_event_data *ctx)
 
     // Emit raw sample event into ring buffer so the user-space consumer
     // can react in near-real-time (e.g., detect a hot PID).
+    if (!emit_events) return 0;
+
     struct cpu_sample_event *ev;
     ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
     if (!ev) return 0;
