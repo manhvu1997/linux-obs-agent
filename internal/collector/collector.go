@@ -20,6 +20,9 @@ type Collector struct {
 	mem     *MemCollector
 	disk    *DiskCollector
 	net     *NetCollector
+	psi     *PSICollector
+	vmstat  *VMStatCollector
+	dstate  *DStateCollector
 	Metrics chan model.NodeMetrics
 
 	hostname string
@@ -35,6 +38,9 @@ func New(cfg *config.CollectConfig) *Collector {
 		mem:      NewMemCollector(),
 		disk:     NewDiskCollector(cfg.DiskDevices),
 		net:      NewNetCollector(cfg.NetInterfaces),
+		psi:      NewPSICollector(),
+		vmstat:   NewVMStatCollector(),
+		dstate:   NewDStateCollector(cfg.DStateMaxTasks, cfg.DStateScanThreads),
 		Metrics:  make(chan model.NodeMetrics, 4),
 		hostname: hostname,
 	}
@@ -113,6 +119,16 @@ func (c *Collector) collect() model.NodeMetrics {
 		slog.Warn("net collect error", "err", err)
 	} else {
 		m.Network = nets
+	}
+
+	// The three below are deliberately part of the same cycle as everything
+	// above. Correlating iowait against PSI, dirty pages and the D-state
+	// census only means anything if all four describe the same instant —
+	// sampling them on separate tickers would make the comparison unsound.
+	m.Pressure = c.psi.Collect()
+	m.VMStat = c.vmstat.Collect(m.Memory.TotalBytes)
+	if !c.cfg.DStateDisabled {
+		m.DState = c.dstate.Collect()
 	}
 
 	return m

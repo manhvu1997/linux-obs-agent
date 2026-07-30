@@ -158,12 +158,32 @@ func (d *DiskCollector) Collect() ([]model.DiskMetrics, error) {
 				m.IOUtilPercent = 100
 			}
 
+			readWaitTicks := float64(cur.readTicks - prev.readTicks)
+			writeWaitTicks := float64(cur.writeTicks - prev.writeTicks)
 			totalOps := readOpsDelta + writeOpsDelta
 			if totalOps > 0 {
-				waitTicks := float64(cur.readTicks + cur.writeTicks - prev.readTicks - prev.writeTicks)
-				m.AvgWaitMs = waitTicks / totalOps
+				m.AvgWaitMs = (readWaitTicks + writeWaitTicks) / totalOps
 			}
+			// Split by direction: reads stalling while writes are fine (or the
+			// reverse) narrows the cause considerably.
+			if readOpsDelta > 0 {
+				m.ReadAvgWaitMs = readWaitTicks / readOpsDelta
+			}
+			if writeOpsDelta > 0 {
+				m.WriteAvgWaitMs = writeWaitTicks / writeOpsDelta
+			}
+
+			// time_in_queue (field 14) accumulates ms x queue-depth, so its
+			// delta divided by elapsed ms is the mean outstanding request
+			// count over the interval. Unlike InFlight this is an average and
+			// is not distorted by when we happened to sample.
+			queueDelta := float64(cur.timeInQueue - prev.timeInQueue)
+			m.AvgQueueDepth = queueDelta / (elapsed * 1000)
 		}
+
+		// Instantaneous depth. High InFlight with low throughput is the
+		// signature of a slow device rather than a busy one.
+		m.InFlight = cur.inFlight
 
 		result = append(result, m)
 		d.prev[dev] = cur

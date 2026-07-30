@@ -6,13 +6,25 @@ import "time"
 
 // NodeMetrics holds all /proc-based baseline metrics for one collection cycle.
 type NodeMetrics struct {
-	Timestamp time.Time    `json:"timestamp"`
-	Hostname  string       `json:"hostname"`
-	CPU       CPUMetrics   `json:"cpu"`
-	Memory    MemMetrics   `json:"memory"`
-	LoadAvg   LoadMetrics  `json:"load_avg"`
+	Timestamp time.Time     `json:"timestamp"`
+	Hostname  string        `json:"hostname"`
+	CPU       CPUMetrics    `json:"cpu"`
+	Memory    MemMetrics    `json:"memory"`
+	LoadAvg   LoadMetrics   `json:"load_avg"`
 	Disk      []DiskMetrics `json:"disk"`
 	Network   []NetMetrics  `json:"network"`
+
+	// The following are sampled in the SAME cycle as everything above, so they
+	// are time-aligned and can be correlated without interpolation.
+
+	// Pressure is /proc/pressure/* — the signal that separates a genuine stall
+	// from idle time that merely looks like one.
+	Pressure PressureMetrics `json:"pressure"`
+	// VMStat is the writeback-relevant subset of /proc/vmstat.
+	VMStat VMStatMetrics `json:"vmstat"`
+	// DState enumerates tasks currently in uninterruptible sleep — the tasks
+	// that actually produce iowait.
+	DState DStateCensus `json:"d_state"`
 }
 
 type CPUMetrics struct {
@@ -25,9 +37,9 @@ type CPUMetrics struct {
 	StealPercent  float64 `json:"steal_percent"`
 
 	// From /proc/stat
-	CtxSwitches uint64 `json:"ctx_switches_total"`
-	Interrupts  uint64 `json:"interrupts_total"`
-	Forks       uint64 `json:"forks_total"`
+	CtxSwitches  uint64 `json:"ctx_switches_total"`
+	Interrupts   uint64 `json:"interrupts_total"`
+	Forks        uint64 `json:"forks_total"`
 	RunningProcs uint32 `json:"running_procs"`
 	BlockedProcs uint32 `json:"blocked_procs"`
 
@@ -68,11 +80,11 @@ type LoadMetrics struct {
 }
 
 type DiskMetrics struct {
-	Device     string  `json:"device"`
-	ReadBytes  uint64  `json:"read_bytes_total"`
-	WriteBytes uint64  `json:"write_bytes_total"`
-	ReadOps    uint64  `json:"read_ops_total"`
-	WriteOps   uint64  `json:"write_ops_total"`
+	Device     string `json:"device"`
+	ReadBytes  uint64 `json:"read_bytes_total"`
+	WriteBytes uint64 `json:"write_bytes_total"`
+	ReadOps    uint64 `json:"read_ops_total"`
+	WriteOps   uint64 `json:"write_ops_total"`
 	// Rate fields (delta / interval), computed by the collector
 	ReadBytesPerSec  float64 `json:"read_bytes_per_sec"`
 	WriteBytesPerSec float64 `json:"write_bytes_per_sec"`
@@ -80,6 +92,122 @@ type DiskMetrics struct {
 	WriteOpsPerSec   float64 `json:"write_ops_per_sec"`
 	IOUtilPercent    float64 `json:"io_util_percent"`
 	AvgWaitMs        float64 `json:"avg_wait_ms"`
+
+	// InFlight is /proc/diskstats field 12: requests issued to the driver but
+	// not yet completed, sampled instantaneously.  High InFlight with low
+	// throughput is the signature of a slow device rather than a busy one.
+	InFlight uint64 `json:"in_flight"`
+	// AvgQueueDepth is derived from the time_in_queue delta (field 14):
+	// the mean number of requests outstanding over the interval.  Unlike
+	// InFlight this is an average, so it is not distorted by sample timing.
+	AvgQueueDepth float64 `json:"avg_queue_depth"`
+	// ReadAvgWaitMs / WriteAvgWaitMs split AvgWaitMs by direction — reads
+	// stalling while writes are fine (or vice versa) narrows the cause.
+	ReadAvgWaitMs  float64 `json:"read_avg_wait_ms"`
+	WriteAvgWaitMs float64 `json:"write_avg_wait_ms"`
+}
+
+// ─── Pressure Stall Information (/proc/pressure/*) ───────────────────────────
+
+// PSIMetrics holds Linux Pressure Stall Information for one resource.
+//
+// PSI is the single best signal for separating a genuine resource stall from
+// idle time that merely looks like one.  Unlike iowait — which is charged to a
+// CPU that went idle while any task sat in D state — PSI measures actual lost
+// work:
+//
+//	Some – at least one runnable task was stalled on this resource.
+//	Full – ALL non-idle tasks were stalled; nothing could make progress.
+//
+// A machine with 80% iowait and PSI io.full ≈ 0 is not I/O bound; it is idle
+// with something parked in D state.
+type PSIMetrics struct {
+	Some PSILine `json:"some"`
+	Full PSILine `json:"full"`
+	// Available is false when the kernel lacks CONFIG_PSI or the file is
+	// unreadable, so consumers can distinguish "no pressure" from "no data".
+	Available bool `json:"available"`
+}
+
+// PSILine is one `some`/`full` row: percent of time stalled over each window.
+type PSILine struct {
+	Avg10  float64 `json:"avg10"`
+	Avg60  float64 `json:"avg60"`
+	Avg300 float64 `json:"avg300"`
+	// TotalUs is the cumulative stall time in microseconds.
+	TotalUs uint64 `json:"total_us"`
+	// TotalUsPerSec is the delta of TotalUs over the sampling interval — the
+	// most responsive form of the signal. 1e6 means one full core-second of
+	// stall per second.
+	TotalUsPerSec float64 `json:"total_us_per_sec"`
+}
+
+// PressureMetrics groups PSI for every resource, sampled in one pass.
+type PressureMetrics struct {
+	IO     PSIMetrics `json:"io"`
+	CPU    PSIMetrics `json:"cpu"`
+	Memory PSIMetrics `json:"memory"`
+}
+
+// ─── /proc/vmstat (page cache and writeback state) ───────────────────────────
+
+// VMStatMetrics carries the writeback-relevant subset of /proc/vmstat.
+//
+// Gauge fields describe the current state of the page cache; PerSec fields are
+// deltas over the sampling interval.  Together they answer whether a stall is
+// caused by dirty-page writeback congestion rather than by device latency.
+type VMStatMetrics struct {
+	// Gauges: pages currently in each state.
+	DirtyBytes     uint64 `json:"dirty_bytes"`
+	WritebackBytes uint64 `json:"writeback_bytes"`
+
+	// Counters, expressed as rates over the interval.
+	DirtiedPagesPerSec float64 `json:"dirtied_pages_per_sec"`
+	WrittenPagesPerSec float64 `json:"written_pages_per_sec"`
+	PgPgInPerSec       float64 `json:"pgpgin_per_sec"`  // KB/s read from block devices
+	PgPgOutPerSec      float64 `json:"pgpgout_per_sec"` // KB/s written to block devices
+	PSwpInPerSec       float64 `json:"pswpin_per_sec"`
+	PSwpOutPerSec      float64 `json:"pswpout_per_sec"`
+
+	// DirtyRatioPercent is DirtyBytes as a share of total memory. Approaching
+	// the kernel's dirty_ratio means writers get throttled in
+	// balance_dirty_pages — a stall that is not the device's fault.
+	DirtyRatioPercent float64 `json:"dirty_ratio_percent"`
+
+	Available bool `json:"available"`
+}
+
+// ─── D-state task census ─────────────────────────────────────────────────────
+
+// DStateTask is one task observed in TASK_UNINTERRUPTIBLE (D) state.
+//
+// These are the tasks that produce iowait. Enumerating them — with the kernel
+// function each is sleeping in — is the link between "the node has iowait" and
+// "this specific worker is stuck here".
+type DStateTask struct {
+	PID  uint32 `json:"pid"`
+	PPID uint32 `json:"ppid"`
+	Comm string `json:"comm"`
+	// Wchan is the kernel symbol the task is sleeping in, from
+	// /proc/<pid>/wchan (e.g. "folio_wait_bit", "io_schedule",
+	// "balance_dirty_pages"). Empty when unreadable.
+	Wchan string `json:"wchan,omitempty"`
+	// InDStateMs is how long this task has been *continuously* observed in D
+	// across consecutive scans. It is a lower bound quantised to the scan
+	// interval, not an exact blocked time — use the offcpu report for that.
+	InDStateMs int64 `json:"in_d_state_ms"`
+	// KernelThread is true for kthreads (no mm), e.g. kworker/flush workers.
+	KernelThread bool   `json:"kernel_thread"`
+	CgroupPath   string `json:"cgroup_path,omitempty"`
+}
+
+// DStateCensus is the result of one D-state scan.
+type DStateCensus struct {
+	Count int `json:"count"`
+	// LongestMs is the longest continuously-observed D-state duration.
+	LongestMs int64        `json:"longest_ms"`
+	Tasks     []DStateTask `json:"tasks,omitempty"`
+	Available bool         `json:"available"`
 }
 
 type NetMetrics struct {
@@ -113,20 +241,20 @@ type ProcessStats struct {
 	MemVMSBytes uint64  `json:"mem_vms_bytes"`
 
 	// IO (from /proc/[pid]/io, requires read permission)
-	ReadBytesTotal  uint64 `json:"read_bytes_total"`
-	WriteBytesTotal uint64 `json:"write_bytes_total"`
-	ReadBytesPerSec float64 `json:"read_bytes_per_sec"`
+	ReadBytesTotal   uint64  `json:"read_bytes_total"`
+	WriteBytesTotal  uint64  `json:"write_bytes_total"`
+	ReadBytesPerSec  float64 `json:"read_bytes_per_sec"`
 	WriteBytesPerSec float64 `json:"write_bytes_per_sec"`
 
-	Threads    uint32 `json:"threads"`
-	State      string `json:"state"` // R/S/D/Z/T
-	OpenFiles  int    `json:"open_files"`
+	Threads   uint32 `json:"threads"`
+	State     string `json:"state"` // R/S/D/Z/T
+	OpenFiles int    `json:"open_files"`
 
 	// Container / cgroup context (best-effort)
-	CgroupPath    string `json:"cgroup_path,omitempty"`
-	ContainerID   string `json:"container_id,omitempty"`
-	K8sPodName    string `json:"k8s_pod_name,omitempty"`
-	K8sNamespace  string `json:"k8s_namespace,omitempty"`
+	CgroupPath   string `json:"cgroup_path,omitempty"`
+	ContainerID  string `json:"container_id,omitempty"`
+	K8sPodName   string `json:"k8s_pod_name,omitempty"`
+	K8sNamespace string `json:"k8s_namespace,omitempty"`
 }
 
 // ─── eBPF Events ─────────────────────────────────────────────────────────────
@@ -186,23 +314,23 @@ type RunQLatEvent struct {
 // cumulative per-flow retransmit count, and flow duration.
 type TCPRetransmitEvent struct {
 	// Connection identity
-	PID     uint32 `json:"pid"`
-	Comm    string `json:"comm"`
-	SrcIP   string `json:"src_ip"`
-	DstIP   string `json:"dst_ip"`
-	SrcPort uint16 `json:"src_port"`
-	DstPort uint16 `json:"dst_port"`
-	AF      uint16 `json:"af"`      // 2=IPv4, 10=IPv6
+	PID      uint32 `json:"pid"`
+	Comm     string `json:"comm"`
+	SrcIP    string `json:"src_ip"`
+	DstIP    string `json:"dst_ip"`
+	SrcPort  uint16 `json:"src_port"`
+	DstPort  uint16 `json:"dst_port"`
+	AF       uint16 `json:"af"`        // 2=IPv4, 10=IPv6
 	TCPState string `json:"tcp_state"` // e.g. "ESTABLISHED", "CLOSE_WAIT"
 
 	// Human-readable summary
 	Flow string `json:"flow"` // "src:sport → dst:dport"
 
 	// RTT & congestion
-	RTTUS       uint32  `json:"rtt_us"`        // smoothed RTT in µs
-	RTTVarUS    uint32  `json:"rtt_var_us"`    // RTT variance in µs
-	SndCwnd     uint32  `json:"snd_cwnd"`      // congestion window (segments)
-	SndSsthresh uint32  `json:"snd_ssthresh"`  // slow-start threshold
+	RTTUS       uint32 `json:"rtt_us"`       // smoothed RTT in µs
+	RTTVarUS    uint32 `json:"rtt_var_us"`   // RTT variance in µs
+	SndCwnd     uint32 `json:"snd_cwnd"`     // congestion window (segments)
+	SndSsthresh uint32 `json:"snd_ssthresh"` // slow-start threshold
 
 	// Byte counters (cumulative on this socket)
 	BytesSent     uint64 `json:"bytes_sent"`
@@ -211,7 +339,7 @@ type TCPRetransmitEvent struct {
 	// Socket queue depths
 	SendQueueBytes uint32 `json:"send_queue_bytes"` // sk_wmem_queued
 	RecvQueueBytes uint32 `json:"recv_queue_bytes"` // sk_backlog.rmem_alloc (kernel 6.x)
-	Backlog        uint32 `json:"backlog"`           // sk_backlog.len
+	Backlog        uint32 `json:"backlog"`          // sk_backlog.len
 
 	// Per-flow context
 	RetransmitCount uint32  `json:"retransmit_count"` // cumulative for this flow
@@ -223,17 +351,17 @@ type TCPRetransmitEvent struct {
 // drop_reason is 0 (unknown) on kernels < 5.17.
 // location is the raw kernel symbol address of the drop site.
 type TCPDropEvent struct {
-	PID        uint32 `json:"pid"`
-	Comm       string `json:"comm"`
-	SrcIP      string `json:"src_ip"`
-	DstIP      string `json:"dst_ip"`
-	SrcPort    uint16 `json:"src_port"`
-	DstPort    uint16 `json:"dst_port"`
-	AF         uint16 `json:"af"`
-	DropReason  uint32 `json:"drop_reason"`        // raw enum skb_drop_reason value
-	DropName    string `json:"drop_reason_name"`   // human-readable name (best-effort)
-	Location    uint64 `json:"location"`           // kernel address of drop site (raw)
-	LocationHex string `json:"location_hex"`       // e.g. "0xffffffff81234567" – grep in /proc/kallsyms
+	PID         uint32 `json:"pid"`
+	Comm        string `json:"comm"`
+	SrcIP       string `json:"src_ip"`
+	DstIP       string `json:"dst_ip"`
+	SrcPort     uint16 `json:"src_port"`
+	DstPort     uint16 `json:"dst_port"`
+	AF          uint16 `json:"af"`
+	DropReason  uint32 `json:"drop_reason"`      // raw enum skb_drop_reason value
+	DropName    string `json:"drop_reason_name"` // human-readable name (best-effort)
+	Location    uint64 `json:"location"`         // kernel address of drop site (raw)
+	LocationHex string `json:"location_hex"`     // e.g. "0xffffffff81234567" – grep in /proc/kallsyms
 	Flow        string `json:"flow"`
 }
 
@@ -278,6 +406,22 @@ type DiagnoseReport struct {
 	// top stacks per process with resolved symbol names, relative weights,
 	// and a system-wide kernel function aggregate.
 	CPUProfileReport *CPUProfileReport `json:"cpu_profile_report,omitempty"`
+
+	// IODiagnosis is the correlated answer to "why is iowait high?" — it walks
+	// node → device → blocked tasks → process → stack and emits a verdict with
+	// the evidence behind it.  Always present; see .verdict for the outcome.
+	IODiagnosis *IODiagnosis `json:"io_diagnosis,omitempty"`
+
+	// IOLatencyHistogram is the in-kernel block-IO latency distribution
+	// (biolatency), keyed by log2(microseconds).  Populated only while the
+	// io_latency module is active.
+	IOLatencyHistogram []IOLatencyBucket `json:"io_latency_histogram,omitempty"`
+
+	// OffCPUReport attributes blocked (off-CPU) time to processes and stacks.
+	// Populated only when the offcpu module is active — it is triggered by
+	// sustained iowait.  This is the field that explains iowait; CPUHotspots
+	// and CPUProfileReport cannot, since they only sample running tasks.
+	OffCPUReport *OffCPUReport `json:"offcpu_report,omitempty"`
 
 	// RunQueueReport lists the processes whose run-queue wait breached the
 	// level-2 threshold, plus the global latency distribution.  Populated only
@@ -369,6 +513,76 @@ type FsyncAnalysis struct {
 	TopOffenders []FsyncOffender `json:"top_offenders"`
 }
 
+// ─── Off-CPU (blocked time) profile ──────────────────────────────────────────
+
+// OffCPUReport attributes blocked (off-CPU) time to processes and to the exact
+// stacks where they blocked.  Returned by GET /api/diagnose as `offcpu_report`
+// and by GET /api/profile?mode=offcpu.
+//
+// This is the report that explains iowait.  An on-CPU profile structurally
+// cannot: perf_event only fires on a CPU that is running a task, so a task
+// sleeping in D state — the state that produces iowait — is never sampled.
+//
+// Caveat when reading the numbers: BlockedMs is wall-clock time summed across
+// threads, so a process with 8 threads each blocked 1 s over a 1 s window
+// reports 8000 ms.  Compare stacks against each other, not against the window.
+type OffCPUReport struct {
+	Type      string           `json:"type"` // always "offcpu_profile"
+	Timestamp time.Time        `json:"timestamp"`
+	Window    OffCPUWindow     `json:"window"`
+	System    OffCPUSystemInfo `json:"system"`
+	Processes []OffCPUProcess  `json:"processes"`
+}
+
+// OffCPUWindow echoes the filters in force so the report is self-describing.
+type OffCPUWindow struct {
+	// MinBlockUs: blocking intervals shorter than this were not recorded.
+	MinBlockUs uint64 `json:"min_block_us"`
+	// TrackedStates: which sleep states were attributed, e.g.
+	// "uninterruptible" (the iowait-producing state) or
+	// "uninterruptible,interruptible".
+	TrackedStates string `json:"tracked_states"`
+}
+
+// OffCPUSystemInfo holds totals across every observed process.
+type OffCPUSystemInfo struct {
+	TotalBlockedMs float64 `json:"total_blocked_ms"`
+	TotalEvents    uint64  `json:"total_events"`
+	Processes      int     `json:"processes"`
+}
+
+// OffCPUProcess is one process's blocked-time breakdown.
+type OffCPUProcess struct {
+	PID        uint32 `json:"pid"`
+	Comm       string `json:"comm"`
+	Cmdline    string `json:"cmdline,omitempty"`
+	CgroupPath string `json:"cgroup_path,omitempty"`
+
+	BlockedMs    float64 `json:"blocked_ms"`
+	MaxBlockedMs float64 `json:"max_blocked_ms"`
+	Events       uint64  `json:"events"`
+	// ThreadsSampled counts threads that blocked at least once — not the
+	// process's total thread count.
+	ThreadsSampled int `json:"threads_sampled,omitempty"`
+	// PercentOfTotal is this process's share of all blocked time observed.
+	PercentOfTotal float64 `json:"percent_of_total"`
+
+	// TopStacks are the blocking sites, heaviest first.
+	TopStacks []OffCPUStack `json:"top_stacks,omitempty"`
+}
+
+// OffCPUStack is one blocking site: where the process went to sleep.
+type OffCPUStack struct {
+	// SymbolStack runs outermost → innermost: user frames first, then the
+	// kernel frames that actually blocked, each suffixed "_[k]".
+	SymbolStack  []string `json:"symbol_stack"`
+	BlockedMs    float64  `json:"blocked_ms"`
+	MaxBlockedMs float64  `json:"max_blocked_ms"`
+	Events       uint64   `json:"events"`
+	// Percent is this site's share of the process's blocked time, 2 dp.
+	Percent float64 `json:"percent"`
+}
+
 // ─── Run-queue analysis (two-level threshold) ────────────────────────────────
 
 // RunQueueAnalysis is the run-queue diagnostic returned by GET /api/diagnose
@@ -441,21 +655,31 @@ type RunQOffender struct {
 
 // ProfileResponse is the body of GET /api/profile?pid=N.
 type ProfileResponse struct {
-	Type       string    `json:"type"` // always "pid_cpu_profile"
-	Timestamp  time.Time `json:"timestamp"`
+	Type      string    `json:"type"` // always "pid_cpu_profile"
+	Timestamp time.Time `json:"timestamp"`
+	// Mode is "oncpu" (what the process is running) or "offcpu" (what it is
+	// blocked on). Exactly one of Report / OffCPUReport is populated.
+	//
+	// Use offcpu when the symptom is iowait, D-state or latency that does not
+	// appear as CPU usage — an on-CPU profile cannot see a sleeping task.
+	Mode string `json:"mode"`
 	PID  uint32 `json:"pid"`
 	Comm string `json:"comm,omitempty"`
 	// DurationMs is the actual sampling window. Zero when Cached or Reused,
 	// since no new sampling was performed.
-	DurationMs int64  `json:"duration_ms"`
-	SampleHz   uint64 `json:"sample_hz"`
+	DurationMs int64 `json:"duration_ms"`
+	// SampleHz applies to mode=oncpu only; off-CPU profiling is event-driven,
+	// not sampled.
+	SampleHz uint64 `json:"sample_hz,omitempty"`
 	// Cached is true when this profile was served from the result cache.
 	Cached bool `json:"cached"`
 	// Reused is true when the profile was extracted from the already-running
 	// system-wide profiler instead of starting a new sampling window.
 	Reused bool `json:"reused"`
-	// Report holds a single process (the target). Nil when no samples landed.
+	// Report holds a single process (the target) for mode=oncpu.
 	Report *CPUProfileReport `json:"report,omitempty"`
+	// OffCPUReport holds the blocked-time breakdown for mode=offcpu.
+	OffCPUReport *OffCPUReport `json:"offcpu_report,omitempty"`
 }
 
 // ─── CPU Profile V2 (aggregated, symbolized) ─────────────────────────────────
@@ -464,7 +688,7 @@ type ProfileResponse struct {
 // Returned by GET /api/diagnose when the cpu_profile eBPF module is active.
 // Designed for downstream LLM analysis: compact, weighted, no raw addresses.
 type CPUProfileReport struct {
-	Type      string               `json:"type"`      // always "cpu_profile_v2"
+	Type      string               `json:"type"` // always "cpu_profile_v2"
 	Timestamp time.Time            `json:"timestamp"`
 	System    CPUProfileSystemInfo `json:"system"`
 	// Processes sorted by total sample count descending; entries < 1% omitted.
@@ -588,13 +812,13 @@ type MongoProcessStats struct {
 // MongoAnalysis is the full MongoDB diagnostic report returned by
 // GET /api/diagnose when MongoDB tracing is enabled.
 type MongoAnalysis struct {
-	Type              string              `json:"type"`               // always "mongo_analysis"
-	Timestamp         time.Time           `json:"timestamp"`
-	SlowThresholdMs   uint64              `json:"slow_threshold_ms"`
+	Type            string    `json:"type"` // always "mongo_analysis"
+	Timestamp       time.Time `json:"timestamp"`
+	SlowThresholdMs uint64    `json:"slow_threshold_ms"`
 	// RecentSlowQueries: last N slow queries with full detail.
-	RecentSlowQueries []MongoSlowEvent    `json:"recent_slow_queries"`
+	RecentSlowQueries []MongoSlowEvent `json:"recent_slow_queries"`
 	// TopProcesses: per-PID aggregated stats sorted by slow_queries desc.
-	TopProcesses      []MongoProcessStats `json:"top_processes"`
+	TopProcesses []MongoProcessStats `json:"top_processes"`
 }
 
 // ─── Disk Scanner ─────────────────────────────────────────────────────────────
@@ -679,11 +903,11 @@ type MySQLProcessStats struct {
 // MySQLAnalysis is the full MySQL diagnostic report returned by
 // GET /api/diagnose when MySQL tracing is enabled.
 type MySQLAnalysis struct {
-	Type              string             `json:"type"`      // always "mysql_analysis"
-	Timestamp         time.Time          `json:"timestamp"`
-	SlowThresholdMs   uint64             `json:"slow_threshold_ms"`
-	MysqldPath        string             `json:"mysqld_path"`
-	RecentSlowQueries []MySQLSlowEvent   `json:"recent_slow_queries"`
+	Type              string              `json:"type"` // always "mysql_analysis"
+	Timestamp         time.Time           `json:"timestamp"`
+	SlowThresholdMs   uint64              `json:"slow_threshold_ms"`
+	MysqldPath        string              `json:"mysqld_path"`
+	RecentSlowQueries []MySQLSlowEvent    `json:"recent_slow_queries"`
 	TopProcesses      []MySQLProcessStats `json:"top_processes"`
 }
 

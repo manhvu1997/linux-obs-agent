@@ -15,6 +15,18 @@ collect:
   # Network interfaces to monitor (empty = all non-loopback)
   net_interfaces: []
 
+  # D-state census: enumerate tasks in uninterruptible sleep together with the
+  # kernel symbol (wchan) each is sleeping in. This is the link between "the
+  # node reports iowait" and "this specific worker is stuck in this path".
+  #
+  # It is sampled in the SAME cycle as CPU, disk, PSI and vmstat — correlating
+  # them only means anything if they describe the same instant.
+  d_state_disabled: false      # true skips the /proc walk entirely
+  d_state_max_tasks: 20        # count + longest duration stay exact regardless
+  d_state_scan_threads: false  # also walk /proc/<pid>/task/<tid> (costly; the
+                               # usual culprits — kworker/flush, jbd2, io_uring
+                               # workers — are top-level PIDs anyway)
+
 # ─── eBPF on-demand modules ───────────────────────────────────────────────────
 ebpf:
   enabled: true
@@ -77,9 +89,86 @@ runq:
   # Ignore processes not seen within this window.
   stale_seconds: 60
 
+# ─── Correlated I/O diagnosis ─────────────────────────────────────────────────
+#
+# Ties the individual signals into ONE verdict, because each is ambiguous alone:
+#   iowait alone     – cannot tell a stalled machine from an idle one
+#   throughput alone – cannot tell a slow device from a saturated one
+#   a CPU profile    – cannot see a blocked task at all
+#
+# Walks node → device → blocked tasks → process → stack and emits
+# `io_diagnosis` in GET /api/diagnose with the verdict AND the evidence.
+#
+# The default thresholds implement this rule:
+#   iowait > 50%  AND  throughput low  AND  a task blocked > 1s
+#   AND that task sitting in the writeback/storage path
+#   → storage_latency_stall   (NOT high_disk_throughput)
+#
+# Other verdicts: high_disk_throughput, writeback_congestion,
+# iowait_accounting_artifact (high iowait but idle device + no PSI = not a
+# problem), healthy, inconclusive.
+io_diag:
+  # Below this iowait there is nothing to diagnose.
+  iowait_percent: 50.0
+  # Aggregate device throughput under this counts as "not moving data".
+  low_throughput_mb_per_sec: 10.0
+  # Bounds for "idle" and "saturated" device utilisation.
+  low_util_percent: 20.0
+  high_util_percent: 70.0
+  # A task blocked continuously longer than this is a stall, not ordinary I/O.
+  d_state_stall_ms: 1000
+  # Mean per-request service time above this means a slow device even when
+  # utilisation looks low — independent evidence that needs no eBPF.
+  slow_device_wait_ms: 50.0
+  # Dirty-page share above this suggests throttling in balance_dirty_pages.
+  dirty_ratio_percent: 15.0
+  # PSI io.full above this confirms genuinely lost work (not just idle time).
+  psi_full_avg10: 10.0
+
+# ─── Off-CPU (blocked time) profiling ─────────────────────────────────────────
+#
+# THIS is the module that explains iowait.
+#
+# An on-CPU profiler (cpu_profile) samples with perf_event, which only fires on
+# a CPU that is RUNNING a task.  A task asleep in D state — precisely what
+# iowait accounts for — is never sampled, so an on-CPU profile can never tell
+# you why iowait is high.  offcpu instead records the stack at the moment a task
+# blocks, plus the time until it wakes, and attributes that to a process.
+#
+# Read the result via `offcpu_report` in GET /api/diagnose, or per-process with
+# GET /api/profile?pid=N&mode=offcpu.
+#
+# Reading iowait correctly: iowait is idle time in disguise.  A CPU going idle
+# charges the tick to iowait instead of idle when any task on its runqueue is in
+# D state.  So high iowait + low load + ~0% disk io_util means the box is simply
+# idle with something parked in D state (io_uring workers do this), NOT that it
+# is I/O bound.  Check disk io_util_percent and load before chasing it.
+offcpu:
+  enabled: true
+  # Load the module once node iowait% exceeds this.
+  iowait_threshold: 20.0
+  # Ignore blocking intervals shorter than this. Filters out the constant churn
+  # of short sleeps that carry no diagnostic signal.
+  min_block_us: 1000        # 1 ms
+  # Sanity cap: discard intervals longer than this (guards against a stale
+  # entry being matched to an unrelated later wake-up).
+  max_block_us: 60000000    # 60 s
+  # Also attribute ordinary S-state sleeps (epoll, futex, nanosleep).
+  # Off by default: on an idle-ish server this dwarfs everything else and
+  # buries the D-state stalls you are actually hunting.
+  track_interruptible: false
+  # Max processes per report, and blocking sites per process.
+  top_n: 10
+  max_stacks_per_proc: 5
+  # counts / stack_traces map size.
+  max_map_entries: 10240
+
 # ─── On-demand per-process CPU profiling ──────────────────────────────────────
 #
-# GET /api/profile?pid=N[&duration=10s][&format=json|folded]
+# GET /api/profile?pid=N[&duration=10s][&format=json|folded][&mode=oncpu|offcpu]
+#
+# mode=oncpu  (default) – where the process is RUNNING
+# mode=offcpu           – where it is BLOCKED and for how long (see `offcpu:`)
 #
 # Nothing runs in the background: sampling happens only while a request is in
 # flight, is filtered to the target PID in-kernel, and is cached per-PID so a

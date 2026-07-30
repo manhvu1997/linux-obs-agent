@@ -11,6 +11,20 @@ import (
 	"strings"
 )
 
+// ReadComm returns the process name from /proc/<pid>/comm.
+//
+// Prefer this over a comm captured in eBPF when reporting a *process*: eBPF
+// helpers return the per-thread name, and many servers name their worker
+// threads (dragonfly's Proactor0/1, jvm's GC threads, ...), so a thread sample
+// would otherwise label the process with an arbitrary worker's name.
+func ReadComm(pid uint32) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // ReadCmdline returns the full command line of a PID, with the NUL separators
 // replaced by spaces. Returns "" when the process is gone or unreadable.
 func ReadCmdline(pid uint32) string {

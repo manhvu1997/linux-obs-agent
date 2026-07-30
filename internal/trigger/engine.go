@@ -12,6 +12,7 @@
 //	load/cpu > LoadNormalised       → activate runqlat
 //	ctxswitch/s > CtxSwitchDelta   → activate runqlat
 //	net errors/s > NetErrorDelta    → activate tcp_retransmit
+//	iowait > offcpu.IOWaitThreshold → activate offcpu (attributes blocked time)
 //	high load + low CPU             → suspect IO wait → activate io_latency + runqlat
 //	runq level 1 (CPU% or load)     → activate runqlat for per-process analysis
 package trigger
@@ -30,25 +31,33 @@ import (
 
 // Engine evaluates trigger rules and signals the eBPF manager.
 type Engine struct {
-	cfg     *config.TriggerConfig
-	runqCfg *config.RunQueueConfig
-	coll    *collector.Collector
-	manager *ebpf.Manager
+	cfg       *config.TriggerConfig
+	runqCfg   *config.RunQueueConfig
+	offcpuCfg *config.OffCPUConfig
+	coll      *collector.Collector
+	manager   *ebpf.Manager
 
 	// firing tracks which modules are currently triggered so we can log
 	// transitions clearly.
 	firing map[ebpf.ModuleID]bool
 }
 
-// NewEngine creates the trigger engine. runqCfg may be nil, in which case the
-// level-1 run-queue rule is skipped and the legacy rules alone govern runqlat.
-func NewEngine(cfg *config.TriggerConfig, runqCfg *config.RunQueueConfig, coll *collector.Collector, mgr *ebpf.Manager) *Engine {
+// NewEngine creates the trigger engine. runqCfg and offcpuCfg may be nil, in
+// which case those rules are skipped and the legacy rules alone apply.
+func NewEngine(
+	cfg *config.TriggerConfig,
+	runqCfg *config.RunQueueConfig,
+	offcpuCfg *config.OffCPUConfig,
+	coll *collector.Collector,
+	mgr *ebpf.Manager,
+) *Engine {
 	return &Engine{
-		cfg:     cfg,
-		runqCfg: runqCfg,
-		coll:    coll,
-		manager: mgr,
-		firing:  make(map[ebpf.ModuleID]bool),
+		cfg:       cfg,
+		runqCfg:   runqCfg,
+		offcpuCfg: offcpuCfg,
+		coll:      coll,
+		manager:   mgr,
+		firing:    make(map[ebpf.ModuleID]bool),
 	}
 }
 
@@ -95,6 +104,17 @@ func (e *Engine) evalIO(ctx context.Context, m model.NodeMetrics) {
 		e.fire(ctx, ebpf.ModIOLatency,
 			"iowait", m.CPU.IOWaitPercent,
 			"threshold", e.cfg.IOWaitPercent)
+	}
+
+	// Sustained iowait → attribute the blocked time to processes and stacks.
+	// io_latency covers the block device; offcpu covers everything a task can
+	// block on, and is the only module that can explain iowait when the disk
+	// turns out to be idle.
+	if e.offcpuCfg != nil && e.offcpuCfg.Enabled &&
+		m.CPU.IOWaitPercent > e.offcpuCfg.IOWaitThreshold {
+		e.fire(ctx, ebpf.ModOffCPU,
+			"iowait", m.CPU.IOWaitPercent,
+			"threshold", e.offcpuCfg.IOWaitThreshold)
 	}
 
 	// Heuristic: high load but low CPU → IO-bound

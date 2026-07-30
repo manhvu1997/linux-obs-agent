@@ -24,6 +24,8 @@
 15. [Extending the Agent](#15-extending-the-agent)
 16. [MySQL Slow Query Tracer](#16-mysql-slow-query-tracer)
 17. [Run-Queue Analysis & On-Demand CPU Profiling](#17-run-queue-analysis--on-demand-cpu-profiling)
+18. [Off-CPU Profiling — the module that explains iowait](#18-off-cpu-profiling--the-module-that-explains-iowait)
+19. [Correlated I/O Diagnosis — connecting the chain](#19-correlated-io-diagnosis--connecting-the-chain)
 
 ---
 
@@ -108,6 +110,9 @@ linux-obs-agent/
 │   ├── collector/
 │   │   ├── collector.go             ← orchestrator: runs all scrapers every 5s
 │   │   ├── cpu.go                   ← /proc/stat → CPUMetrics (delta-based)
+│   │   ├── psi.go                   ← /proc/pressure/{io,cpu,memory} (PSI)
+│   │   ├── vmstat.go                ← /proc/vmstat dirty/writeback/pgpg deltas
+│   │   ├── dstate.go                ← D-state census + wchan + blocked duration
 │   │   └── system.go                ← /proc/meminfo, /proc/diskstats, /proc/net/dev
 │   │
 │   ├── ebpf/
@@ -131,6 +136,10 @@ linux-obs-agent/
 │   │   │   ├── tcp_retransmit.bpf.c ← eBPF C: tp_btf/tcp_retransmit_skb
 │   │   │   ├── gen.go
 │   │   │   └── loader.go
+│   │   ├── offcpu/                  ← off-CPU (blocked time) profiler
+│   │   │   ├── offcpu.bpf.c         ← eBPF C: sched_switch block/wake + stacks
+│   │   │   ├── gen.go
+│   │   │   └── loader.go            ← Go: AllStacks() map read, no ringbuf
 │   │   ├── fsync/                   ← always-on fsync latency tracer
 │   │   │   ├── fsync.bpf.c          ← eBPF C: kprobe/kretprobe + LRU_HASH aggregation
 │   │   │   ├── gen.go
@@ -146,12 +155,20 @@ linux-obs-agent/
 │   ├── procinfo/
 │   │   └── procinfo.go              ← shared /proc readers (cmdline, cgroup)
 │   │
+│   ├── iodiag/
+│   │   └── classify.go              ← correlation engine → io_diagnosis verdict
+│   │
+│   ├── offcpu/
+│   │   ├── report.go                ← blocked-time report builder (on-demand)
+│   │   └── folded.go                ← off-CPU flamegraph folded stacks
+│   │
 │   ├── runq/
 │   │   └── report.go                ← level-2 run-queue report builder (on-demand)
 │   │
 │   ├── cpuprofile/
 │   │   ├── report.go                ← BuildReport / BuildReportForPID (symbolized)
 │   │   ├── folded.go                ← WriteFolded: flamegraph-ready folded stacks
+│   │   ├── symbols.go               ← exported resolvers (shared with offcpu)
 │   │   ├── kallsyms.go              ← kernel symbol resolution (/proc/kallsyms)
 │   │   └── usersym.go               ← user symbol resolution (ELF + /proc/pid/maps)
 │   │
@@ -207,6 +224,12 @@ On-demand builder for the level-2 run-queue report. `BuildReport(loader, metrics
 
 ### `internal/cpuprofile`
 Symbolization and report building for the CPU profiler. `BuildReport` aggregates all processes; `BuildReportForPID` scopes to one (skipping the 1 %-of-system noise floor, since a single target is 100 % of its own profile). `WriteFolded` streams folded stacks straight to an `http.ResponseWriter` for flamegraph rendering. Kernel symbols come from `/proc/kallsyms`, user symbols from ELF + `/proc/<pid>/maps`, both cached with periodic eviction.
+
+### `internal/iodiag`
+Correlation engine.  `Classify(metrics, offcpuReport, thresholds)` walks node → device → blocked tasks → process → stack and returns a `model.IODiagnosis`: a verdict, a confidence, the evidence chain, the raw numbers behind it, and the list of signals that were missing.  Pure function over one `NodeMetrics` snapshot — no state, no I/O, called on demand from `/api/diagnose`.
+
+### `internal/offcpu`
+On-demand builder for the blocked-time report.  Aggregates the `offcpu` eBPF counts map by process, folds identical blocking sites across threads, and renders each site as a combined stack (user frames, then the kernel frames that actually blocked, tagged `_[k]`).  Reuses `internal/cpuprofile`'s symbol caches via its exported resolvers rather than building its own.  `WriteFolded` emits off-CPU flamegraph input weighted by **microseconds blocked** instead of sample count.
 
 ### `internal/trigger`
 Stateless evaluator that runs every `trigger.eval_interval`. Reads the latest `NodeMetrics` snapshot from the collector (non-blocking `Latest()` call) and calls `manager.Activate()` when thresholds are breached. The manager handles cool-down so the trigger engine can fire freely.
@@ -1279,5 +1302,238 @@ Negative check: with the node idle, `.runqueue_report` must be **absent** and `b
 
 ---
 
-## 18. Review output
+## 18. Off-CPU Profiling — the module that explains iowait
+
+### Why an on-CPU profiler cannot answer this
+
+`cpu_profile` samples with `perf_event`, which fires **only on a CPU that is running a task**. A task asleep in `TASK_UNINTERRUPTIBLE` (D state) — precisely what iowait accounts for — is by definition not on a CPU and is never sampled. No amount of CPU profiling will ever explain iowait; it is a structural limitation, not a tuning problem.
+
+`offcpu` inverts the question: it records the stack **at the moment a task blocks**, plus the time until it wakes.
+
+### Mechanism (`offcpu.bpf.c`)
+
+One `tp_btf/sched_switch` program, two halves:
+
+```
+sched_switch(prev, next)
+  ├── prev is LEAVING the CPU
+  │     state = prev->__state          (CO-RE: `state` on kernels < 5.14)
+  │     if not (state & track_state):  return   ← preempted, not blocked
+  │     blocked[prev->pid] = {
+  │         ts    = bpf_ktime_get_ns(),
+  │         kstack = bpf_get_stackid(ctx, &stack_traces, 0),
+  │         ustack = bpf_get_stackid(ctx, &stack_traces, BPF_F_USER_STACK),
+  │         comm, tgid }
+  │     ^ `current` is still prev at this tracepoint, so the stack walk
+  │       captures the blocking task — this is what makes it attributable.
+  │
+  └── next is ENTERING the CPU
+        info  = blocked[next->pid]        (copied out BEFORE delete)
+        delta = now - info.ts             ← time spent off-CPU
+        if delta < min_block_us: return
+        counts[{tgid, pid, kstack, ustack, comm}] += delta
+```
+
+**Maps**: `stack_traces` (STACK_TRACE), `blocked` (LRU_HASH, 65 536 — LRU because a task can block and then exit without ever being scheduled again), `counts` (LRU_HASH, 10 240). No ring buffer at all — everything aggregates in-kernel and userspace reads the map once, on demand.
+
+**Overhead gate**: the expensive operation is `bpf_get_stackid`, and it runs **only when prev is actually blocking**. Involuntary preemption leaves prev in `TASK_RUNNING` and returns before any stack walk — on a busy host that is the large majority of context switches.
+
+**CO-RE task state**: kernel 5.14 renamed `task_struct.state` → `__state` and narrowed it from `long` to `unsigned int`. Both shapes are declared as standalone `preserve_access_index` structs so the program compiles against either `vmlinux.h` and CO-RE picks the right one at load time.
+
+### Reading iowait correctly
+
+**iowait is idle time in disguise.** A CPU going idle charges the tick to `iowait` rather than `idle` whenever any task on its runqueue sits in D state. The kernel's own documentation calls the value unreliable. So:
+
+| Symptom | Meaning |
+|---|---|
+| high iowait + high `disk_io_util_percent` + load > NumCPU | genuine I/O saturation — use `offcpu_report` and `io_latency` |
+| high iowait + `io_util_percent` ≈ 0 + low load | **the box is idle** with something parked in D state (io_uring workers do this). Not a problem. |
+
+A worked example: `iowait 81.6%`, `idle 0%`, `load1 0.47` on 2 CPUs, `io_util 0%`, `write 1.6 KB/s`. That machine is 82% idle — the iowait is pure accounting.
+
+### GET /api/diagnose — `offcpu_report`
+
+Present only while the module is active (triggered by `iowait > offcpu.iowait_threshold`).
+
+```json
+{
+  "type": "offcpu_profile",
+  "window": { "min_block_us": 1000, "tracked_states": "uninterruptible" },
+  "system": { "total_blocked_ms": 48210.5, "total_events": 1932, "processes": 6 },
+  "processes": [
+    {
+      "pid": 920070, "comm": "dragonfly",
+      "blocked_ms": 41022.3, "max_blocked_ms": 812.4, "events": 1541,
+      "threads_sampled": 4, "percent_of_total": 85.09,
+      "top_stacks": [
+        {
+          "symbol_stack": [
+            "io_uring_submit_and_get_events",
+            "__io_uring_enter_[k]", "io_cqring_wait_[k]", "schedule_[k]"
+          ],
+          "blocked_ms": 38110.2, "max_blocked_ms": 812.4,
+          "events": 1402, "percent": 92.9
+        }
+      ]
+    }
+  ]
+}
+```
+
+> `blocked_ms` is wall-clock time **summed across threads** — 8 threads each blocked 1 s over a 1 s window reports 8000 ms. Compare stacks against each other, not against the window.
+
+### GET /api/profile?mode=offcpu
+
+The same click-through as the on-CPU profiler, answering the opposite question:
+
+```bash
+# where is this process blocked?
+curl -s "localhost:9200/api/profile?pid=$PID&mode=offcpu&duration=10s" | jq .offcpu_report
+
+# off-CPU flamegraph (weight = microseconds blocked, not sample count)
+curl -s "localhost:9200/api/profile?pid=$PID&mode=offcpu&format=folded" > offcpu.folded
+flamegraph.pl --title="Off-CPU Time" --countname=us offcpu.folded > offcpu.svg
+```
+
+Same resolution order as §17 — cache → reuse the live system-wide module → dedicated PID-filtered window — with one difference: there is no minimum-sample heuristic. A single 4-second D-state stall is one event and is exactly the thing worth reporting, so any data from the live module is returned.
+
+The result cache is keyed by `(pid, mode)`: an on-CPU profile must never be served for an off-CPU request, since they answer opposite questions.
+
+### Configuration
+
+See the `offcpu:` section in `deploy/config.yaml.example`. Environment overrides: `OFFCPU_ENABLED`, `OFFCPU_IOWAIT_THRESHOLD`, `OFFCPU_MIN_BLOCK_US`, `OFFCPU_TRACK_INTERRUPTIBLE`.
+
+`track_interruptible` defaults **off**. Enabling it also attributes ordinary S-state sleeps (epoll, futex, nanosleep), which on an idle-ish server dwarfs everything else and buries the D-state stalls you are hunting.
+
+### Test
+
+```bash
+# Generate genuine D-state blocking
+fio --name=blk --ioengine=sync --rw=randread --bs=4k --size=2G \
+    --numjobs=4 --direct=1 --filename=/tmp/fio.tmp &
+
+curl -s localhost:9200/api/diagnose | jq '.offcpu_report.processes[0].top_stacks[0]'
+# expect a kernel stack ending in schedule_[k] / io_schedule_[k]
+
+sudo bpftool map show name counts       # bounded at max_map_entries
+sudo bpftool prog list | grep tracing   # handle_switch attached
+```
+
+### Overhead
+
+| Component | CPU | Memory |
+|---|---|---|
+| offcpu (active, D-state only, ~5k blocks/s) | ~0.05 % | ~6 MB (stack_traces + counts) |
+| Report build (per `/api/diagnose` call) | ~5 ms (symbolization, cached after first) | — |
+
+---
+
+## 19. Correlated I/O Diagnosis — connecting the chain
+
+### The problem
+
+The agent produced good *symptoms* but did not connect them. Each signal is ambiguous on its own:
+
+| Signal | What it cannot tell you |
+|---|---|
+| iowait | whether the machine is stalled or merely idle |
+| disk throughput | whether the device is slow or saturated |
+| a CPU profile | anything at all about a blocked task — it only samples running ones |
+| a D-state count | *what* the task is stuck on, or *why* |
+
+`io_diagnosis` walks the layers in order and emits a verdict **with the evidence**, so the reasoning is auditable rather than trusted:
+
+```
+node → device → blocked tasks → process → stack
+```
+
+### Same-window collection
+
+Correlation is only sound if every signal describes the same instant, so these are collected in one `collect()` cycle alongside CPU/mem/disk/net rather than on separate tickers:
+
+| Source | Field | Why it matters |
+|---|---|---|
+| `/proc/pressure/{io,cpu,memory}` | `metrics.pressure` | **The decisive signal.** `io.full` = time when *nothing* could progress. Distinguishes a real stall from idle-time-relabelled-as-iowait. |
+| `/proc/vmstat` | `metrics.vmstat` | `nr_dirty`, `nr_writeback`, `nr_dirtied`, `nr_written`, `pgpgin`, `pgpgout`, `pswpin/out` — separates writeback congestion from device latency |
+| `/proc/[pid]/stat` + `wchan` | `metrics.d_state` | Tasks currently in D, the kernel function each sleeps in, and how long each has been continuously blocked |
+| `/proc/diskstats` fields 12/14 | `metrics.disk[].in_flight`, `.avg_queue_depth`, `.read_avg_wait_ms`, `.write_avg_wait_ms` | Already parsed but previously discarded. High in-flight + low throughput = slow device, not busy one |
+| eBPF `io_latency` | `io_latency_histogram` | The biolatency distribution — computed in-kernel all along, previously unreachable |
+| eBPF `offcpu` | `offcpu_report` | The blocking stack (§18) |
+
+**D-state duration without eBPF**: the scanner remembers when each PID was first seen in D and clears it the moment it leaves, so `in_d_state_ms` is a continuously-blocked duration quantised to the scan interval. That is what makes the "blocked > 1 s" rule work even when the eBPF modules are off.
+
+### Verdicts
+
+| Verdict | Condition | Meaning |
+|---|---|---|
+| `storage_latency_stall` | iowait high **AND** throughput low **AND** (task blocked >1s in the storage path **OR** avg wait/request > 50 ms) | The device is **slow, not busy**. More IOPS capacity will not help — per-request latency is the problem. Look beneath the device: network storage RTT, hypervisor steal, cgroup `io.max`, failing disk. |
+| `high_disk_throughput` | util ≥ 70% **AND** throughput high | Genuine saturation — a capacity problem. |
+| `writeback_congestion` | dirty ratio ≥ 15% **AND** iowait high | Stall is in the page cache; writers throttled in `balance_dirty_pages`. Not the device's fault. |
+| `iowait_accounting_artifact` | iowait high **BUT** device idle **AND** nothing blocked >1s **AND** no PSI pressure | **Not a problem.** The CPU was idle while a task sat parked in D state (io_uring workers do this). Do not page anyone. |
+| `healthy` / `inconclusive` | — | Nothing to report / signals conflict |
+
+`confidence` degrades as links go missing, and `missing[]` names exactly which signal was absent (`psi`, `d_state census`, `offcpu_report`) so a low-confidence verdict is actionable rather than mysterious.
+
+### Example — the artifact case
+
+```bash
+curl -s localhost:9200/api/diagnose | jq .io_diagnosis
+```
+
+```json
+{
+  "type": "io_diagnosis",
+  "verdict": "iowait_accounting_artifact",
+  "confidence": "medium",
+  "summary": "iowait 81.6% is an accounting artifact, NOT an I/O problem: sda is idle (0.0% util, 0.00 MB/s), load/cpu is 0.24 and nothing blocked longer than 1000ms. The CPU was idle while a task sat parked in D state.",
+  "chain": [
+    { "stage": "node",          "confirmed": true,  "detail": "iowait 81.6%, idle 0.0%, load/cpu 0.24, 2 procs blocked; PSI io some=0.1% full=0.0%" },
+    { "stage": "device",        "confirmed": true,  "detail": "sda: util 0.0%, 0.00 MB/s, avg wait 0.50 ms, in-flight 0" },
+    { "stage": "blocked_tasks", "confirmed": true,  "detail": "2 task(s) in D state, longest 340ms; iou-wrk-920070(920412) [kthread] 340ms" },
+    { "stage": "process",       "confirmed": false, "detail": "not attributed — off-CPU profiler was not active" },
+    { "stage": "stack",         "confirmed": false, "detail": "no blocking stacks; enable offcpu or query /api/profile?mode=offcpu" }
+  ],
+  "next_steps": [
+    "No action needed. iowait is idle time charged differently when any task on the runqueue is in D state.",
+    "Alert on PSI io.full (pressure.io.full.avg10) instead of iowait — it measures lost work rather than idle time."
+  ]
+}
+```
+
+### Alerting recommendation
+
+**Alert on `pressure.io.full.avg10`, not on `cpu.iowait_percent`.** PSI measures work that could not proceed; iowait measures idle time that happened to coincide with a D-state task. The example above is exactly why the second one pages people at 3am for nothing.
+
+### Configuration
+
+`io_diag:` in `deploy/config.yaml.example`, plus the `collect.d_state_*` knobs. All thresholds are echoed into the report so a consumer can re-derive the verdict.
+
+### Test
+
+```bash
+# Genuine device latency (requires a slow or throttled device)
+fio --name=lat --ioengine=sync --rw=randread --bs=4k --size=1G \
+    --direct=1 --numjobs=2 --filename=/tmp/fio.tmp &
+curl -s localhost:9200/api/diagnose | jq '.io_diagnosis.verdict, .io_diagnosis.chain'
+
+# Writeback congestion
+dd if=/dev/zero of=/tmp/big bs=1M count=20000 &
+watch -n1 "curl -s localhost:9200/api/diagnose | jq -c '.metrics.vmstat, .io_diagnosis.verdict'"
+
+# Verify the same-window signals are present
+curl -s localhost:9200/api/diagnose | jq '.metrics.pressure, .metrics.vmstat, .metrics.d_state'
+```
+
+### Not yet covered
+
+These were requested and are **not** implemented — they need new eBPF modules rather than wiring:
+
+- **biostacks** — the submitting stack at `blk_mq_start_request`. `io_latency` records pid/comm/dev/sector/latency but no stack, so block I/O cannot yet be attributed to a call path. (`offcpu` covers the blocking side, which overlaps but is not the same thing.)
+- **fileslower / ext4slower / xfsslower** — VFS- and filesystem-level slow-operation tracing.
+- **`writeback:writeback_start` / `writeback_written` tracepoints** — the `writeback` module hooks reclaim, not these.
+- **syncsnoop** — largely covered by the existing always-on `fsync` tracer (§6).
+
+---
+
+## 20. Review output
 Use codex to review output of this code each change

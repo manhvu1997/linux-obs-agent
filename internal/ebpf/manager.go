@@ -17,9 +17,11 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/cpu_profile"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/disk_write"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/io_latency"
+	ebpfoffcpu "github.com/manhvu1997/linux-obs-agent/internal/ebpf/offcpu"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/runqlat"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/tcp_retransmit"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/offcpu"
 )
 
 // ModuleID identifies a specific eBPF module.
@@ -31,6 +33,7 @@ const (
 	ModRunQLat       ModuleID = "runqlat"
 	ModTCPRetransmit ModuleID = "tcp_retransmit"
 	ModDiskWrite     ModuleID = "disk_write"
+	ModOffCPU        ModuleID = "offcpu"
 )
 
 // moduleState tracks the lifecycle of one eBPF module.
@@ -45,6 +48,7 @@ type moduleState struct {
 type Manager struct {
 	cfg        *config.EBPFConfig
 	runqCfg    *config.RunQueueConfig
+	offcpuCfg  *config.OffCPUConfig
 	profileCfg *config.ProfileConfig
 	Events     chan model.EBPFEvent
 
@@ -52,23 +56,30 @@ type Manager struct {
 	modules map[ModuleID]*moduleState
 
 	// Concrete loaders – created on first activation.
-	cpuLoader  *cpu_profile.Loader
-	ioLoader   *io_latency.Loader
-	rqLoader   *runqlat.Loader
-	tcpLoader  *tcp_retransmit.Loader
-	diskLoader *disk_write.Loader
+	cpuLoader    *cpu_profile.Loader
+	ioLoader     *io_latency.Loader
+	rqLoader     *runqlat.Loader
+	tcpLoader    *tcp_retransmit.Loader
+	diskLoader   *disk_write.Loader
+	offcpuLoader *ebpfoffcpu.Loader
 
 	// On-demand per-process profiling state (see profiler.go).
 	prof profiler
 }
 
-// NewManager creates the eBPF manager. runqCfg and profileCfg may be nil, in
-// which case run-queue reporting and on-demand profiling are unavailable but
-// every other module behaves as before.
-func NewManager(cfg *config.EBPFConfig, runqCfg *config.RunQueueConfig, profileCfg *config.ProfileConfig) *Manager {
+// NewManager creates the eBPF manager. runqCfg, offcpuCfg and profileCfg may
+// be nil, in which case run-queue reporting, off-CPU profiling and on-demand
+// profiling are unavailable but every other module behaves as before.
+func NewManager(
+	cfg *config.EBPFConfig,
+	runqCfg *config.RunQueueConfig,
+	offcpuCfg *config.OffCPUConfig,
+	profileCfg *config.ProfileConfig,
+) *Manager {
 	return &Manager{
 		cfg:        cfg,
 		runqCfg:    runqCfg,
+		offcpuCfg:  offcpuCfg,
 		profileCfg: profileCfg,
 		Events:     make(chan model.EBPFEvent, 2048),
 		modules:    make(map[ModuleID]*moduleState),
@@ -93,6 +104,67 @@ func (m *Manager) runqThresholds() (thresholdUs, trackMinUs uint64) {
 		trackMinUs = thresholdUs
 	}
 	return thresholdUs, trackMinUs
+}
+
+// offcpuLoaderConfig builds the off-CPU loader config from cfg, optionally
+// scoped to one process (targetTGID != 0 for on-demand profiling).
+func (m *Manager) offcpuLoaderConfig(targetTGID uint32) ebpfoffcpu.Config {
+	c := ebpfoffcpu.Config{TargetTGID: targetTGID}
+	if m.offcpuCfg == nil {
+		return c
+	}
+	c.MinBlockUs = m.offcpuCfg.MinBlockUs
+	c.MaxBlockUs = m.offcpuCfg.MaxBlockUs
+	c.MaxEntries = m.offcpuCfg.MaxMapEntries
+	c.TrackState = ebpfoffcpu.TrackUninterruptible
+	if m.offcpuCfg.TrackInterruptible {
+		c.TrackState |= ebpfoffcpu.TrackInterruptible
+	}
+	return c
+}
+
+// offcpuReportOptions builds the report options, echoing the active filters.
+func (m *Manager) offcpuReportOptions() offcpu.Options {
+	o := offcpu.Options{TrackedStates: "uninterruptible"}
+	if m.offcpuCfg == nil {
+		return o
+	}
+	o.TopN = m.offcpuCfg.TopN
+	o.MaxStacksPerProc = m.offcpuCfg.MaxStacksPerProc
+	o.MinBlockUs = m.offcpuCfg.MinBlockUs
+	if m.offcpuCfg.TrackInterruptible {
+		o.TrackedStates = "uninterruptible,interruptible"
+	}
+	return o
+}
+
+// BuildOffCPUReport builds the blocked-time report from the active offcpu
+// loader. Returns nil when the module is not active or nothing has blocked.
+//
+// Called on-demand from GET /api/diagnose; there is no background polling.
+func (m *Manager) BuildOffCPUReport() *model.OffCPUReport {
+	m.mu.Lock()
+	l := m.offcpuLoader
+	m.mu.Unlock()
+	if l == nil {
+		return nil
+	}
+	return offcpu.BuildReport(l, m.offcpuReportOptions())
+}
+
+// IOLatencyHistogram returns the in-kernel block-IO latency distribution as
+// log2(microsecond) buckets, or nil when io_latency is not active.
+//
+// The histogram is computed on every completed request regardless — this is
+// the biolatency equivalent, and until now nothing read it.
+func (m *Manager) IOLatencyHistogram() map[uint32]uint64 {
+	m.mu.Lock()
+	l := m.ioLoader
+	m.mu.Unlock()
+	if l == nil {
+		return nil
+	}
+	return l.LatencyHistogram()
 }
 
 // Activate starts the given module (if not already active and not in cool-down).
@@ -228,6 +300,14 @@ func (m *Manager) startModule(ctx context.Context, id ModuleID) error {
 		m.diskLoader = l
 		go m.fanIn(ctx, l.Events)
 
+	case ModOffCPU:
+		l := ebpfoffcpu.New(m.offcpuLoaderConfig(0))
+		if err := l.Start(ctx); err != nil {
+			return err
+		}
+		m.offcpuLoader = l
+		// No fan-in: offcpu aggregates entirely in-kernel and emits no events.
+
 	default:
 		return fmt.Errorf("unknown module: %s", id)
 	}
@@ -260,6 +340,11 @@ func (m *Manager) stopModule(id ModuleID) {
 		if m.diskLoader != nil {
 			m.diskLoader.Stop()
 			m.diskLoader = nil
+		}
+	case ModOffCPU:
+		if m.offcpuLoader != nil {
+			m.offcpuLoader.Stop()
+			m.offcpuLoader = nil
 		}
 	}
 }

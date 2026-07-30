@@ -21,6 +21,8 @@ type Config struct {
 	Process   ProcessConfig   `yaml:"process"`
 	DiskScan  DiskScanConfig  `yaml:"disk_scan"`
 	RunQueue  RunQueueConfig  `yaml:"runq"`
+	OffCPU    OffCPUConfig    `yaml:"offcpu"`
+	IODiag    IODiagConfig    `yaml:"io_diag"`
 	Profile   ProfileConfig   `yaml:"profile"`
 	Fsync     FsyncConfig     `yaml:"fsync"`
 	Writeback WritebackConfig `yaml:"writeback"`
@@ -44,6 +46,19 @@ type CollectConfig struct {
 	DiskDevices []string `yaml:"disk_devices"`
 	// Network interfaces to monitor (empty = all non-loopback).
 	NetInterfaces []string `yaml:"net_interfaces"`
+
+	// DStateDisabled turns off the D-state census. The scan walks /proc once
+	// per interval; on a host with thousands of processes that is measurable,
+	// so it can be switched off — at the cost of losing the link between
+	// iowait and the specific tasks producing it.
+	DStateDisabled bool `yaml:"d_state_disabled"`
+	// DStateMaxTasks caps how many blocked tasks are reported (0 → 20).
+	// Count and longest-duration remain exact regardless.
+	DStateMaxTasks int `yaml:"d_state_max_tasks"`
+	// DStateScanThreads also walks /proc/<pid>/task/<tid>. Off by default: it
+	// multiplies scan cost by thread count, and the usual culprits
+	// (kworker/flush, jbd2, io_uring workers) are top-level PIDs anyway.
+	DStateScanThreads bool `yaml:"d_state_scan_threads"`
 }
 
 // EBPFConfig controls the on-demand eBPF sub-system.
@@ -134,6 +149,62 @@ type RunQueueConfig struct {
 	TopN int `yaml:"top_n"`
 	// StaleSeconds: ignore processes not seen within this window.
 	StaleSeconds int `yaml:"stale_seconds"`
+}
+
+// OffCPUConfig controls the off-CPU (blocked-time) profiler.
+//
+// This is the module that explains iowait.  An on-CPU profiler samples only
+// running tasks, so it can never see a task asleep in D state — which is
+// exactly what iowait accounts for.  offcpu instead records the stack at the
+// moment a task blocks and the time until it wakes.
+type OffCPUConfig struct {
+	// Enabled is the master switch for the module and its trigger rule.
+	Enabled bool `yaml:"enabled"`
+	// IOWaitThreshold activates the module once node iowait% exceeds this.
+	IOWaitThreshold float64 `yaml:"iowait_threshold"`
+	// MinBlockUs ignores blocking intervals shorter than this.  Filters out
+	// the constant churn of short sleeps that carry no diagnostic signal.
+	MinBlockUs uint64 `yaml:"min_block_us"`
+	// MaxBlockUs is a sanity cap; intervals longer than this are discarded.
+	MaxBlockUs uint64 `yaml:"max_block_us"`
+	// TrackInterruptible additionally attributes ordinary S-state sleeps
+	// (epoll, futex, nanosleep).  Off by default: on an idle-ish server this
+	// dwarfs everything else and buries the D-state stalls you are hunting.
+	TrackInterruptible bool `yaml:"track_interruptible"`
+	// TopN caps processes per report.
+	TopN int `yaml:"top_n"`
+	// MaxStacksPerProc caps blocking sites reported per process.
+	MaxStacksPerProc int `yaml:"max_stacks_per_proc"`
+	// MaxMapEntries sizes the counts / stack_traces maps.
+	MaxMapEntries uint32 `yaml:"max_map_entries"`
+}
+
+// IODiagConfig tunes the I/O correlation classifier that produces
+// `io_diagnosis` in GET /api/diagnose.
+//
+// The defaults implement this rule: iowait high AND throughput low AND a task
+// blocked > 1 s AND that task sitting in the writeback/storage path
+// → storage LATENCY stall, not high throughput.
+type IODiagConfig struct {
+	// IOWaitPercent: below this there is nothing to diagnose.
+	IOWaitPercent float64 `yaml:"iowait_percent"`
+	// LowThroughputMBPerSec: aggregate device throughput under this counts as
+	// "not actually moving data".
+	LowThroughputMBPerSec float64 `yaml:"low_throughput_mb_per_sec"`
+	// LowUtilPercent / HighUtilPercent bound "idle" and "saturated".
+	LowUtilPercent  float64 `yaml:"low_util_percent"`
+	HighUtilPercent float64 `yaml:"high_util_percent"`
+	// DStateStallMs: a task blocked continuously longer than this is a stall
+	// rather than ordinary I/O.
+	DStateStallMs int64 `yaml:"d_state_stall_ms"`
+	// SlowDeviceWaitMs: mean per-request service time above this indicates a
+	// slow device even when utilisation looks low.
+	SlowDeviceWaitMs float64 `yaml:"slow_device_wait_ms"`
+	// DirtyRatioPercent: dirty-page share above this suggests writeback
+	// throttling in balance_dirty_pages.
+	DirtyRatioPercent float64 `yaml:"dirty_ratio_percent"`
+	// PSIFullAvg10: io.full above this confirms genuinely lost work.
+	PSIFullAvg10 float64 `yaml:"psi_full_avg10"`
 }
 
 // ProfileConfig controls on-demand per-process CPU profiling
@@ -283,7 +354,8 @@ func Defaults() *Config {
 			MetricsAddr: ":9200",
 		},
 		Collect: CollectConfig{
-			Interval: 5 * time.Second,
+			Interval:       5 * time.Second,
+			DStateMaxTasks: 20,
 		},
 		EBPF: EBPFConfig{
 			Enabled:            true,
@@ -330,6 +402,26 @@ func Defaults() *Config {
 			TrackMinUs:         100,    // skip sub-100us noise in-kernel
 			TopN:               20,
 			StaleSeconds:       60,
+		},
+		OffCPU: OffCPUConfig{
+			Enabled:            true,
+			IOWaitThreshold:    20.0,
+			MinBlockUs:         1000,       // 1 ms
+			MaxBlockUs:         60_000_000, // 60 s sanity cap
+			TrackInterruptible: false,      // D-state only: that is what iowait is
+			TopN:               10,
+			MaxStacksPerProc:   5,
+			MaxMapEntries:      10240,
+		},
+		IODiag: IODiagConfig{
+			IOWaitPercent:         50.0,
+			LowThroughputMBPerSec: 10.0,
+			LowUtilPercent:        20.0,
+			HighUtilPercent:       70.0,
+			DStateStallMs:         1000,
+			SlowDeviceWaitMs:      50.0,
+			DirtyRatioPercent:     15.0,
+			PSIFullAvg10:          10.0,
 		},
 		Profile: ProfileConfig{
 			Enabled:         true,
@@ -396,6 +488,7 @@ func Load(path string) (*Config, error) {
 	applyMongoEnvOverrides(cfg)
 	applyMySQLEnvOverrides(cfg)
 	applyRunQueueEnvOverrides(cfg)
+	applyOffCPUEnvOverrides(cfg)
 	applyProfileEnvOverrides(cfg)
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
@@ -468,6 +561,25 @@ func applyRunQueueEnvOverrides(cfg *Config) {
 	}
 }
 
+func applyOffCPUEnvOverrides(cfg *Config) {
+	if v := os.Getenv("OFFCPU_ENABLED"); v != "" {
+		cfg.OffCPU.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("OFFCPU_IOWAIT_THRESHOLD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			cfg.OffCPU.IOWaitThreshold = f
+		}
+	}
+	if v := os.Getenv("OFFCPU_MIN_BLOCK_US"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			cfg.OffCPU.MinBlockUs = n
+		}
+	}
+	if v := os.Getenv("OFFCPU_TRACK_INTERRUPTIBLE"); v != "" {
+		cfg.OffCPU.TrackInterruptible = v == "true" || v == "1" || v == "yes"
+	}
+}
+
 func applyProfileEnvOverrides(cfg *Config) {
 	if v := os.Getenv("PROFILE_ENABLED"); v != "" {
 		cfg.Profile.Enabled = v == "true" || v == "1" || v == "yes"
@@ -494,6 +606,14 @@ func (c *Config) validate() error {
 	}
 	if c.RunQueue.Enabled && c.RunQueue.TopN <= 0 {
 		return fmt.Errorf("runq.top_n must be > 0")
+	}
+	if c.OffCPU.Enabled {
+		if c.OffCPU.TopN <= 0 {
+			return fmt.Errorf("offcpu.top_n must be > 0")
+		}
+		if c.OffCPU.MaxBlockUs > 0 && c.OffCPU.MinBlockUs >= c.OffCPU.MaxBlockUs {
+			return fmt.Errorf("offcpu.min_block_us must be < offcpu.max_block_us")
+		}
 	}
 	if c.Profile.Enabled {
 		if c.Profile.MaxDuration <= 0 || c.Profile.MaxDuration > 5*time.Minute {
