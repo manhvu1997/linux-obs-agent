@@ -15,12 +15,16 @@ import (
 // Collector orchestrates all /proc-based scrapes and emits NodeMetrics
 // on the Metrics channel at a configurable interval.
 type Collector struct {
-	cfg     *config.CollectConfig
-	cpu     *CPUCollector
-	mem     *MemCollector
-	disk    *DiskCollector
-	net     *NetCollector
-	Metrics chan model.NodeMetrics
+	cfg      *config.CollectConfig
+	cpu      *CPUCollector
+	mem      *MemCollector
+	disk     *DiskCollector
+	net      *NetCollector
+	psi      *PSICollector
+	vmstat   *VMStatCollector
+	dstate   *DStateCollector
+	blocking *BlockingHookCollector
+	Metrics  chan model.NodeMetrics
 
 	hostname string
 	mu       sync.RWMutex
@@ -35,6 +39,10 @@ func New(cfg *config.CollectConfig) *Collector {
 		mem:      NewMemCollector(),
 		disk:     NewDiskCollector(cfg.DiskDevices),
 		net:      NewNetCollector(cfg.NetInterfaces),
+		psi:      NewPSICollector(),
+		vmstat:   NewVMStatCollector(),
+		dstate:   NewDStateCollector(cfg.DStateMaxTasks, !cfg.DStateSkipThreads, cfg.DStateSampleInterval),
+		blocking: NewBlockingHookCollector(0),
 		Metrics:  make(chan model.NodeMetrics, 4),
 		hostname: hostname,
 	}
@@ -42,6 +50,13 @@ func New(cfg *config.CollectConfig) *Collector {
 
 // Run starts the polling loop.  It blocks until ctx is cancelled.
 func (c *Collector) Run(ctx context.Context) {
+	// The D-state census samples far faster than the collection interval so
+	// that short-but-frequent blocking is not missed; it accumulates and is
+	// drained once per collect().
+	if !c.cfg.DStateDisabled {
+		go c.dstate.Run(ctx)
+	}
+
 	// Warm-up: one silent collection to seed delta baselines.
 	_ = c.collect()
 
@@ -115,5 +130,32 @@ func (c *Collector) collect() model.NodeMetrics {
 		m.Network = nets
 	}
 
+	// The three below are deliberately part of the same cycle as everything
+	// above. Correlating iowait against PSI, dirty pages and the D-state
+	// census only means anything if all four describe the same instant —
+	// sampling them on separate tickers would make the comparison unsound.
+	m.Pressure = c.psi.Collect()
+	m.VMStat = c.vmstat.Collect(m.Memory.TotalBytes)
+	if !c.cfg.DStateDisabled {
+		m.DState = c.dstate.Collect()
+	}
+
+	// Userspace blocking hooks (fanotify antivirus/audit agents). The scan
+	// walks every fd of every process, so it only runs when I/O pressure is
+	// actually elevated — and its result is cached beyond that.
+	if ioPressureElevated(m) {
+		m.BlockingHooks = c.blocking.Collect()
+	}
+
 	return m
+}
+
+// ioPressureElevated reports whether it is worth paying for the expensive
+// blocking-hook scan. PSI is preferred; iowait is the fallback when the kernel
+// lacks CONFIG_PSI.
+func ioPressureElevated(m model.NodeMetrics) bool {
+	if m.Pressure.IO.Available {
+		return m.Pressure.IO.Some.Avg10 >= 10.0
+	}
+	return m.CPU.IOWaitPercent >= 20.0
 }

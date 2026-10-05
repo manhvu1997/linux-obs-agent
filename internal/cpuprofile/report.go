@@ -19,7 +19,7 @@ const (
 )
 
 // BuildReport reads the current cpu_profile eBPF maps and produces a
-// fully-aggregated, symbolized CPUProfileReport.
+// fully-aggregated, symbolized CPUProfileReport for every process.
 //
 // Pipeline:
 //  1. Read all (key, count) entries from the in-kernel counts map.
@@ -32,6 +32,23 @@ const (
 // Returns nil when the loader has no data yet or every process is below the
 // noise threshold.
 func BuildReport(l *cpu_profile.Loader) *model.CPUProfileReport {
+	return buildReport(l, 0)
+}
+
+// BuildReportForPID is BuildReport scoped to a single process.
+//
+// It powers on-demand per-process profiling: either from a dedicated
+// PID-filtered profiler, or by extracting one process out of the maps of an
+// already-running system-wide profiler (no extra sampling cost).
+//
+// Unlike BuildReport it does not apply the 1%-of-system noise floor — the
+// target is by definition the whole of its own profile.
+func BuildReportForPID(l *cpu_profile.Loader, tgid uint32) *model.CPUProfileReport {
+	return buildReport(l, tgid)
+}
+
+// buildReport is the shared implementation. filterTGID == 0 means system-wide.
+func buildReport(l *cpu_profile.Loader, filterTGID uint32) *model.CPUProfileReport {
 	counts := l.AllCounts()
 	if len(counts) == 0 {
 		return nil
@@ -51,6 +68,9 @@ func BuildReport(l *cpu_profile.Loader) *model.CPUProfileReport {
 
 	byProc := make(map[uint32]*procData)
 	for _, e := range counts {
+		if filterTGID != 0 && e.TGID != filterTGID {
+			continue
+		}
 		p := byProc[e.TGID]
 		if p == nil {
 			p = &procData{
@@ -99,9 +119,13 @@ func BuildReport(l *cpu_profile.Loader) *model.CPUProfileReport {
 
 	var outProcs []model.CPUProfileProcess
 	for _, p := range procs {
-		pctOfSystem := float64(p.total) / float64(totalSamples) * 100
-		if pctOfSystem < minProcessPctThreshold {
-			break // list is sorted; all remaining are also below threshold
+		// The noise floor only makes sense for a system-wide profile; when
+		// scoped to one PID that process IS the profile.
+		if filterTGID == 0 {
+			pctOfSystem := float64(p.total) / float64(totalSamples) * 100
+			if pctOfSystem < minProcessPctThreshold {
+				break // list is sorted; all remaining are also below threshold
+			}
 		}
 
 		// Resolve top user stacks.

@@ -12,7 +12,9 @@
 //	load/cpu > LoadNormalised       → activate runqlat
 //	ctxswitch/s > CtxSwitchDelta   → activate runqlat
 //	net errors/s > NetErrorDelta    → activate tcp_retransmit
+//	iowait > offcpu.IOWaitThreshold → activate offcpu (attributes blocked time)
 //	high load + low CPU             → suspect IO wait → activate io_latency + runqlat
+//	runq level 1 (CPU% or load)     → activate runqlat for per-process analysis
 package trigger
 
 import (
@@ -29,21 +31,33 @@ import (
 
 // Engine evaluates trigger rules and signals the eBPF manager.
 type Engine struct {
-	cfg     *config.TriggerConfig
-	coll    *collector.Collector
-	manager *ebpf.Manager
+	cfg       *config.TriggerConfig
+	runqCfg   *config.RunQueueConfig
+	offcpuCfg *config.OffCPUConfig
+	coll      *collector.Collector
+	manager   *ebpf.Manager
 
 	// firing tracks which modules are currently triggered so we can log
 	// transitions clearly.
 	firing map[ebpf.ModuleID]bool
 }
 
-func NewEngine(cfg *config.TriggerConfig, coll *collector.Collector, mgr *ebpf.Manager) *Engine {
+// NewEngine creates the trigger engine. runqCfg and offcpuCfg may be nil, in
+// which case those rules are skipped and the legacy rules alone apply.
+func NewEngine(
+	cfg *config.TriggerConfig,
+	runqCfg *config.RunQueueConfig,
+	offcpuCfg *config.OffCPUConfig,
+	coll *collector.Collector,
+	mgr *ebpf.Manager,
+) *Engine {
 	return &Engine{
-		cfg:     cfg,
-		coll:    coll,
-		manager: mgr,
-		firing:  make(map[ebpf.ModuleID]bool),
+		cfg:       cfg,
+		runqCfg:   runqCfg,
+		offcpuCfg: offcpuCfg,
+		coll:      coll,
+		manager:   mgr,
+		firing:    make(map[ebpf.ModuleID]bool),
 	}
 }
 
@@ -92,6 +106,17 @@ func (e *Engine) evalIO(ctx context.Context, m model.NodeMetrics) {
 			"threshold", e.cfg.IOWaitPercent)
 	}
 
+	// Sustained iowait → attribute the blocked time to processes and stacks.
+	// io_latency covers the block device; offcpu covers everything a task can
+	// block on, and is the only module that can explain iowait when the disk
+	// turns out to be idle.
+	if e.offcpuCfg != nil && e.offcpuCfg.Enabled &&
+		m.CPU.IOWaitPercent > e.offcpuCfg.IOWaitThreshold {
+		e.fire(ctx, ebpf.ModOffCPU,
+			"iowait", m.CPU.IOWaitPercent,
+			"threshold", e.offcpuCfg.IOWaitThreshold)
+	}
+
 	// Heuristic: high load but low CPU → IO-bound
 	numCPU := float64(runtime.NumCPU())
 	normLoad := m.LoadAvg.Load1 / numCPU
@@ -119,6 +144,31 @@ func (e *Engine) evalScheduler(ctx context.Context, m model.NodeMetrics) {
 	if normLoad > e.cfg.LoadNormalised {
 		e.fire(ctx, ebpf.ModRunQLat, "norm_load", normLoad, "threshold", e.cfg.LoadNormalised)
 	}
+
+	e.evalRunQueueLevel1(ctx, m, normLoad)
+}
+
+// evalRunQueueLevel1 is the node-wide gate of the two-level run-queue scheme.
+// Breaching it loads runqlat, which then aggregates per-process waits in-kernel;
+// the level-2 (per-process) filter is applied when the report is built.
+//
+// CPU% alone is not enough: run-queue oversubscription frequently shows up as
+// high load with moderate CPU, so either signal opens the gate.
+func (e *Engine) evalRunQueueLevel1(ctx context.Context, m model.NodeMetrics, normLoad float64) {
+	if e.runqCfg == nil || !e.runqCfg.Enabled {
+		return
+	}
+	cpuHot := e.runqCfg.NodeCPUThreshold > 0 && m.CPU.UsagePercent > e.runqCfg.NodeCPUThreshold
+	loadHot := e.runqCfg.NodeLoadThreshold > 0 && normLoad > e.runqCfg.NodeLoadThreshold
+	if !cpuHot && !loadHot {
+		return
+	}
+	e.fire(ctx, ebpf.ModRunQLat,
+		"level", 1,
+		"cpu_pct", m.CPU.UsagePercent,
+		"cpu_threshold", e.runqCfg.NodeCPUThreshold,
+		"norm_load", normLoad,
+		"load_threshold", e.runqCfg.NodeLoadThreshold)
 }
 
 func (e *Engine) evalNetwork(ctx context.Context, m model.NodeMetrics) {

@@ -17,9 +17,11 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/cpu_profile"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/disk_write"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/io_latency"
+	ebpfoffcpu "github.com/manhvu1997/linux-obs-agent/internal/ebpf/offcpu"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/runqlat"
 	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/tcp_retransmit"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/offcpu"
 )
 
 // ModuleID identifies a specific eBPF module.
@@ -31,6 +33,7 @@ const (
 	ModRunQLat       ModuleID = "runqlat"
 	ModTCPRetransmit ModuleID = "tcp_retransmit"
 	ModDiskWrite     ModuleID = "disk_write"
+	ModOffCPU        ModuleID = "offcpu"
 )
 
 // moduleState tracks the lifecycle of one eBPF module.
@@ -43,26 +46,125 @@ type moduleState struct {
 
 // Manager owns all eBPF loaders and multiplexes their event channels.
 type Manager struct {
-	cfg    *config.EBPFConfig
-	Events chan model.EBPFEvent
+	cfg        *config.EBPFConfig
+	runqCfg    *config.RunQueueConfig
+	offcpuCfg  *config.OffCPUConfig
+	profileCfg *config.ProfileConfig
+	Events     chan model.EBPFEvent
 
 	mu      sync.Mutex
 	modules map[ModuleID]*moduleState
 
 	// Concrete loaders – created on first activation.
-	cpuLoader  *cpu_profile.Loader
-	ioLoader   *io_latency.Loader
-	rqLoader   *runqlat.Loader
-	tcpLoader  *tcp_retransmit.Loader
-	diskLoader *disk_write.Loader
+	cpuLoader    *cpu_profile.Loader
+	ioLoader     *io_latency.Loader
+	rqLoader     *runqlat.Loader
+	tcpLoader    *tcp_retransmit.Loader
+	diskLoader   *disk_write.Loader
+	offcpuLoader *ebpfoffcpu.Loader
+
+	// On-demand per-process profiling state (see profiler.go).
+	prof profiler
 }
 
-func NewManager(cfg *config.EBPFConfig) *Manager {
+// NewManager creates the eBPF manager. runqCfg, offcpuCfg and profileCfg may
+// be nil, in which case run-queue reporting, off-CPU profiling and on-demand
+// profiling are unavailable but every other module behaves as before.
+func NewManager(
+	cfg *config.EBPFConfig,
+	runqCfg *config.RunQueueConfig,
+	offcpuCfg *config.OffCPUConfig,
+	profileCfg *config.ProfileConfig,
+) *Manager {
 	return &Manager{
-		cfg:     cfg,
-		Events:  make(chan model.EBPFEvent, 2048),
-		modules: make(map[ModuleID]*moduleState),
+		cfg:        cfg,
+		runqCfg:    runqCfg,
+		offcpuCfg:  offcpuCfg,
+		profileCfg: profileCfg,
+		Events:     make(chan model.EBPFEvent, 2048),
+		modules:    make(map[ModuleID]*moduleState),
 	}
+}
+
+// runqThresholds returns the effective (event threshold, aggregation floor) in
+// microseconds for the runqlat module.
+func (m *Manager) runqThresholds() (thresholdUs, trackMinUs uint64) {
+	thresholdUs = m.cfg.RunQLatThresholdUs
+	if m.runqCfg != nil {
+		if m.runqCfg.ProcessThresholdUs > 0 {
+			thresholdUs = m.runqCfg.ProcessThresholdUs
+		}
+		trackMinUs = m.runqCfg.TrackMinUs
+	}
+	// The aggregation floor must never sit above the event threshold, or
+	// breaches between the two would be dropped before they are counted.
+	if thresholdUs > 0 && trackMinUs > thresholdUs {
+		slog.Warn("ebpf: runq.track_min_us above process threshold, clamping",
+			"track_min_us", trackMinUs, "process_threshold_us", thresholdUs)
+		trackMinUs = thresholdUs
+	}
+	return thresholdUs, trackMinUs
+}
+
+// offcpuLoaderConfig builds the off-CPU loader config from cfg, optionally
+// scoped to one process (targetTGID != 0 for on-demand profiling).
+func (m *Manager) offcpuLoaderConfig(targetTGID uint32) ebpfoffcpu.Config {
+	c := ebpfoffcpu.Config{TargetTGID: targetTGID}
+	if m.offcpuCfg == nil {
+		return c
+	}
+	c.MinBlockUs = m.offcpuCfg.MinBlockUs
+	c.MaxBlockUs = m.offcpuCfg.MaxBlockUs
+	c.MaxEntries = m.offcpuCfg.MaxMapEntries
+	c.TrackState = ebpfoffcpu.TrackUninterruptible
+	if m.offcpuCfg.TrackInterruptible {
+		c.TrackState |= ebpfoffcpu.TrackInterruptible
+	}
+	return c
+}
+
+// offcpuReportOptions builds the report options, echoing the active filters.
+func (m *Manager) offcpuReportOptions() offcpu.Options {
+	o := offcpu.Options{TrackedStates: "uninterruptible"}
+	if m.offcpuCfg == nil {
+		return o
+	}
+	o.TopN = m.offcpuCfg.TopN
+	o.MaxStacksPerProc = m.offcpuCfg.MaxStacksPerProc
+	o.MinBlockUs = m.offcpuCfg.MinBlockUs
+	if m.offcpuCfg.TrackInterruptible {
+		o.TrackedStates = "uninterruptible,interruptible"
+	}
+	return o
+}
+
+// BuildOffCPUReport builds the blocked-time report from the active offcpu
+// loader. Returns nil when the module is not active or nothing has blocked.
+//
+// Called on-demand from GET /api/diagnose; there is no background polling.
+func (m *Manager) BuildOffCPUReport() *model.OffCPUReport {
+	m.mu.Lock()
+	l := m.offcpuLoader
+	m.mu.Unlock()
+	if l == nil {
+		return nil
+	}
+	return offcpu.BuildReport(l, m.offcpuReportOptions())
+}
+
+// IOLatencyHistogram returns the in-kernel block-IO latency distribution as
+// log2(microsecond) buckets, or nil when io_latency is not active.
+//
+// The histogram is computed on every completed request regardless — this is
+// the biolatency equivalent, and until now nothing read it.
+func (m *Manager) IOLatencyHistogram() map[uint32]uint64 {
+	m.mu.Lock()
+	l := m.ioLoader
+	m.mu.Unlock()
+	if l == nil {
+		return nil
+	}
+	return l.LatencyHistogram()
 }
 
 // Activate starts the given module (if not already active and not in cool-down).
@@ -86,14 +188,24 @@ func (m *Manager) Activate(ctx context.Context, id ModuleID) error {
 		return nil
 	}
 
-	// Respect cool-down.
-	if !state.lastStop.IsZero() && time.Since(state.lastStop) < m.cfg.CoolDown {
+	// Modules flagged always-on are exempt from the auto-stop timer entirely
+	// (see below); the cool-down check still applies to everything else.
+	if !m.alwaysOn(id) && !state.lastStop.IsZero() && time.Since(state.lastStop) < m.cfg.CoolDown {
 		remaining := m.cfg.CoolDown - time.Since(state.lastStop)
 		slog.Debug("ebpf: in cool-down", "module", id, "remaining", remaining.Round(time.Second))
 		return nil
 	}
 
-	modCtx, cancel := context.WithTimeout(ctx, m.cfg.ActiveDuration)
+	// An always-on module gets a plain cancellable context so it survives
+	// until shutdown; everything else expires after ActiveDuration.
+	var modCtx context.Context
+	var cancel context.CancelFunc
+	alwaysOn := m.alwaysOn(id)
+	if alwaysOn {
+		modCtx, cancel = context.WithCancel(ctx)
+	} else {
+		modCtx, cancel = context.WithTimeout(ctx, m.cfg.ActiveDuration)
+	}
 
 	if err := m.startModule(modCtx, id); err != nil {
 		cancel()
@@ -104,15 +216,24 @@ func (m *Manager) Activate(ctx context.Context, id ModuleID) error {
 	state.stopFn = cancel
 	state.activeSince = time.Now()
 
-	slog.Info("ebpf: activated", "module", id, "duration", m.cfg.ActiveDuration)
-
-	// Auto-stop after ActiveDuration.
-	go func() {
-		<-modCtx.Done()
-		m.deactivate(id)
-	}()
+	if alwaysOn {
+		slog.Info("ebpf: activated", "module", id, "duration", "always-on")
+	} else {
+		slog.Info("ebpf: activated", "module", id, "duration", m.cfg.ActiveDuration)
+		// Auto-stop after ActiveDuration.
+		go func() {
+			<-modCtx.Done()
+			m.deactivate(id)
+		}()
+	}
 
 	return nil
+}
+
+// alwaysOn reports whether a module should stay loaded rather than cycling
+// through ActiveDuration / CoolDown.
+func (m *Manager) alwaysOn(id ModuleID) bool {
+	return id == ModOffCPU && m.offcpuCfg != nil && m.offcpuCfg.AlwaysOn
 }
 
 // Deactivate explicitly stops a module before its timeout.
@@ -175,7 +296,7 @@ func (m *Manager) startModule(ctx context.Context, id ModuleID) error {
 		go m.fanIn(ctx, l.Events)
 
 	case ModRunQLat:
-		l := runqlat.NewLoader(m.cfg.RunQLatThresholdUs)
+		l := runqlat.NewLoader(m.runqThresholds())
 		if err := l.Start(ctx); err != nil {
 			return err
 		}
@@ -197,6 +318,14 @@ func (m *Manager) startModule(ctx context.Context, id ModuleID) error {
 		}
 		m.diskLoader = l
 		go m.fanIn(ctx, l.Events)
+
+	case ModOffCPU:
+		l := ebpfoffcpu.New(m.offcpuLoaderConfig(0))
+		if err := l.Start(ctx); err != nil {
+			return err
+		}
+		m.offcpuLoader = l
+		// No fan-in: offcpu aggregates entirely in-kernel and emits no events.
 
 	default:
 		return fmt.Errorf("unknown module: %s", id)
@@ -230,6 +359,11 @@ func (m *Manager) stopModule(id ModuleID) {
 		if m.diskLoader != nil {
 			m.diskLoader.Stop()
 			m.diskLoader = nil
+		}
+	case ModOffCPU:
+		if m.offcpuLoader != nil {
+			m.offcpuLoader.Stop()
+			m.offcpuLoader = nil
 		}
 	}
 }

@@ -91,10 +91,10 @@ func main() {
 	go insp.Run(ctx)
 
 	// ── eBPF manager (lazy – nothing loaded until triggered) ────────────────
-	ebpfMgr := ebpfmgr.NewManager(&cfg.EBPF)
+	ebpfMgr := ebpfmgr.NewManager(&cfg.EBPF, &cfg.RunQueue, &cfg.OffCPU, &cfg.Profile)
 
 	// ── Trigger engine ──────────────────────────────────────────────────────
-	triggerEngine := trigger.NewEngine(&cfg.Trigger, coll, ebpfMgr)
+	triggerEngine := trigger.NewEngine(&cfg.Trigger, &cfg.RunQueue, &cfg.OffCPU, coll, ebpfMgr)
 	go triggerEngine.Run(ctx)
 
 	// ── Disk scanner ────────────────────────────────────────────────────────
@@ -174,6 +174,8 @@ func main() {
 	// Wire diagnostic sources so /api/diagnose has full visibility.
 	if promExp != nil {
 		promExp.RegisterDiagnosticSources(ebpfMgr, insp, httpExp)
+		promExp.RegisterRunQueueSources(&cfg.RunQueue, &cfg.OffCPU, &cfg.Profile)
+		promExp.RegisterIODiagConfig(&cfg.IODiag)
 		promExp.RegisterDiskScanner(diskScanner)
 		promExp.RegisterFsyncAnalyzer(fsyncAnalyzer)
 		promExp.RegisterWritebackAnalyzer(writebackAnalyzer)

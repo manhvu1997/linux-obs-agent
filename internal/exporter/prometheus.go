@@ -8,6 +8,8 @@ package exporter
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,13 +21,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
+	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
+	"github.com/manhvu1997/linux-obs-agent/internal/iodiag"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mongo"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
+	"github.com/manhvu1997/linux-obs-agent/internal/runq"
 	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
 )
 
@@ -44,6 +49,12 @@ type PrometheusExporter struct {
 	writebackAnalyzer *writeback.Analyzer
 	mongoAnalyzer     *mongo.Analyzer
 	mysqlAnalyzer     *mysql.Analyzer
+
+	// Run-queue / on-demand profiling config – set via RegisterRunQueueSources.
+	runqCfg    *config.RunQueueConfig
+	offcpuCfg  *config.OffCPUConfig
+	profileCfg *config.ProfileConfig
+	iodiagCfg  *config.IODiagConfig
 
 	// CPU
 	cpuUsage     prometheus.Gauge
@@ -139,6 +150,24 @@ func (p *PrometheusExporter) RegisterDiagnosticSources(
 	p.httpExp = exp
 }
 
+// RegisterRunQueueSources wires the run-queue and on-demand profiling config
+// so /api/diagnose includes `runqueue_report` and /api/profile is served.
+func (p *PrometheusExporter) RegisterRunQueueSources(
+	runqCfg *config.RunQueueConfig,
+	offcpuCfg *config.OffCPUConfig,
+	profileCfg *config.ProfileConfig,
+) {
+	p.runqCfg = runqCfg
+	p.offcpuCfg = offcpuCfg
+	p.profileCfg = profileCfg
+}
+
+// RegisterIODiagConfig wires the correlation-classifier thresholds.
+// Without it the shipped defaults apply.
+func (p *PrometheusExporter) RegisterIODiagConfig(c *config.IODiagConfig) {
+	p.iodiagCfg = c
+}
+
 // RegisterDiskScanner wires the disk scanner so /api/diagnose includes
 // directory-growth data and top disk writers.
 func (p *PrometheusExporter) RegisterDiskScanner(s *diskscanner.Scanner) {
@@ -190,6 +219,8 @@ func (p *PrometheusExporter) Run(ctx context.Context) error {
 	})
 	// MCP / alerting diagnostic endpoint.
 	http.HandleFunc("/api/diagnose", p.handleDiagnose)
+	// On-demand per-process CPU profile (linked from each run-queue offender).
+	http.HandleFunc("/api/profile", p.handleProfile)
 
 	srv := &http.Server{Addr: p.addr}
 	go func() {
@@ -240,7 +271,35 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 		// CPU profile v2: fully aggregated, symbolized, LLM-ready.
 		// Nil when cpu_profile module is not active.
 		report.CPUProfileReport = p.mgr.BuildCPUProfileReport()
+		// Block-IO latency distribution (biolatency). Already computed
+		// in-kernel on every completed request; nil when io_latency is off.
+		report.IOLatencyHistogram = buildIOLatencyHistogram(p.mgr.IOLatencyHistogram())
+		// Off-CPU report: where processes are BLOCKED. Nil unless the offcpu
+		// module is active (triggered by sustained iowait). This is the field
+		// that explains iowait — CPUHotspots/CPUProfileReport cannot, since
+		// they only sample running tasks.
+		if p.offcpuCfg != nil && p.offcpuCfg.Enabled {
+			report.OffCPUReport = p.mgr.BuildOffCPUReport()
+		}
+		// Run-queue level-2 report. Nil when the node never breached level 1
+		// (runqlat not loaded) or no process breached level 2.
+		if p.runqCfg != nil && p.runqCfg.Enabled {
+			report.RunQueueReport = p.mgr.BuildRunQueueReport(report.Metrics, runq.Options{
+				TopN:               p.runqCfg.TopN,
+				StaleSeconds:       p.runqCfg.StaleSeconds,
+				ProcessThresholdUs: p.runqCfg.ProcessThresholdUs,
+				TrackMinUs:         p.runqCfg.TrackMinUs,
+				NodeCPUThreshold:   p.runqCfg.NodeCPUThreshold,
+				NodeLoadThreshold:  p.runqCfg.NodeLoadThreshold,
+			})
+		}
 	}
+
+	// Correlated I/O diagnosis: walks node → device → blocked tasks → process
+	// → stack and emits a verdict. Built last so it can consume the off-CPU
+	// report assembled above, and from the same NodeMetrics snapshot so every
+	// signal it compares describes the same instant.
+	report.IODiagnosis = iodiag.Classify(report.Metrics, report.OffCPUReport, p.iodiagThresholds())
 
 	// Top processes from /proc.
 	if p.insp != nil {
@@ -294,6 +353,185 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(report); err != nil {
 		slog.Warn("diagnose: encode error", "err", err)
+	}
+}
+
+// handleProfile is called by GET /api/profile.
+//
+// It is the click-through target of the ProfileURL carried by every run-queue
+// offender in /api/diagnose: given a PID it samples that process's on-CPU
+// stacks and returns a symbolized, flamegraph-ready profile.
+//
+// Query parameters:
+//
+//	pid      – required, the process to profile
+//	duration – sampling window (default profile.default_duration, capped at
+//	           profile.max_duration).  Ignored on a cache hit.
+//	format   – "json" (default) or "folded" for flamegraph.pl / speedscope
+//	mode     – "oncpu" (default) = where the process is RUNNING;
+//	           "offcpu"          = where it is BLOCKED and for how long.
+//	           Use offcpu when the symptom is iowait or D-state: an on-CPU
+//	           sampler only fires on running tasks and cannot see a sleeper.
+//
+// The request blocks for the sampling window. Profiling is single-flight
+// agent-wide; a concurrent request gets 429 rather than doubling the load on
+// an already-stressed node.
+func (p *PrometheusExporter) handleProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if p.mgr == nil || p.profileCfg == nil || !p.profileCfg.Enabled {
+		http.Error(w, "on-demand profiling is disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	pid, err := strconv.ParseUint(r.URL.Query().Get("pid"), 10, 32)
+	if err != nil || pid == 0 {
+		http.Error(w, "missing or invalid 'pid' parameter", http.StatusBadRequest)
+		return
+	}
+
+	duration := p.profileCfg.DefaultDuration
+	if s := r.URL.Query().Get("duration"); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			http.Error(w, "invalid 'duration' (expected e.g. 5s, 10s)", http.StatusBadRequest)
+			return
+		}
+		if d > p.profileCfg.MaxDuration {
+			http.Error(w, fmt.Sprintf("duration exceeds profile.max_duration (%s)",
+				p.profileCfg.MaxDuration), http.StatusBadRequest)
+			return
+		}
+		duration = d
+	}
+
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "json"
+	}
+	if format != "json" && format != "folded" {
+		http.Error(w, "invalid 'format' (expected json or folded)", http.StatusBadRequest)
+		return
+	}
+
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = ebpfmgr.ModeOnCPU
+	}
+	if mode != ebpfmgr.ModeOnCPU && mode != ebpfmgr.ModeOffCPU {
+		http.Error(w, "invalid 'mode' (expected oncpu or offcpu)", http.StatusBadRequest)
+		return
+	}
+	if mode == ebpfmgr.ModeOffCPU && (p.offcpuCfg == nil || !p.offcpuCfg.Enabled) {
+		http.Error(w, "off-CPU profiling is disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	res, err := p.mgr.ProfilePID(r.Context(), ebpfmgr.ProfileRequest{
+		PID:      uint32(pid),
+		Duration: duration,
+		Folded:   format == "folded",
+		Mode:     mode,
+	})
+	switch {
+	case errors.Is(err, ebpfmgr.ErrNoSuchProcess):
+		http.Error(w, fmt.Sprintf("no such process: %d", pid), http.StatusNotFound)
+		return
+	case errors.Is(err, ebpfmgr.ErrProfileBusy):
+		w.Header().Set("Retry-After", strconv.Itoa(int(duration.Seconds())+1))
+		http.Error(w, "a profile is already running; retry shortly", http.StatusTooManyRequests)
+		return
+	case errors.Is(err, ebpfmgr.ErrProfileDisabled):
+		http.Error(w, "on-demand profiling is disabled", http.StatusServiceUnavailable)
+		return
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Client disconnected mid-window; nothing useful to send.
+		return
+	case err != nil:
+		slog.Warn("profile: failed", "pid", pid, "err", err)
+		http.Error(w, "profiling failed", http.StatusInternalServerError)
+		return
+	}
+
+	if format == "folded" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if _, err := w.Write(res.Folded); err != nil {
+			slog.Debug("profile: folded write error", "pid", pid, "err", err)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(model.ProfileResponse{
+		Type:         "pid_cpu_profile",
+		Timestamp:    time.Now(),
+		Mode:         res.Mode,
+		PID:          res.PID,
+		Comm:         res.Comm,
+		DurationMs:   res.Duration.Milliseconds(),
+		SampleHz:     res.SampleHz,
+		Cached:       res.Cached,
+		Reused:       res.Reused,
+		Report:       res.Report,
+		OffCPUReport: res.OffCPUReport,
+	}); err != nil {
+		slog.Warn("profile: encode error", "err", err)
+	}
+}
+
+// iodiagThresholds returns the classifier thresholds, falling back to the
+// shipped defaults when no io_diag config was registered.
+func (p *PrometheusExporter) iodiagThresholds() iodiag.Thresholds {
+	if p.iodiagCfg == nil {
+		return iodiag.Defaults()
+	}
+	return iodiag.Thresholds{
+		IOWaitPercent:         p.iodiagCfg.IOWaitPercent,
+		LowThroughputMBPerSec: p.iodiagCfg.LowThroughputMBPerSec,
+		LowUtilPercent:        p.iodiagCfg.LowUtilPercent,
+		HighUtilPercent:       p.iodiagCfg.HighUtilPercent,
+		DStateStallMs:         p.iodiagCfg.DStateStallMs,
+		SlowDeviceWaitMs:      p.iodiagCfg.SlowDeviceWaitMs,
+		DirtyRatioPercent:     p.iodiagCfg.DirtyRatioPercent,
+		PSIFullAvg10:          p.iodiagCfg.PSIFullAvg10,
+	}
+}
+
+// buildIOLatencyHistogram converts the raw log2(us) buckets into labelled,
+// non-empty entries. Bucket i covers [2^i - 1, 2^(i+1) - 2] microseconds.
+func buildIOLatencyHistogram(raw map[uint32]uint64) []model.IOLatencyBucket {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]model.IOLatencyBucket, 0, len(raw))
+	for i := uint32(0); i < 64; i++ {
+		count := raw[i]
+		if count == 0 {
+			continue
+		}
+		low := uint64(1)<<i - 1
+		high := uint64(1)<<(i+1) - 2
+		out = append(out, model.IOLatencyBucket{
+			Range:  fmt.Sprintf("%s-%s", formatUsec(low), formatUsec(high)),
+			LowUs:  low,
+			HighUs: high,
+			Count:  count,
+		})
+	}
+	return out
+}
+
+// formatUsec renders a microsecond value with the largest sensible unit.
+func formatUsec(us uint64) string {
+	switch {
+	case us >= 1_000_000:
+		return fmt.Sprintf("%gs", float64(us)/1e6)
+	case us >= 1_000:
+		return fmt.Sprintf("%gms", float64(us)/1e3)
+	default:
+		return fmt.Sprintf("%dus", us)
 	}
 }
 
