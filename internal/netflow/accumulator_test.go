@@ -200,3 +200,38 @@ func TestActiveClampDoesNotHideLaterOpens(t *testing.T) {
 		t.Fatalf("active = %d, want 3", got)
 	}
 }
+
+func TestIdleConnectionStaysActive(t *testing.T) {
+	a := NewAccumulator(cfg())
+	key := k(10, Inbound, "10.0.3.15", 3306)
+	fam := map[uint32]string{10: "mysql.service"}
+	a.Ingest(t0, map[FlowKey]FlowValue{key: {Opened: 3}}, fam)
+	a.Ingest(t0.Add(15*time.Minute), map[FlowKey]FlowValue{key: {Opened: 3}}, fam)
+	if got := a.Process(10).Inbound.ConnsActive; got != 3 {
+		t.Fatalf("idle pooled connections dropped: active = %d, want 3", got)
+	}
+}
+
+func TestGoneProcessActiveIsPruned(t *testing.T) {
+	a := NewAccumulator(cfg())
+	key := k(10, Inbound, "10.0.3.15", 3306)
+	a.Ingest(t0, map[FlowKey]FlowValue{key: {Opened: 3}}, map[uint32]string{10: "mysql.service"})
+	a.Ingest(t0.Add(15*time.Minute), map[FlowKey]FlowValue{}, map[uint32]string{})
+	if got := a.Process(10).Inbound.ConnsActive; got != 0 {
+		t.Fatalf("gone process still active = %d, want 0", got)
+	}
+	if len(a.active) != 0 {
+		t.Fatalf("active map not pruned: %v", a.active)
+	}
+}
+
+func TestAliveProcessAbsentFromMapKeepsActive(t *testing.T) {
+	a := NewAccumulator(cfg())
+	key := k(10, Inbound, "10.0.3.15", 3306)
+	fam := map[uint32]string{10: "mysql.service"}
+	a.Ingest(t0, map[FlowKey]FlowValue{key: {Opened: 3}}, fam)
+	a.Ingest(t0.Add(15*time.Minute), map[FlowKey]FlowValue{}, fam)
+	if got := a.Process(10).Inbound.ConnsActive; got != 3 {
+		t.Fatalf("alive process active = %d, want 3", got)
+	}
+}

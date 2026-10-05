@@ -21,8 +21,12 @@ type Config struct {
 	MaxFamilies        int           // 50
 	MaxOutboundPeers   int           // 100
 	MaxPeersPerProcess int           // 20
-	LabelIdleTTL       time.Duration // 1h
-	PIDIdleTTL         time.Duration // 10m
+	// LabelIdleTTL: counters for a label idle longer than this are dropped to
+	// bound memory (churning unit names would otherwise grow the maps without
+	// limit). If the label returns it restarts from 0, a normal Prometheus
+	// counter reset that rate() tolerates.
+	LabelIdleTTL time.Duration // 1h
+	PIDIdleTTL   time.Duration // 10m
 }
 
 func (c Config) withDefaults() Config {
@@ -238,13 +242,40 @@ func (a *Accumulator) Ingest(now time.Time, cur map[FlowKey]FlowValue, pidFamily
 		}
 	}
 
-	for tgid, seen := range a.pidSeen {
+	// A tgid is gone only when absent from both the kernel map and the live
+	// process list for > PIDIdleTTL; idle pooled connections stay active.
+	for k := range cur {
+		a.pidSeen[k.TGID] = now
+	}
+	tracked := make(map[uint32]struct{}, len(a.pidSeen))
+	for tgid := range a.pidSeen {
+		tracked[tgid] = struct{}{}
+	}
+	for k := range a.active {
+		tracked[k.TGID] = struct{}{}
+	}
+	for tgid := range pidFamily {
+		if _, ok := tracked[tgid]; ok {
+			a.pidSeen[tgid] = now
+		}
+	}
+	expired := make(map[uint32]struct{})
+	for tgid := range tracked {
+		seen, ok := a.pidSeen[tgid]
+		if !ok {
+			// active entries without a pidSeen record: start the idle clock now
+			a.pidSeen[tgid] = now
+			continue
+		}
 		if now.Sub(seen) > a.cfg.PIDIdleTTL {
 			delete(a.pidSeen, tgid)
-			for k := range a.active {
-				if k.TGID == tgid {
-					delete(a.active, k)
-				}
+			expired[tgid] = struct{}{}
+		}
+	}
+	if len(expired) > 0 {
+		for k := range a.active {
+			if _, ok := expired[k.TGID]; ok {
+				delete(a.active, k)
 			}
 		}
 	}
