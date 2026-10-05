@@ -77,7 +77,7 @@ CPU identifies victims. Bytes-out remains as a secondary ranking.
                                                                       │
   uprobe/uretprobe mysqld!dispatch_command ─► mysql_query.bpf.c      │
      + task se.sum_exec_runtime, sched_info.run_delay                │
-     + kretprobe sock_sendmsg bytes while tid is mid-command         │
+     + kretprobe tcp_sendmsg/unix_stream_sendmsg bytes while tid is mid-command         │
      ─► RINGBUF: one event per command                               │
                        └─────────────────────────────────────────────┘
  userspace
@@ -100,7 +100,16 @@ CPU identifies victims. Bytes-out remains as a secondary ranking.
 | `internal/process/` (extended) | Family key from cgroup; top-N processes and families by CPU and memory | existing scan |
 | `internal/netinv/` (new) | On-demand inventory: listening sockets, live connections, socket-inode → PID | /proc |
 | `internal/netflow/` (new) | Polls `flow_stats`, maintains monotonic counters across LRU eviction, joins to PIDs/families, pushes `listen_ports` | ebpf/netflow, netinv (listen parse), process |
-| `internal/exporter/` (extended) | New diagnose fields and Prometheus metrics | all above |
+| `internal/querystats/` (new) | Generic, DB-agnostic rolling per-digest aggregation, roles, sticky export set | sqldigest |
+| `internal/procreport/` (new) | Pure builder for `process_report` from inspector, netflow and netinv inputs | interfaces only |
+| `internal/promcollect/` (new) | Prometheus `Collector`s for family and MySQL metrics | netflow, querystats |
+| `internal/exporter/` (extended) | Wires the above into `/api/diagnose` and `/metrics` | all above |
+
+**Testability rule:** packages that import a bpf2go loader only compile on a
+Linux build host after `make generate`. All logic therefore lives in pure
+packages (`sqldigest`, `querystats`, `netinv`, `netflow`, `procreport`,
+`promcollect`, `process`) that depend on interfaces; eBPF packages are thin
+loaders.
 
 **Independence:** `mysql_query` does its own byte counting and does not share maps with
 `netflow`; either can be disabled alone. `netinv` runs only when `/api/diagnose`
@@ -161,10 +170,14 @@ pending[tid] = {
 };
 ```
 
-**`kretprobe/sock_sendmsg`** (single hook, no entry probe — the lookup is by
-tid, so no arguments are needed) — if `pending[tid]` exists, add a positive
-return value to `bytes_out`. Socket-layer hook ⇒ covers TCP, unix socket and
-TLS (bytes on the wire, post-encryption).
+**`kretprobe/tcp_sendmsg` + `kretprobe/unix_stream_sendmsg`** — if `pending[tid]`
+exists, add a positive (int) return value to `bytes_out`. Covers TCP, unix-socket
+and userspace-TLS clients (bytes on the wire, post-encryption).
+`sock_sendmsg` was rejected: since kernel 6.6 `send()`/`write()` reach the
+protocol through the static, inlinable `__sock_sendmsg`, so a `sock_sendmsg`
+probe silently misses traffic. The protocol `sendmsg` functions are called via
+`proto_ops` function pointers and can never be inlined. The pending entry is
+built in a per-CPU scratch map because it exceeds the 512-byte BPF stack.
 
 **uretprobe `dispatch_command`** — compute `wall_ns`, `cpu_ns`, `runq_ns`;
 reserve a ringbuf record directly (no stack copy of the query) and submit
@@ -424,7 +437,7 @@ Thresholds are starting points to tune against baselines. Full expressions:
 | `netflow` attach fails | Warn, continue; `network` omitted; `network_source: "unavailable: <reason>"`. Process/family top-N unaffected. |
 | `inet_csk_accept` kretprobe unavailable | Lazy adoption only; `inbound_accounting: "lazy"` in `process_report`. |
 | `run_delay` always 0 | `cpu_accounting: "run_delay_unavailable"`; victim rule uses `wall − cpu`; `MySQLQueriesStarvedForCPU` stays silent (no data). |
-| `mysqld` restart | Verify existing re-attach behaviour during planning; if absent, record as a separate issue (out of scope). |
+| `mysqld` restart | Uprobes are attached to the binary inode, so a restarted mysqld is traced automatically. A package upgrade that replaces the binary (new inode) requires an agent restart — documented, out of scope. |
 | Ringbuf full | `dropped_events` increments; digests undercount; kernel per-PID totals remain exact. |
 | `/proc/<pid>` vanished / EACCES during inventory | Skip; `connections_error` set. |
 | SQL normaliser edge case | Never fails; `normalized: false` with collapsed raw text. |
