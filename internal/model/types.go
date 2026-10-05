@@ -1058,3 +1058,29 @@ type FamilyStats struct {
 	MemPercent   float64        `json:"mem_percent"`
 	TopMembers   []FamilyMember `json:"top_members"`
 }
+
+// ─── Connection inventory ─────────────────────────────────────────────────────
+
+// ListenPort is one listening socket owned by a process.
+type ListenPort struct {
+	Proto string `json:"proto"` // "tcp" | "tcp6"
+	Addr  string `json:"addr"`
+	Port  uint16 `json:"port"`
+}
+
+// Connection is one live TCP connection, always rendered client → server:
+// inbound = remote client → us, outbound = us → remote server.
+type Connection struct {
+	Direction string `json:"direction"` // "inbound" | "outbound"
+	State     string `json:"state"`
+	Src       string `json:"src"`
+	Dst       string `json:"dst"`
+}
+
+// ProcessConnections is the /proc-derived socket inventory of one process.
+type ProcessConnections struct {
+	ListeningPorts []ListenPort `json:"listening_ports"`
+	Connections    []Connection `json:"connections"`
+	Truncated      int          `json:"connections_truncated"`
+	Error          string       `json:"connections_error,omitempty"`
+}
