@@ -462,6 +462,10 @@ type DiagnoseReport struct {
 	// and container/K8s metadata when available.
 	TopProcesses []ProcessStats `json:"top_processes"`
 
+	// ProcessReport lists the top processes and process families by CPU and
+	// memory with their network activity and live connections.
+	ProcessReport *ProcessReport `json:"process_report,omitempty"`
+
 	// CPUHotspots are the hottest PIDs sampled by the cpu_profile eBPF module
 	// (only populated when cpu_profile is active).  Sorted by SampleCount desc.
 	CPUHotspots []CPUProfileEvent `json:"cpu_hotspots,omitempty"`
@@ -1115,4 +1119,48 @@ type NetworkSummary struct {
 	Inbound  DirectionStats `json:"inbound"`
 	Outbound DirectionStats `json:"outbound"`
 	TopPeers []PeerStats    `json:"top_peers"`
+}
+
+// ─── Process report ───────────────────────────────────────────────────────────
+
+// ProcessEntry is one process in process_report.
+type ProcessEntry struct {
+	PID                  uint32          `json:"pid"`
+	PPID                 uint32          `json:"ppid"`
+	Comm                 string          `json:"comm"`
+	Cmdline              string          `json:"cmdline"`
+	Family               string          `json:"family"`
+	CPUPercent           float64         `json:"cpu_percent"`
+	MemRSSBytes          uint64          `json:"mem_rss_bytes"`
+	MemPercent           float64         `json:"mem_percent"`
+	Threads              uint32          `json:"threads"`
+	OpenFiles            int             `json:"open_files"`
+	ListeningPorts       []ListenPort    `json:"listening_ports"`
+	Network              *NetworkSummary `json:"network,omitempty"`
+	Connections          []Connection    `json:"connections"`
+	ConnectionsTruncated int             `json:"connections_truncated"`
+	ConnectionsError     string          `json:"connections_error,omitempty"`
+	ProfileURL           string          `json:"profile_url"`
+}
+
+// FamilyEntry is one process family in process_report. No connection list:
+// drill into TopMembers[].PID instead.
+type FamilyEntry struct {
+	FamilyStats
+	ListeningPorts []ListenPort    `json:"listening_ports"`
+	Network        *NetworkSummary `json:"network,omitempty"`
+}
+
+// ProcessReport answers "which process / service is heavy, and who is it
+// talking to?" for GET /api/diagnose.
+type ProcessReport struct {
+	Type              string         `json:"type"` // always "process_analysis"
+	Timestamp         time.Time      `json:"timestamp"`
+	WindowSeconds     int            `json:"window_seconds"`
+	NetworkSource     string         `json:"network_source"`
+	InboundAccounting string         `json:"inbound_accounting,omitempty"`
+	TopCPU            []ProcessEntry `json:"top_cpu"`
+	TopMem            []ProcessEntry `json:"top_mem"`
+	TopFamiliesCPU    []FamilyEntry  `json:"top_families_cpu"`
+	TopFamiliesMem    []FamilyEntry  `json:"top_families_mem"`
 }
