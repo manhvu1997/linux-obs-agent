@@ -224,7 +224,7 @@ func (l *Loader) Start(ctx context.Context) error {
 		{"tcp_sendmsg", l.objs.KretprobeTcpSendmsg},
 		{"unix_stream_sendmsg", l.objs.KretprobeUnixStreamSendmsg},
 	} {
-		krp, err := link.Kretprobe(fn.sym, fn.prog, nil)
+		krp, err := attachKretprobeMaxActive(fn.sym, fn.prog)
 		if err != nil {
 			slog.Warn("mysql_query: bytes_out hook unavailable", "symbol", fn.sym, "err", err)
 			continue
@@ -263,6 +263,26 @@ func (l *Loader) cleanup() {
 		l.cmdRd = nil
 	}
 	l.objs.Close()
+}
+
+// kretprobeMaxActive raises the number of concurrent kretprobe instances.
+// The kernel default is max(10, 2*NCPU); tcp_sendmsg sleeps in
+// sk_stream_wait_memory for slow clients (the large-result case), so sleeping
+// senders exhaust the default and returns are silently dropped (nmissed).
+const kretprobeMaxActive = 2048
+
+// attachKretprobeMaxActive attaches a kretprobe with RetprobeMaxActive set.
+// cilium/ebpf v0.21 cannot pass maxactive through the perf_kprobe PMU and
+// falls back to tracefs; when that fails (no tracefs mounted, old kernel),
+// retry with default options so the hook still attaches.
+func attachKretprobeMaxActive(sym string, prog *ebpf.Program) (link.Link, error) {
+	krp, err := link.Kretprobe(sym, prog, &link.KprobeOptions{RetprobeMaxActive: kretprobeMaxActive})
+	if err == nil {
+		return krp, nil
+	}
+	slog.Debug("mysql_query: kretprobe with maxactive failed, retrying with defaults",
+		"symbol", sym, "maxactive", kretprobeMaxActive, "err", err)
+	return link.Kretprobe(sym, prog, nil)
 }
 
 // ─── Map polling ──────────────────────────────────────────────────────────────

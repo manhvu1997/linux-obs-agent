@@ -32,7 +32,9 @@
 // COM_DATA union for COM_QUERY (command == 3):
 //   struct COM_QUERY_DATA {
 //     const char *query_str;  // com_data[0..7]  – pointer to SQL text
-//     size_t      length;     // com_data[8..15] – byte length of SQL text
+//     unsigned int length;    // com_data[8..11] – byte length of SQL text
+//                             // (4 bytes; 4 bytes of padding follow, may be
+//                             // stack garbage – never read them)
 //     ...
 //   };
 //   Since COM_QUERY_DATA is at the start of the COM_DATA union, offset 0 always
@@ -84,7 +86,7 @@ struct mysql_pending_t {
     __u64 start_ts;
     __u64 cpu_start;   /* task->se.sum_exec_runtime at entry  */
     __u64 rq_start;    /* task->sched_info.run_delay at entry */
-    __u64 bytes_in;    /* COM_QUERY length                    */
+    __u64 bytes_in;    /* COM_QUERY length (u32 in mysqld)    */
     __u64 bytes_out;   /* tcp/unix sendmsg bytes during call   */
     __u32 command;
     __u32 query_len;
@@ -231,16 +233,18 @@ int uprobe_dispatch_command(struct pt_regs *ctx)
     p->query[0]  = 0;
     bpf_get_current_comm(&p->comm, sizeof(p->comm));
 
-    /* COM_DATA for COM_QUERY: offset 0 = const char *query, offset 8 = size_t length. */
+    /* COM_DATA for COM_QUERY (MySQL 5.7 st_com_query_data / 8.0 COM_QUERY_DATA):
+     * offset 0 = const char *query, offset 8 = unsigned int length (4 bytes;
+     * 4 bytes of padding follow and may be stack garbage, so read only 4). */
     void *com_data = (void *)regs->rsi;
     if (command == COM_QUERY && com_data) {
         const char *query_str = NULL;
-        __u64 len = 0;
+        __u32 len = 0;
         if (bpf_probe_read_user(&query_str, sizeof(query_str), com_data) == 0 && query_str)
             bpf_probe_read_user_str(p->query, sizeof(p->query), query_str);
         if (bpf_probe_read_user(&len, sizeof(len), (char *)com_data + 8) == 0) {
             p->bytes_in  = len;
-            p->query_len = len > 0xffffffffULL ? 0xffffffff : (__u32)len;
+            p->query_len = len;
         }
     }
     /* Copies the scratch value (map-value pointer) into the per-TID entry. */
