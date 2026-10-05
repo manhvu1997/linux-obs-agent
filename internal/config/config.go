@@ -53,12 +53,22 @@ type CollectConfig struct {
 	// iowait and the specific tasks producing it.
 	DStateDisabled bool `yaml:"d_state_disabled"`
 	// DStateMaxTasks caps how many blocked tasks are reported (0 → 20).
-	// Count and longest-duration remain exact regardless.
+	// Peak count and longest-duration remain exact regardless.
 	DStateMaxTasks int `yaml:"d_state_max_tasks"`
-	// DStateScanThreads also walks /proc/<pid>/task/<tid>. Off by default: it
-	// multiplies scan cost by thread count, and the usual culprits
-	// (kworker/flush, jbd2, io_uring workers) are top-level PIDs anyway.
-	DStateScanThreads bool `yaml:"d_state_scan_threads"`
+	// DStateSkipThreads stops the census walking /proc/<pid>/task/<tid>.
+	//
+	// Threads are scanned by DEFAULT and you almost certainly want that: the
+	// blocked task is usually a worker thread (antivirus scanner thread,
+	// io_uring worker, JVM GC thread) which never appears as a top-level PID.
+	// Skipping threads makes the census report zero blocked tasks while
+	// /proc/stat's procs_blocked says otherwise.
+	DStateSkipThreads bool `yaml:"d_state_skip_threads"`
+	// DStateSampleInterval is the sub-sampling period (0 → 250ms).
+	//
+	// The census samples much faster than collect.interval because a machine
+	// can spend most of its time with something blocked while no single
+	// instant lands on a long block. One sample per 5s sees nothing.
+	DStateSampleInterval time.Duration `yaml:"d_state_sample_interval"`
 }
 
 // EBPFConfig controls the on-demand eBPF sub-system.
@@ -162,6 +172,14 @@ type OffCPUConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// IOWaitThreshold activates the module once node iowait% exceeds this.
 	IOWaitThreshold float64 `yaml:"iowait_threshold"`
+	// AlwaysOn keeps the module loaded permanently instead of cycling through
+	// ebpf.active_duration / ebpf.cool_down.
+	//
+	// Worth enabling when the condition is SUSTAINED: with the defaults
+	// (60s active, 120s cool-down) the module observes only a third of the
+	// time, so a persistent stall is frequently absent from the report just
+	// because the sample landed in a cool-down window.
+	AlwaysOn bool `yaml:"always_on"`
 	// MinBlockUs ignores blocking intervals shorter than this.  Filters out
 	// the constant churn of short sleeps that carry no diagnostic signal.
 	MinBlockUs uint64 `yaml:"min_block_us"`
@@ -354,8 +372,9 @@ func Defaults() *Config {
 			MetricsAddr: ":9200",
 		},
 		Collect: CollectConfig{
-			Interval:       5 * time.Second,
-			DStateMaxTasks: 20,
+			Interval:             5 * time.Second,
+			DStateMaxTasks:       20,
+			DStateSampleInterval: 250 * time.Millisecond,
 		},
 		EBPF: EBPFConfig{
 			Enabled:            true,
@@ -406,6 +425,7 @@ func Defaults() *Config {
 		OffCPU: OffCPUConfig{
 			Enabled:            true,
 			IOWaitThreshold:    20.0,
+			AlwaysOn:           true,       // sustained stalls must not be missed in a cool-down window
 			MinBlockUs:         1000,       // 1 ms
 			MaxBlockUs:         60_000_000, // 60 s sanity cap
 			TrackInterruptible: false,      // D-state only: that is what iowait is

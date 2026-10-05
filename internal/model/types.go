@@ -25,6 +25,10 @@ type NodeMetrics struct {
 	// DState enumerates tasks currently in uninterruptible sleep — the tasks
 	// that actually produce iowait.
 	DState DStateCensus `json:"d_state"`
+	// BlockingHooks names userspace mechanisms (fanotify antivirus/audit
+	// agents) that put other tasks into D state. Populated only while I/O
+	// pressure is elevated, since the scan is expensive.
+	BlockingHooks BlockingHooks `json:"blocking_hooks"`
 }
 
 type CPUMetrics struct {
@@ -185,6 +189,10 @@ type VMStatMetrics struct {
 // function each is sleeping in — is the link between "the node has iowait" and
 // "this specific worker is stuck here".
 type DStateTask struct {
+	// TID is the thread that is blocked; PID is the process it belongs to.
+	// These differ whenever a worker thread blocks — which is the common case
+	// (antivirus scanner threads, io_uring workers, JVM GC threads).
+	TID  uint32 `json:"tid"`
 	PID  uint32 `json:"pid"`
 	PPID uint32 `json:"ppid"`
 	Comm string `json:"comm"`
@@ -196,18 +204,69 @@ type DStateTask struct {
 	// across consecutive scans. It is a lower bound quantised to the scan
 	// interval, not an exact blocked time — use the offcpu report for that.
 	InDStateMs int64 `json:"in_d_state_ms"`
+	// ObservedPercent is the share of sub-samples in the interval that caught
+	// this task in D. 90% means it was blocked almost the whole time, even if
+	// no single block lasted long.
+	ObservedPercent float64 `json:"observed_percent"`
 	// KernelThread is true for kthreads (no mm), e.g. kworker/flush workers.
 	KernelThread bool   `json:"kernel_thread"`
 	CgroupPath   string `json:"cgroup_path,omitempty"`
 }
 
-// DStateCensus is the result of one D-state scan.
+// DStateCensus aggregates every sub-sample taken during one collection
+// interval.
+//
+// A single instantaneous look is not enough: a machine can spend most of its
+// time with something blocked while no individual instant lands on a long
+// block — many short waits, constantly. BlockedSamplePercent is the signal
+// that catches that pattern, and it is what correlates with PSI io pressure.
 type DStateCensus struct {
+	// Count is the peak number of simultaneously blocked tasks (== PeakCount).
 	Count int `json:"count"`
+	// PeakCount is the most tasks seen blocked in any single sub-sample.
+	PeakCount int `json:"peak_count"`
 	// LongestMs is the longest continuously-observed D-state duration.
-	LongestMs int64        `json:"longest_ms"`
+	LongestMs int64 `json:"longest_ms"`
+	// BlockedSamplePercent is the share of sub-samples in which at least one
+	// task was blocked. High here with a low LongestMs means constant short
+	// blocking — typically a synchronous userspace hook, not a slow device.
+	BlockedSamplePercent float64 `json:"blocked_sample_percent"`
+	// Samples is how many sub-samples were taken, and SubSampledMs their period.
+	Samples      int   `json:"samples"`
+	SubSampledMs int64 `json:"sub_sampled_ms"`
+
 	Tasks     []DStateTask `json:"tasks,omitempty"`
 	Available bool         `json:"available"`
+}
+
+// ─── Userspace hooks that block other tasks ──────────────────────────────────
+
+// BlockingHooks lists userspace mechanisms that can put OTHER processes into
+// uninterruptible sleep.
+//
+// This is the missing explanation when PSI io pressure is high but the block
+// device is idle: an on-access antivirus or audit agent holding a fanotify
+// descriptor in permission mode makes every file access wait for its verdict.
+// The blocked task shows up as iowait with zero disk traffic.
+type BlockingHooks struct {
+	Fanotify []FanotifyHolder `json:"fanotify,omitempty"`
+	// BlockingCount is how many holders are in a permission class, i.e. how
+	// many actually stall the accessing task rather than just observing it.
+	BlockingCount int  `json:"blocking_count"`
+	Available     bool `json:"available"`
+}
+
+// FanotifyHolder is one process holding a fanotify descriptor.
+type FanotifyHolder struct {
+	PID     uint32 `json:"pid"`
+	Comm    string `json:"comm"`
+	Cmdline string `json:"cmdline,omitempty"`
+	// Marks is the number of watch marks on the descriptor.
+	Marks int `json:"marks"`
+	// Blocking is true for FAN_CLASS_CONTENT / FAN_CLASS_PRE_CONTENT — classes
+	// where the kernel waits for a userspace verdict before allowing the
+	// access. Only these stall the caller; FAN_CLASS_NOTIF is passive.
+	Blocking bool `json:"blocking"`
 }
 
 type NetMetrics struct {

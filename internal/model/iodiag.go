@@ -24,10 +24,25 @@ const (
 	// cache, not the device.
 	VerdictWritebackCongestion IOVerdict = "writeback_congestion"
 
+	// VerdictStallWithoutDeviceIO — work genuinely could not proceed (PSI
+	// io.full is high) yet the block device is idle. The wait is therefore NOT
+	// block I/O. Usual causes, in order of how often they turn out to be it:
+	//   1. an on-access antivirus / audit agent holding fanotify in permission
+	//      mode — every file access waits for its verdict, in D state, with
+	//      zero disk traffic because the file is already in page cache
+	//   2. a network filesystem (NFS/CIFS/FUSE) whose latency is invisible to
+	//      /proc/diskstats
+	//   3. page-cache lock contention, or cgroup io.max throttling
+	// This is the verdict an iowait-vs-throughput comparison alone cannot reach.
+	VerdictStallWithoutDeviceIO IOVerdict = "stall_without_device_io"
+
 	// VerdictIOWaitAccountingArtifact — iowait is high but nothing is actually
-	// stalled: no PSI pressure, an idle device, low load. The CPU was simply
-	// idle while some task sat parked in D state (io_uring workers do this).
-	// Not a problem; do not page anyone.
+	// stalled: PSI io.full is LOW, the device is idle, load is low. The CPU was
+	// simply idle while some task sat parked in D state (io_uring workers do
+	// this). Not a problem; do not page anyone.
+	//
+	// PSI is authoritative here. This verdict is never reached when io.full is
+	// meaningful, no matter how idle the device and load look.
 	VerdictIOWaitAccountingArtifact IOVerdict = "iowait_accounting_artifact"
 
 	// VerdictHealthy — no I/O pressure worth reporting.
@@ -107,8 +122,18 @@ type IOEvidence struct {
 	DirtyRatioPct   float64 `json:"dirty_ratio_percent"`
 	DStateCount     int     `json:"d_state_count"`
 	DStateLongestMs int64   `json:"d_state_longest_ms"`
-	TopBlockedComm  string  `json:"top_blocked_comm,omitempty"`
-	TopBlockedWchan string  `json:"top_blocked_wchan,omitempty"`
+	// DStateBlockedSamplePct is the share of sub-samples in which anything was
+	// blocked. High here with a low DStateLongestMs means constant SHORT
+	// blocking — the signature of a synchronous userspace hook rather than a
+	// slow device.
+	DStateBlockedSamplePct float64 `json:"d_state_blocked_sample_percent"`
+	// BlockingFanotify counts fanotify holders in a permission class, i.e.
+	// agents that stall every file access until they respond.
+	BlockingFanotify int    `json:"blocking_fanotify"`
+	BlockingHookComm string `json:"blocking_hook_comm,omitempty"`
+	BlockingHookPID  uint32 `json:"blocking_hook_pid,omitempty"`
+	TopBlockedComm   string `json:"top_blocked_comm,omitempty"`
+	TopBlockedWchan  string `json:"top_blocked_wchan,omitempty"`
 }
 
 // IOLatencyBucket is one log2(microsecond) bucket of the block-IO latency

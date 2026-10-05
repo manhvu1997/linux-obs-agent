@@ -21,11 +21,16 @@ collect:
   #
   # It is sampled in the SAME cycle as CPU, disk, PSI and vmstat — correlating
   # them only means anything if they describe the same instant.
-  d_state_disabled: false      # true skips the /proc walk entirely
-  d_state_max_tasks: 20        # count + longest duration stay exact regardless
-  d_state_scan_threads: false  # also walk /proc/<pid>/task/<tid> (costly; the
-                               # usual culprits — kworker/flush, jbd2, io_uring
-                               # workers — are top-level PIDs anyway)
+  # Sub-sampled far faster than `interval` above: a machine can spend 80% of
+  # its time with something blocked while no single 5s instant lands on a
+  # block. blocked_sample_percent is what catches that pattern.
+  d_state_disabled: false        # true skips the /proc walk entirely
+  d_state_max_tasks: 20          # peak count + longest duration stay exact
+  d_state_sample_interval: 250ms # sub-sampling period
+  d_state_skip_threads: false    # threads ARE scanned by default and you want
+                                 # that: the blocked task is usually a worker
+                                 # thread (AV scanner, io_uring worker, JVM GC)
+                                 # that never appears as a top-level PID
 
 # ─── eBPF on-demand modules ───────────────────────────────────────────────────
 ebpf:
@@ -104,9 +109,22 @@ runq:
 #   AND that task sitting in the writeback/storage path
 #   → storage_latency_stall   (NOT high_disk_throughput)
 #
-# Other verdicts: high_disk_throughput, writeback_congestion,
-# iowait_accounting_artifact (high iowait but idle device + no PSI = not a
-# problem), healthy, inconclusive.
+# PSI IS AUTHORITATIVE. pressure.io.full measures time in which NO task could
+# make progress. When it is high the machine is genuinely stalling, and no
+# combination of "device looks idle" or "load is low" is allowed to override it.
+#
+# Verdicts:
+#   storage_latency_stall      device slow, not busy (add latency, not IOPS)
+#   high_disk_throughput       device saturated — a capacity problem
+#   writeback_congestion       stall is in the page cache, not the device
+#   stall_without_device_io    PSI full high but the DISK IS IDLE → the wait is
+#                              not block I/O.  Usually an on-access antivirus /
+#                              audit agent holding fanotify in PERMISSION mode:
+#                              every file access waits for its verdict in D
+#                              state, producing iowait with zero disk traffic.
+#                              Also: NFS/CIFS/FUSE, or cgroup io.max throttling.
+#   iowait_accounting_artifact iowait high but PSI full LOW → genuinely idle
+#   healthy / inconclusive
 io_diag:
   # Below this iowait there is nothing to diagnose.
   iowait_percent: 50.0
@@ -147,6 +165,12 @@ offcpu:
   enabled: true
   # Load the module once node iowait% exceeds this.
   iowait_threshold: 20.0
+  # Keep the module loaded permanently instead of cycling through
+  # ebpf.active_duration / ebpf.cool_down. With the defaults (60s active,
+  # 120s cool-down) it observes only a third of the time, so a SUSTAINED
+  # stall is often absent from the report purely because the sample landed
+  # in a cool-down window.
+  always_on: true
   # Ignore blocking intervals shorter than this. Filters out the constant churn
   # of short sleeps that carry no diagnostic signal.
   min_block_us: 1000        # 1 ms

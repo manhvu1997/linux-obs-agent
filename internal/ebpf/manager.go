@@ -188,14 +188,24 @@ func (m *Manager) Activate(ctx context.Context, id ModuleID) error {
 		return nil
 	}
 
-	// Respect cool-down.
-	if !state.lastStop.IsZero() && time.Since(state.lastStop) < m.cfg.CoolDown {
+	// Modules flagged always-on are exempt from the auto-stop timer entirely
+	// (see below); the cool-down check still applies to everything else.
+	if !m.alwaysOn(id) && !state.lastStop.IsZero() && time.Since(state.lastStop) < m.cfg.CoolDown {
 		remaining := m.cfg.CoolDown - time.Since(state.lastStop)
 		slog.Debug("ebpf: in cool-down", "module", id, "remaining", remaining.Round(time.Second))
 		return nil
 	}
 
-	modCtx, cancel := context.WithTimeout(ctx, m.cfg.ActiveDuration)
+	// An always-on module gets a plain cancellable context so it survives
+	// until shutdown; everything else expires after ActiveDuration.
+	var modCtx context.Context
+	var cancel context.CancelFunc
+	alwaysOn := m.alwaysOn(id)
+	if alwaysOn {
+		modCtx, cancel = context.WithCancel(ctx)
+	} else {
+		modCtx, cancel = context.WithTimeout(ctx, m.cfg.ActiveDuration)
+	}
 
 	if err := m.startModule(modCtx, id); err != nil {
 		cancel()
@@ -206,15 +216,24 @@ func (m *Manager) Activate(ctx context.Context, id ModuleID) error {
 	state.stopFn = cancel
 	state.activeSince = time.Now()
 
-	slog.Info("ebpf: activated", "module", id, "duration", m.cfg.ActiveDuration)
-
-	// Auto-stop after ActiveDuration.
-	go func() {
-		<-modCtx.Done()
-		m.deactivate(id)
-	}()
+	if alwaysOn {
+		slog.Info("ebpf: activated", "module", id, "duration", "always-on")
+	} else {
+		slog.Info("ebpf: activated", "module", id, "duration", m.cfg.ActiveDuration)
+		// Auto-stop after ActiveDuration.
+		go func() {
+			<-modCtx.Done()
+			m.deactivate(id)
+		}()
+	}
 
 	return nil
+}
+
+// alwaysOn reports whether a module should stay loaded rather than cycling
+// through ActiveDuration / CoolDown.
+func (m *Manager) alwaysOn(id ModuleID) bool {
+	return id == ModOffCPU && m.offcpuCfg != nil && m.offcpuCfg.AlwaysOn
 }
 
 // Deactivate explicitly stops a module before its timeout.

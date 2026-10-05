@@ -1,86 +1,160 @@
 {
-  "timestamp": "2026-07-29T15:08:19.920873257Z",
+  "timestamp": "2026-07-30T19:19:05.991836738Z",
   "hostname": "prod-work-redis-common-new-01",
   "active_modules": null,
   "metrics": {
-    "timestamp": "2026-07-29T15:08:17.290370906Z",
+    "timestamp": "2026-07-30T19:19:04.707344511Z",
     "hostname": "prod-work-redis-common-new-01",
     "cpu": {
-      "usage_percent": 18.3778234086242,
-      "user_percent": 6.05749486652977,
-      "sys_percent": 9.95893223819302,
-      "iowait_percent": 81.6221765913758,
+      "usage_percent": 18.4994861253854,
+      "user_percent": 6.26927029804728,
+      "sys_percent": 9.45529290853032,
+      "iowait_percent": 81.5005138746146,
       "idle_percent": 0,
-      "steal_percent": 0.205338809034908,
-      "ctx_switches_total": 5741,
-      "interrupts_total": 6829,
+      "steal_percent": 0.205549845837616,
+      "ctx_switches_total": 5698,
+      "interrupts_total": 6416,
       "forks_total": 0,
-      "running_procs": 3,
-      "blocked_procs": 2,
+      "running_procs": 2,
+      "blocked_procs": 1,
       "per_cpu": [
         {
           "id": 0,
-          "usage_percent": 16.0164271047228,
-          "iowait_percent": 83.9835728952772
+          "usage_percent": 16.5983606557377,
+          "iowait_percent": 83.4016393442623
         },
         {
           "id": 1,
-          "usage_percent": 20.7818930041152,
-          "iowait_percent": 79.2181069958848
+          "usage_percent": 20.2479338842975,
+          "iowait_percent": 79.7520661157025
         }
       ]
     },
     "memory": {
       "total_bytes": 10426253312,
-      "used_bytes": 1470185472,
-      "free_bytes": 6617030656,
-      "buffers_bytes": 110690304,
-      "cached_bytes": 2228346880,
-      "available_bytes": 8791121920,
-      "usage_percent": 14.1008033087773,
+      "used_bytes": 1489399808,
+      "free_bytes": 6677147648,
+      "buffers_bytes": 90652672,
+      "cached_bytes": 2169053184,
+      "available_bytes": 8772972544,
+      "usage_percent": 14.2850913308023,
       "swap_total_bytes": 0,
       "swap_used_bytes": 0,
       "swap_percent": 0,
-      "slab_bytes": 280989696,
+      "slab_bytes": 283598848,
       "page_faults_total": 0,
       "major_faults_total": 0
     },
     "load_avg": {
-      "load1": 0.47,
-      "load5": 0.65,
-      "load15": 0.61,
+      "load1": 0.39,
+      "load5": 0.48,
+      "load15": 0.51,
       "num_cpu": 2
     },
     "disk": [
       {
         "device": "sda",
-        "read_bytes_total": 80470821888,
-        "write_bytes_total": 22164493942272,
-        "read_ops_total": 2318320,
-        "write_ops_total": 367868836,
+        "read_bytes_total": 82035581440,
+        "write_bytes_total": 22203584594432,
+        "read_ops_total": 2347536,
+        "write_ops_total": 369311632,
         "read_bytes_per_sec": 0,
-        "write_bytes_per_sec": 1638.45566194344,
+        "write_bytes_per_sec": 818.66870529565,
         "read_ops_per_sec": 0,
-        "write_ops_per_sec": 0.40001358934166,
-        "io_util_percent": 0,
-        "avg_wait_ms": 0.5
+        "write_ops_per_sec": 0.199870289378821,
+        "io_util_percent": 0.0199870289378821,
+        "avg_wait_ms": 1,
+        "in_flight": 0,
+        "avg_queue_depth": 0,
+        "read_avg_wait_ms": 0,
+        "write_avg_wait_ms": 1
       }
     ],
     "network": [
       {
         "interface": "ens4",
-        "rx_bytes_total": 22010475113384,
-        "tx_bytes_total": 6865140979547,
-        "rx_packets_total": 74113766655,
-        "tx_packets_total": 71806263457,
+        "rx_bytes_total": 22062386663392,
+        "tx_bytes_total": 6882284909281,
+        "rx_packets_total": 74240729311,
+        "tx_packets_total": 71923495629,
         "rx_errors_total": 0,
         "tx_errors_total": 0,
         "rx_dropped_total": 0,
         "tx_dropped_total": 0,
-        "rx_bytes_per_sec": 588710.104191577,
-        "tx_bytes_per_sec": 155943.383706255
+        "rx_bytes_per_sec": 203084.752468318,
+        "tx_bytes_per_sec": 133879.818292383
       }
-    ]
+    ],
+    "pressure": {
+      "io": {
+        "some": {
+          "avg10": 83.48,
+          "avg60": 83.52,
+          "avg300": 83.57,
+          "total_us": 51278938981576,
+          "total_us_per_sec": 837264.247536164
+        },
+        "full": {
+          "avg10": 80.95,
+          "avg60": 80.77,
+          "avg300": 79.37,
+          "total_us": 50273582310031,
+          "total_us_per_sec": 814227.447064178
+        },
+        "available": true
+      },
+      "cpu": {
+        "some": {
+          "avg10": 2.2,
+          "avg60": 2.37,
+          "avg300": 3.53,
+          "total_us": 1159740794068,
+          "total_us_per_sec": 26085.4154833879
+        },
+        "full": {
+          "avg10": 0,
+          "avg60": 0,
+          "avg300": 0,
+          "total_us": 0,
+          "total_us_per_sec": 0
+        },
+        "available": true
+      },
+      "memory": {
+        "some": {
+          "avg10": 0,
+          "avg60": 0,
+          "avg300": 0,
+          "total_us": 157961453,
+          "total_us_per_sec": 0
+        },
+        "full": {
+          "avg10": 0,
+          "avg60": 0,
+          "avg300": 0,
+          "total_us": 119679668,
+          "total_us_per_sec": 0
+        },
+        "available": true
+      }
+    },
+    "vmstat": {
+      "dirty_bytes": 1560576,
+      "writeback_bytes": 0,
+      "dirtied_pages_per_sec": 1.39910185160313,
+      "written_pages_per_sec": 0.199871693086161,
+      "pgpgin_per_sec": 0,
+      "pgpgout_per_sec": 0.799486772344646,
+      "pswpin_per_sec": 0,
+      "pswpout_per_sec": 0,
+      "dirty_ratio_percent": 0.0149677545068262,
+      "available": true
+    },
+    "d_state": {
+      "count": 0,
+      "longest_ms": 0,
+      "available": true
+    }
   },
   "top_processes": [
     {
@@ -88,16 +162,1678 @@
       "ppid": 1,
       "comm": "dragonfly",
       "cmdline": "/usr/bin/dragonfly --log_dir /var/log/dragonfly --max_log_size 100 --requirepass=WYF7SVz4ZssxydsM --cache_mode=true -dbnum 64 --bind 0.0.0.0 --port 6379 --maxmemory=9gb --keys_output_limit=12288 --dir /var/lib/dragonfly --snapshot_cron 0 * * * * --dbfilename dump-{timestamp} --default_lua_flags=allow-undeclared-keys",
-      "cpu_percent": 15.4513577077115,
-      "mem_percent": 4.16358930681618,
-      "mem_rss_bytes": 434106368,
+      "cpu_percent": 14.8992816996695,
+      "mem_percent": 3.93997655444648,
+      "mem_rss_bytes": 410791936,
       "mem_vms_bytes": 1266601984,
-      "read_bytes_total": 231071744,
-      "write_bytes_total": 7923847168,
+      "read_bytes_total": 231219200,
+      "write_bytes_total": 14223757312,
       "read_bytes_per_sec": 0,
       "write_bytes_per_sec": 0,
       "threads": 5,
       "state": "S",
-      "open_files": 519,
+      "open_files": 498,
       "cgroup_path": "0::/system.slice/dragonfly.service"
+    },
+    {
+      "pid": 944315,
+      "ppid": 944314,
+      "comm": "kesl",
+      "cmdline": "/opt/kaspersky/kesl/libexec/kesl",
+      "cpu_percent": 1.44993009828999,
+      "mem_percent": 6.54715510522214,
+      "mem_rss_bytes": 682622976,
+      "mem_vms_bytes": 2035888128,
+      "read_bytes_total": 1127571968,
+      "write_bytes_total": 15993470976,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 52426.2725084319,
+      "threads": 89,
+      "state": "S",
+      "open_files": 790,
+      "cgroup_path": "0::/system.slice/kesl.service"
+    },
+    {
+      "pid": 1179169,
+      "ppid": 1,
+      "comm": "obs-agent",
+      "cmdline": "/usr/local/bin/obs-agent -config /etc/obs-agent/config.yaml",
+      "cpu_percent": 0.699966254346892,
+      "mem_percent": 0.254923251954844,
+      "mem_rss_bytes": 26578944,
+      "mem_vms_bytes": 1373868032,
+      "read_bytes_total": 5369856,
+      "write_bytes_total": 0,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 16,
+      "state": "S",
+      "open_files": 63,
+      "cgroup_path": "0::/system.slice/obs-agent.service"
+    },
+    {
+      "pid": 920229,
+      "ppid": 1,
+      "comm": "klnagent",
+      "cmdline": "/opt/kaspersky/klnagent64/sbin/klnagent -d -from_wd",
+      "cpu_percent": 0.399980716769652,
+      "mem_percent": 0.453589746813165,
+      "mem_rss_bytes": 47292416,
+      "mem_vms_bytes": 463441920,
+      "read_bytes_total": 38277120,
+      "write_bytes_total": 68456448,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 23,
+      "state": "S",
+      "open_files": 62,
+      "cgroup_path": "0::/system.slice/klnagent64.service"
+    },
+    {
+      "pid": 920445,
+      "ppid": 920442,
+      "comm": "klnagent",
+      "cmdline": "/opt/kaspersky/klnagent64/sbin/klnagent -rcvr_loadconnector FA861122323CC19A5E699585692E6C22 -rcvr_product kesl -rcvr_version 12.4.0.0",
+      "cpu_percent": 0.349983127173446,
+      "mem_percent": 0.929611482664119,
+      "mem_rss_bytes": 96923648,
+      "mem_vms_bytes": 1480097792,
+      "read_bytes_total": 40538112,
+      "write_bytes_total": 18010112,
+      "read_bytes_per_sec": 0,
+      "write_bytes_per_sec": 0,
+      "threads": 22,
+      "state": "S",
+      "open_files": 55,
+      "cgroup_path": "0::/system.slice/klnagent64.service"
     }
+  ],
+  "io_diagnosis": {
+    "type": "io_diagnosis",
+    "timestamp": "2026-07-30T19:19:05.994168443Z",
+    "verdict": "iowait_accounting_artifact",
+    "confidence": "medium",
+    "summary": "iowait 81.5% is an accounting artifact, NOT an I/O problem: sda is idle (0.0% util, 0.00 MB/s), load/cpu is 0.20 and nothing blocked longer than 1000ms. The CPU was idle while a task sat parked in D state.",
+    "chain": [
+      {
+        "stage": "node",
+        "detail": "iowait 81.5%, idle 0.0%, load/cpu 0.20, 1 procs blocked; PSI io some=83.5% full=81.0%",
+        "confirmed": true
+      },
+      {
+        "stage": "device",
+        "detail": "sda: util 0.0%, 0.00 MB/s, avg wait 1.00 ms, in-flight 0",
+        "confirmed": true
+      },
+      {
+        "stage": "blocked_tasks",
+        "detail": "no tasks in uninterruptible sleep",
+        "confirmed": false
+      },
+      {
+        "stage": "process",
+        "detail": "not attributed — off-CPU profiler was not active",
+        "confirmed": false
+      },
+      {
+        "stage": "stack",
+        "detail": "no blocking stacks; enable offcpu or query /api/profile?mode=offcpu",
+        "confirmed": false
+      }
+    ],
+    "evidence": {
+      "iowait_percent": 81.5005138746146,
+      "idle_percent": 0,
+      "load_normalised": 0.2,
+      "blocked_procs": 1,
+      "psi_io_some_avg10": 83.48,
+      "psi_io_full_avg10": 80.95,
+      "psi_available": true,
+      "busiest_device": "sda",
+      "device_util_percent": 0.02,
+      "device_mb_per_sec": 0,
+      "device_avg_wait_ms": 1,
+      "device_in_flight": 0,
+      "dirty_bytes": 1560576,
+      "writeback_bytes": 0,
+      "dirty_ratio_percent": 0.0149677545068262,
+      "d_state_count": 0,
+      "d_state_longest_ms": 0
+    },
+    "missing": [
+      "offcpu_report (module inactive — no blocking stacks)"
+    ],
+    "next_steps": [
+      "No action needed. iowait is idle time charged differently when any task on the runqueue is in D state.",
+      "Alert on PSI io.full (pressure.io.full.avg10) instead of iowait — it measures lost work rather than idle time."
+    ]
+  },
+  "recent_events": [
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.319091311Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 3526,
+        "user_stack_id": 13939,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.8969074266676375e+18],
+        "kern_stack": [1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.359510066Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 6444,
+        "sample_count": 0,
+        "user_stack": [98495805171794, 98495805176600, 98495808996414, 98495808997433, 98495809007119, 98495809008362, 98495809013051, 98495813377213, 98495813378597, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.521100686Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.531129249Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 13526,
+        "sample_count": 0,
+        "user_stack": [98495808192501, 98495808219639, 98495805177929, 98495805199570, 98495805200248, 98495808418757, 98495808544782, 8606713864]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.60189107Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.652427959Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 9096,
+        "user_stack_id": 10320,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.896912159721599e+18],
+        "kern_stack": [1.8446744072421929e+19, 1.844674407242193e+19, 1.844674407242193e+19, 1.844674407242193e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.662436835Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 7611,
+        "sample_count": 0,
+        "user_stack": [140729951050499, 128861462252141, 98495817491797, 98495813285099, 98495813573866, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.672612533Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4356,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.8969126021032305e+18],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.712680829Z",
+      "pid": 920278,
+      "comm": "klnagent",
+      "data": {
+        "pid": 920278,
+        "comm": "klnagent",
+        "kern_stack_id": -14,
+        "user_stack_id": 15686,
+        "sample_count": 0,
+        "user_stack": [134921003903312, 134921003353537, 134921003369834, 134921003384142, 134921003272086, 134920907901828, 134920908479852]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.712912721Z",
+      "pid": 1179177,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1179177,
+        "comm": "obs-agent",
+        "kern_stack_id": -14,
+        "user_stack_id": 3479,
+        "sample_count": 0,
+        "user_stack": [9997013, 10031730, 4788577]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.813699127Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": -14,
+        "user_stack_id": 14306,
+        "sample_count": 0,
+        "user_stack": [98495813309974, 98495813573340, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.813951232Z",
+      "pid": 1179177,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1179177,
+        "comm": "obs-agent",
+        "kern_stack_id": 9683,
+        "user_stack_id": 8809,
+        "sample_count": 0,
+        "user_stack": [4795555, 4335879, 4561004, 4568104, 4572529, 4573701, 4781717],
+        "kern_stack": [1.844674407241574e+19, 1.844674407241574e+19, 1.8446744072415724e+19, 1.8446744072415726e+19, 1.844674407241354e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.833912068Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 14508,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.844674407241804e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.854421558Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4331,
+        "sample_count": 0,
+        "user_stack": [98495808202687, 98495808208128, 98495805128554, 98495805202307, 98495805204315, 98495805205947, 98495808079775, 98495805159791, 98495805178065, 98495808996414, 98495808997433, 98495809007119, 98495809008362, 98495809013051, 98495813377213, 98495813378597, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.874295099Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.904916499Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.935243614Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.985794393Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 447,
+        "user_stack_id": 15245,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.8969173007974533e+18],
+        "kern_stack": [1.8446744072643813e+19, 1.844674407242899e+19, 1.8446744072421966e+19, 1.8446744072421937e+19, 1.8446744072421937e+19, 1.8446744072421992e+19, 1.844674407242193e+19, 1.844674407242193e+19, 1.844674407242193e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:36.995794781Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 8326,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.066584542Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.096488483Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": -14,
+        "user_stack_id": 7502,
+        "sample_count": 0,
+        "user_stack": [98495808185806, 98495808209345, 98495813552117, 98495807300960, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.197908092Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 8343,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415982e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.207902058Z",
+      "pid": 920279,
+      "comm": "klnagent",
+      "data": {
+        "pid": 920279,
+        "comm": "klnagent",
+        "kern_stack_id": -14,
+        "user_stack_id": 1633,
+        "sample_count": 0,
+        "user_stack": [134920908375995, 134921003353537, 134921003369834, 134921003384142, 134921003272086, 134920907901828, 134920908479852]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.228239013Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 903,
+        "sample_count": 0,
+        "user_stack": [98495809349728, 98495809007119, 98495809008362, 98495809013051, 98495813377213, 98495813378597, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.25812981Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": -14,
+        "user_stack_id": -17,
+        "sample_count": 0
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.26819029Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.339167632Z",
+      "pid": 944473,
+      "comm": "kesl",
+      "data": {
+        "pid": 944473,
+        "comm": "kesl",
+        "kern_stack_id": -14,
+        "user_stack_id": 9559,
+        "sample_count": 0,
+        "user_stack": [126956980143245, 126956980119269, 126956980120337, 126956979993862, 126956981193000, 126956981198142, 126956981199792, 126956981208652, 126956981170594, 126956980866793, 126956980867934, 126956980878681, 126956980881123, 126956980885121, 126956981236913, 126956981590906, 126956981634673, 126956980422418, 95545822687366, 126958590086020, 126958590664044]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.339229827Z",
+      "pid": 1179171,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1179171,
+        "comm": "obs-agent",
+        "kern_stack_id": -14,
+        "user_stack_id": 10856,
+        "sample_count": 0,
+        "user_stack": [4344982, 4748805, 4348005, 6949605, 6948863, 4788577]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.379332419Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.439900164Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 8255,
+        "user_stack_id": 8181,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464068100, 1.799420426464056e+18],
+        "kern_stack": [1.8446744072415971e+19, 1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.53117418Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4646,
+        "user_stack_id": 2523,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.896925581494402e+18],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.561109684Z",
+      "pid": 704,
+      "comm": "node_exporter",
+      "data": {
+        "pid": 704,
+        "comm": "node_exporter",
+        "kern_stack_id": 7618,
+        "user_stack_id": 9149,
+        "sample_count": 0,
+        "user_stack": [4901450, 5048603, 5047092, 5030155, 5026981, 5659493, 9333989, 9332882, 10047183, 10042782, 9870588, 9870333, 9870234, 4619041],
+        "kern_stack": [1.8446744072415195e+19, 1.8446744072418669e+19, 1.844674407241867e+19, 1.8446744072418673e+19, 1.8446744072418691e+19, 1.8446744072418623e+19, 1.8446744072418628e+19, 1.8446744072418628e+19, 1.8446744072418628e+19, 1.844674407241354e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.561679141Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -17,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.571311679Z",
+      "pid": 44537,
+      "comm": "node_exporter",
+      "data": {
+        "pid": 44537,
+        "comm": "node_exporter",
+        "kern_stack_id": 6463,
+        "user_stack_id": 9078,
+        "sample_count": 0,
+        "user_stack": [4901339, 5000805, 5033534, 5039003, 8523711, 9367146, 9903909, 9870588, 9870333, 9870234, 4619041],
+        "kern_stack": [1.8446744072421548e+19, 1.8446744072419496e+19, 1.8446744072419488e+19, 1.8446744072418832e+19, 1.844674407241949e+19, 1.8446744072418589e+19, 1.8446744072418593e+19, 1.8446744072418593e+19, 1.844674407241354e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.571560997Z",
+      "pid": 703,
+      "comm": "node_exporter",
+      "data": {
+        "pid": 703,
+        "comm": "node_exporter",
+        "kern_stack_id": -17,
+        "user_stack_id": 15758,
+        "sample_count": 0,
+        "user_stack": [4627264, 4468746, 4433907, 4433721, 4610469, 140722267965536, 12854880, 14314]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.581315952Z",
+      "pid": 703,
+      "comm": "node_exporter",
+      "data": {
+        "pid": 703,
+        "comm": "node_exporter",
+        "kern_stack_id": 3830,
+        "user_stack_id": 12966,
+        "sample_count": 0,
+        "user_stack": [4625277, 4468177, 4433907, 4433721, 4610469, 56424919050673050, 140722267965664],
+        "kern_stack": [1.8446744072415607e+19, 1.8446744072415613e+19, 1.8446744072415613e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.601932092Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4303,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072428993e+19, 1.8446744072421964e+19, 1.8446744072421937e+19, 1.844674407242194e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.652324229Z",
+      "pid": 944373,
+      "comm": "keslFanEvent",
+      "data": {
+        "pid": 944373,
+        "comm": "keslFanEvent",
+        "kern_stack_id": -14,
+        "user_stack_id": 7779,
+        "sample_count": 0,
+        "user_stack": [126958465213684, 126958466760543, 126958466764265, 126958466764538, 126958466183863, 126958466186296, 126958465869005, 126958401241014, 126958401241741, 126958574178287, 126958574036051, 126958574183611, 126958574178287, 126958574036051, 126958574179915, 126958574184022, 95545822687366, 126958590086020, 126958590664044]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.652374895Z",
+      "pid": 944381,
+      "comm": "keslFanPoll",
+      "data": {
+        "pid": 944381,
+        "comm": "keslFanPoll",
+        "kern_stack_id": -14,
+        "user_stack_id": 13401,
+        "sample_count": 0,
+        "user_stack": [126958590665074, 126958401318100, 126958401243579, 126958401249718, 126958401811080, 126958401833802, 126958600697055, 126958590086020, 126958590664044]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.662110912Z",
+      "pid": 944473,
+      "comm": "kesl",
+      "data": {
+        "pid": 944473,
+        "comm": "kesl",
+        "kern_stack_id": -14,
+        "user_stack_id": 4204,
+        "sample_count": 0,
+        "user_stack": [126956981126507, 126956980878291, 126956980879500, 126956980885121, 126956981236913, 126956981590906, 126956981634673, 126956980422418, 95545822687366, 126958590086020, 126958590664044]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.662588499Z",
+      "pid": 944473,
+      "comm": "kesl",
+      "data": {
+        "pid": 944473,
+        "comm": "kesl",
+        "kern_stack_id": -14,
+        "user_stack_id": 15884,
+        "sample_count": 0,
+        "user_stack": [126956088125392, 126956092985502, 126956092787754, 126956092783671, 126956092784948, 126956092788292, 126956093761423, 126958333974493, 126958333961360, 126958333969347, 126958333965121, 126958333969347, 126958333961000, 126958333969761, 126958333970080, 126956089730790, 126958333974493, 126958333961360, 126958333969761, 126958333970080, 126958334205421, 126958334205801, 126956091678994, 126958334257677, 126958533958869, 126958533957146, 126957784210578, 126957784153827, 126958533706136, 126958533973498, 126956980921339, 126956980735329, 126956980841751, 126956980857422, 126956980858324, 126956980880789, 126956980885121, 126956981236913, 126956981590906, 126956981634673, 126956980422418, 95545822687366, 126958590086020, 126958590664044]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.733175233Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 7507,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072421915e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.742914439Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 14996,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072418773e+19, 1.8446744072414548e+19, 1.8446744072415994e+19, 1.8446744072415973e+19, 1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.763516554Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.793811806Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 5258,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415973e+19, 1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.844349915Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 5818,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432775e+19, 1.8446744072414937e+19, 1.844674407241494e+19, 1.8446744072414765e+19, 1.8446744072421972e+19, 1.8446744072421974e+19, 1.8446744072421937e+19, 1.844674407242194e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.854374946Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 13693,
+        "sample_count": 0,
+        "user_stack": [98495808203373, 98495808208417, 98495808208698, 98495806227962, 98495806231230, 98495808079775, 98495805159791, 98495805178065, 98495808996414, 98495808997433, 98495809007119, 98495809008362, 98495809013051, 98495813377213, 98495813378597, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.965190428Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 6761,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.985431087Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": -14,
+        "user_stack_id": 2298,
+        "sample_count": 0,
+        "user_stack": [98495808445276, 98495808454635, 98495806239082, 98495806240167, 98495806283956, 98495808197897, 98495808200793, 98495808209345, 98495813552117, 98495807300960, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:37.985653981Z",
+      "pid": 1206237,
+      "comm": "obs-agent",
+      "data": {
+        "pid": 1206237,
+        "comm": "obs-agent",
+        "kern_stack_id": 3552,
+        "user_stack_id": 8809,
+        "sample_count": 0,
+        "user_stack": [4795555, 4335879, 4561004, 4568104, 4572529, 4573701, 4781717],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.035963856Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": -14,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.076689331Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.137248439Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 9094,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072416391e+19, 1.8446744072415523e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.20795168Z",
+      "pid": 920942,
+      "comm": "klnagent",
+      "data": {
+        "pid": 920942,
+        "comm": "klnagent",
+        "kern_stack_id": -14,
+        "user_stack_id": 7220,
+        "sample_count": 0,
+        "user_stack": [134920907886775, 134921003219064, 134921003370061, 134921003384142, 134921003272086, 134920907901828, 134920908479852]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.308934589Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.318661329Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 6761,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.328831004Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 14996,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072418773e+19, 1.8446744072414548e+19, 1.8446744072415994e+19, 1.8446744072415973e+19, 1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.348996025Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": -14,
+        "user_stack_id": 1147,
+        "sample_count": 0,
+        "user_stack": [98495809321150]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.359435132Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 3881,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.369556693Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.40995207Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 718,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.8969381099140073e+18]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.460505839Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 2302,
+        "sample_count": 0,
+        "user_stack": [98495808962215, 98495808996414, 98495808997433, 98495809007119, 98495809008362, 98495809013051, 98495813377213, 98495813378597, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.531183021Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.571297275Z",
+      "pid": 944473,
+      "comm": "kesl",
+      "data": {
+        "pid": 944473,
+        "comm": "kesl",
+        "kern_stack_id": -14,
+        "user_stack_id": 808,
+        "sample_count": 0,
+        "user_stack": [126956088449749, 126956093154327, 126956093212948, 126956093143974, 126956093185878, 126956094828816, 126956094806592, 126956094798441, 126958333974493, 126958333961360, 126958333969347, 126958333965121, 126958333969761, 126958333970080, 126958334271885, 126958334224678, 126958334601810, 126958334227166, 126958334228388, 126956094263927, 126956094263638, 126956094263296, 126956094253901, 126956094175500, 126956089730746, 126958333974493, 126958333961360, 126958333969761, 126958333970080, 126958334205421, 126958334205801, 126956091678994, 126958334257677, 126958533958869, 126958533957146, 126957784210578, 126957784153827, 126958533706136, 126958533973498, 126956980921339, 126956980735329, 126956980841751, 126956980857422, 126956980858324, 126956980880789, 126956980885121, 126956981236913, 126956981590906, 126956981634673, 126956980422418, 95545822687366, 126958590086020, 126958590664044]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.572303899Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.601865398Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 11330,
+        "sample_count": 0,
+        "user_stack": [98495807264486, 98495807270568, 98495807271188, 98495807272256, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.621771618Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.662517274Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.682690196Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -17,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.692753372Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 13652,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072430547e+19, 1.8446744072421964e+19, 1.8446744072421937e+19, 1.844674407242194e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.763233813Z",
+      "pid": 944401,
+      "comm": "kesl",
+      "data": {
+        "pid": 944401,
+        "comm": "kesl",
+        "kern_stack_id": -14,
+        "user_stack_id": 15358,
+        "sample_count": 0,
+        "user_stack": [126958401839745, 126958401849240, 126958600697055, 126958590086020, 126958590664044]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.763554684Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 11885,
+        "sample_count": 0,
+        "user_stack": [98495808962208, 98495805176600, 98495805199570, 98495805200248, 98495808418757, 98495808544782, 8606713864]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.793849972Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.884765734Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 15347,
+        "sample_count": 0,
+        "user_stack": [98495808180704, 98495808208417, 98495808208698, 98495806227962, 98495806231230, 98495808079775, 98495805159791, 98495805178065, 98495808996414, 98495808997433, 98495809007119, 98495809008362, 98495809013051, 98495813377213, 98495813378597, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.904919921Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -17,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.915039151Z",
+      "pid": 920477,
+      "comm": "klnagent",
+      "data": {
+        "pid": 920477,
+        "comm": "klnagent",
+        "kern_stack_id": 16203,
+        "user_stack_id": 12766,
+        "sample_count": 0,
+        "user_stack": [140433670866875, 140433765844417, 140433765860714, 140433765875022, 140433765762966, 140433670392708, 140433670970732],
+        "kern_stack": [1.844674407241509e+19, 1.844674407241509e+19, 1.8446744072414685e+19, 1.8446744072414691e+19, 1.8446744072413538e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.925081014Z",
+      "pid": 944330,
+      "comm": "keslNamspcPoll",
+      "data": {
+        "pid": 944330,
+        "comm": "keslNamspcPoll",
+        "kern_stack_id": 4646,
+        "user_stack_id": 8725,
+        "sample_count": 0,
+        "user_stack": [126958590604053, 126958132708550, 126958128897020, 126958128899952, 126958128818709, 95545822687366, 126958590086020, 126958590664044],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.9554176Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.975305966Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 641,
+        "user_stack_id": 12183,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464068100, 1.7994292268520476e+18],
+        "kern_stack": [1.8446744072414888e+19, 1.844674407243274e+19, 1.8446744072432742e+19, 1.844674407243277e+19, 1.8446744072432771e+19, 1.844674407242193e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.975549688Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4,
+        "sample_count": 0,
+        "user_stack": [140729951050550, 128861462252141, 98495815948242, 98495813573935, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:38.995822514Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.086717153Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.116704107Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 9861,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415971e+19, 1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.157464688Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 9786,
+        "sample_count": 0,
+        "user_stack": [98495815948218, 98495813573935, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.187785354Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 11456,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.844674407242193e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.197518839Z",
+      "pid": 944573,
+      "comm": "klnagent",
+      "data": {
+        "pid": 944573,
+        "comm": "klnagent",
+        "kern_stack_id": -14,
+        "user_stack_id": 4720,
+        "sample_count": 0,
+        "user_stack": [140433765844221, 140433765860714, 140433765875022, 140433765762966, 140433670392708, 140433670970732]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.197779051Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.217698857Z",
+      "pid": 922797,
+      "comm": "klnagent",
+      "data": {
+        "pid": 922797,
+        "comm": "klnagent",
+        "kern_stack_id": -14,
+        "user_stack_id": 1633,
+        "sample_count": 0,
+        "user_stack": [134920908375995, 134921003353537, 134921003369834, 134921003384142, 134921003272086, 134920907901828, 134920908479852]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.227752759Z",
+      "pid": 944473,
+      "comm": "kesl",
+      "data": {
+        "pid": 944473,
+        "comm": "kesl",
+        "kern_stack_id": -14,
+        "user_stack_id": 4473,
+        "sample_count": 0,
+        "user_stack": [126958533956448, 126958533973498, 126956980921339, 126956980735329, 126956980841751, 126956980857422, 126956980858324, 126956980880789, 126956980885121, 126956981236913, 126956981590906, 126956981634673, 126956980422418, 95545822687366, 126958590086020, 126958590664044]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.238282498Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 641,
+        "user_stack_id": 13932,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.8969503806355748e+18],
+        "kern_stack": [1.8446744072414888e+19, 1.844674407243274e+19, 1.8446744072432742e+19, 1.844674407243277e+19, 1.8446744072432771e+19, 1.844674407242193e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.308660987Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.349393562Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 5063,
+        "sample_count": 0,
+        "user_stack": [98495806228011, 98495806231230, 98495808079775, 98495805159791, 98495805178065, 98495808996414, 98495808997433, 98495809007119, 98495809008362, 98495809013051, 98495813377213, 98495813378597, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.359579941Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4657,
+        "user_stack_id": 4501,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.8969521200973302e+18],
+        "kern_stack": [1.8446744072415994e+19, 1.8446744072415973e+19, 1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.399548467Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 6458,
+        "user_stack_id": 1109,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464068100, 1.7994319584512486e+18],
+        "kern_stack": [1.8446744072432775e+19, 1.8446744072414937e+19, 1.844674407241494e+19, 1.8446744072421908e+19, 1.8446744072421929e+19, 1.8446744072421972e+19, 1.8446744072414765e+19, 1.8446744072421915e+19, 1.844674407242193e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.399769844Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.510990367Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 7961,
+        "user_stack_id": 2540,
+        "sample_count": 0,
+        "user_stack": [98495813657045, 128861464104964, 1.8969542504011095e+18],
+        "kern_stack": [1.8446744072418537e+19, 1.8446744072418537e+19, 1.8446744072418537e+19, 1.8446744072429113e+19, 1.8446744072429113e+19, 1.8446744072429113e+19, 1.844674407243025e+19, 1.8446744072430254e+19, 1.8446744072430547e+19, 1.844674407242899e+19, 1.8446744072421966e+19, 1.8446744072421937e+19, 1.8446744072421937e+19, 1.8446744072421992e+19, 1.844674407242193e+19, 1.844674407242193e+19, 1.844674407242193e+19, 1.8446744072421941e+19, 1.8446744072421941e+19, 1.8446744072413536e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.561532083Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": 4646,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072415975e+19, 1.8446744072415984e+19, 1.8446744072415523e+19, 1.8446744072432675e+19, 1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.60152563Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": 3552,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212],
+        "kern_stack": [1.8446744072432646e+19, 1.8446744072434483e+19]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.612053102Z",
+      "pid": 920085,
+      "comm": "Proactor1",
+      "data": {
+        "pid": 920085,
+        "comm": "Proactor1",
+        "kern_stack_id": -14,
+        "user_stack_id": 4814,
+        "sample_count": 0,
+        "user_stack": [98495813659998, 98495813318973, 98495813663343, 2216628212]
+      }
+    },
+    {
+      "type": "cpu_profile",
+      "timestamp": "2026-07-30T19:14:39.621697995Z",
+      "pid": 920084,
+      "comm": "Proactor0",
+      "data": {
+        "pid": 920084,
+        "comm": "Proactor0",
+        "kern_stack_id": -14,
+        "user_stack_id": 7373,
+        "sample_count": 0,
+        "user_stack": [98495813321928, 98495813579545, 98495813594068, 98495809007000, 98495809008362, 98495809013051, 98495813377213, 98495813378597, 98495813663343, 2216628212]
+      }
+    }
+  ],
+  "disk_report": {
+    "snapshot": {
+      "scanned_at": "2026-07-30T19:10:09.808007972Z",
+      "top10": [
+        {
+          "path": "/var/lib",
+          "size_bytes": 12250325470,
+          "file_count": 3680
+        },
+        {
+          "path": "/var/log",
+          "size_bytes": 4368178436,
+          "file_count": 332
+        },
+        {
+          "path": "/opt/kaspersky",
+          "size_bytes": 138394619,
+          "file_count": 60
+        },
+        {
+          "path": "/var/cache",
+          "size_bytes": 134819047,
+          "file_count": 296
+        },
+        {
+          "path": "/var/ossec",
+          "size_bytes": 23668177,
+          "file_count": 70
+        },
+        {
+          "path": "/opt/node_exporter",
+          "size_bytes": 9033415,
+          "file_count": 1
+        },
+        {
+          "path": "/var/backups",
+          "size_bytes": 2110823,
+          "file_count": 42
+        },
+        {
+          "path": "/home/levuong",
+          "size_bytes": 547419,
+          "file_count": 5
+        },
+        {
+          "path": "/var/opt",
+          "size_bytes": 144440,
+          "file_count": 28
+        },
+        {
+          "path": "/root/.config",
+          "size_bytes": 1669,
+          "file_count": 1
+        }
+      ]
+    }
+  },
+  "fsync_report": {
+    "type": "fsync_analysis",
+    "timestamp": "2026-07-30T19:13:34.793369359Z",
+    "system": {
+      "cpu_percent": 100,
+      "mem_percent": 15.1937636713348
+    },
+    "top_offenders": [
+      {
+        "pid": 1336405,
+        "comm": "auditd",
+        "cmdline": "/sbin/auditd",
+        "cgroup_path": "/system.slice/auditd.service",
+        "fsync_calls": 1644,
+        "avg_latency_ms": 3.6214906770073,
+        "max_latency_ms": 104.538564
+      }
+    ]
+  }
+}

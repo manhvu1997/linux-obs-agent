@@ -139,7 +139,10 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 	deviceBusy := ev.DeviceUtilPct >= t.HighUtilPercent
 	deviceIdle := ev.DeviceUtilPct < t.LowUtilPercent
 	lowThroughput := ev.DeviceMBPerSec < t.LowThroughputMBPerSec
-	realStall := ev.PSIAvailable && ev.PSIIOFullAvg10 >= t.PSIFullAvg10
+	// PSI is AUTHORITATIVE: io.full measures time in which no task could make
+	// progress. When it is high the machine is genuinely stalling, and no
+	// combination of "device looks idle" or "load is low" may override it.
+	psiSaysStalling := ev.PSIAvailable && ev.PSIIOFullAvg10 >= t.PSIFullAvg10
 	noStall := ev.PSIAvailable && ev.PSIIOSomeAvg10 < 1.0
 	// A device serving few requests but taking a long time over each one is
 	// slow by definition — independent evidence that does not depend on the
@@ -168,7 +171,7 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 	inStoragePath := matchesStoragePath(ev.TopBlockedWchan)
 	d.Chain = append(d.Chain, model.IOChainLink{
 		Stage:     "blocked_tasks",
-		Confirmed: ev.DStateCount > 0,
+		Confirmed: ev.DStateCount > 0 || ev.DStateBlockedSamplePct > 0,
 		Detail:    describeBlocked(m.DState, t.DStateStallMs),
 	})
 
@@ -203,7 +206,24 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 	inStorage := inStoragePath || stackInStoragePath
 
 	// ── Verdict ──────────────────────────────────────────────────────────
+	//
+	// Note the ordering: the PSI-driven cases come first so that a genuine
+	// stall can never fall through to the "accounting artifact" branch.
+	// Constant short blocking: most sub-samples caught something in D even
+	// though no single block was long. Typical of a synchronous userspace hook
+	// rather than a slow device.
+	constantBlocking := ev.DStateBlockedSamplePct >= 50.0
+
 	switch {
+	// Work genuinely could not proceed, but the block device is doing nothing.
+	// The wait is therefore not block I/O — look at fanotify hooks, network
+	// filesystems, or throttling.
+	case psiSaysStalling && deviceIdle && lowThroughput:
+		d.Verdict = model.VerdictStallWithoutDeviceIO
+		d.Confidence = confidence(true, offcpuReport != nil, ev.PSIAvailable)
+		d.Summary = stallWithoutDeviceSummary(ev, constantBlocking)
+		d.NextSteps = stallWithoutDeviceNextSteps(ev)
+
 	// The rule this package was built for: high iowait, device NOT moving
 	// data, tasks stuck for a long time in the storage path. The device is
 	// slow, not busy — adding IOPS capacity will not help.
@@ -213,7 +233,7 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 	// sufficient; the confidence field records how much corroboration there was.
 	case ev.IOWaitPercent >= t.IOWaitPercent && lowThroughput && ((longStall && inStorage) || slowDevice):
 		d.Verdict = model.VerdictStorageLatencyStall
-		d.Confidence = confidence(realStall, offcpuReport != nil, ev.PSIAvailable)
+		d.Confidence = confidence(psiSaysStalling, offcpuReport != nil, ev.PSIAvailable)
 		d.Summary = fmt.Sprintf(
 			"Storage LATENCY stall, not throughput: iowait %.1f%% while %s moved only %.2f MB/s at %.1f%% util "+
 				"(avg wait %.2f ms/request), longest blocked task %.1fs.",
@@ -229,7 +249,7 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 	// Dirty pages piling up: the stall is in the page cache, not the device.
 	case ev.DirtyRatioPct >= t.DirtyRatioPercent && ev.IOWaitPercent >= t.IOWaitPercent:
 		d.Verdict = model.VerdictWritebackCongestion
-		d.Confidence = confidence(realStall, offcpuReport != nil, ev.PSIAvailable)
+		d.Confidence = confidence(psiSaysStalling, offcpuReport != nil, ev.PSIAvailable)
 		d.Summary = fmt.Sprintf(
 			"Writeback congestion: %.1f%% of memory is dirty (%s) with %s under writeback; writers are being throttled in balance_dirty_pages.",
 			ev.DirtyRatioPct, humanBytes(ev.DirtyBytes), humanBytes(ev.WritebackBytes))
@@ -242,7 +262,7 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 	// Device genuinely saturated: this is a capacity problem.
 	case deviceBusy && !lowThroughput:
 		d.Verdict = model.VerdictHighDiskThroughput
-		d.Confidence = confidence(realStall, offcpuReport != nil, ev.PSIAvailable)
+		d.Confidence = confidence(psiSaysStalling, offcpuReport != nil, ev.PSIAvailable)
 		d.Summary = fmt.Sprintf(
 			"Device saturated: %s at %.1f%% util moving %.2f MB/s (avg wait %.2f ms). This is a capacity limit, not a latency fault.",
 			orNA(ev.BusiestDevice), ev.DeviceUtilPct, ev.DeviceMBPerSec, ev.DeviceAvgWaitMs)
@@ -253,14 +273,18 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 
 	// High iowait but nothing is actually stalled — the dragonfly/io_uring
 	// case. Idle CPU time relabelled because a task sits parked in D state.
-	case deviceIdle && lowThroughput && !longStall &&
-		(noStall || (ev.LoadNormalised < 1.0 && ev.DeviceInFlight == 0)):
+	// Genuinely nothing wrong. Requires PSI to agree, OR (when PSI is
+	// unavailable) every other signal to be quiet. Never reached while
+	// io.full is meaningful.
+	case !psiSaysStalling && deviceIdle && lowThroughput && !longStall && !constantBlocking &&
+		(noStall || (!ev.PSIAvailable && ev.LoadNormalised < 1.0 && ev.DeviceInFlight == 0)):
 		d.Verdict = model.VerdictIOWaitAccountingArtifact
 		d.Confidence = confidence(false, offcpuReport != nil, ev.PSIAvailable)
 		d.Summary = fmt.Sprintf(
-			"iowait %.1f%% is an accounting artifact, NOT an I/O problem: %s is idle (%.1f%% util, %.2f MB/s), "+
-				"load/cpu is %.2f and nothing blocked longer than %dms. The CPU was idle while a task sat parked in D state.",
-			ev.IOWaitPercent, orNA(ev.BusiestDevice), ev.DeviceUtilPct,
+			"iowait %.1f%% is an accounting artifact, NOT an I/O problem: PSI io.full is only %.1f%% "+
+				"(nothing was actually prevented from running), %s is idle (%.1f%% util, %.2f MB/s), "+
+				"load/cpu is %.2f and nothing blocked longer than %dms.",
+			ev.IOWaitPercent, ev.PSIIOFullAvg10, orNA(ev.BusiestDevice), ev.DeviceUtilPct,
 			ev.DeviceMBPerSec, ev.LoadNormalised, t.DStateStallMs)
 		d.NextSteps = []string{
 			"No action needed. iowait is idle time charged differently when any task on the runqueue is in D state.",
@@ -287,14 +311,25 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 
 func gatherEvidence(m model.NodeMetrics) model.IOEvidence {
 	ev := model.IOEvidence{
-		IOWaitPercent:  m.CPU.IOWaitPercent,
-		IdlePercent:    m.CPU.IdlePercent,
-		BlockedProcs:   m.CPU.BlockedProcs,
-		PSIAvailable:   m.Pressure.IO.Available,
-		DirtyBytes:     m.VMStat.DirtyBytes,
-		WritebackBytes: m.VMStat.WritebackBytes,
-		DirtyRatioPct:  m.VMStat.DirtyRatioPercent,
-		DStateCount:    m.DState.Count,
+		IOWaitPercent:          m.CPU.IOWaitPercent,
+		IdlePercent:            m.CPU.IdlePercent,
+		BlockedProcs:           m.CPU.BlockedProcs,
+		PSIAvailable:           m.Pressure.IO.Available,
+		DirtyBytes:             m.VMStat.DirtyBytes,
+		WritebackBytes:         m.VMStat.WritebackBytes,
+		DirtyRatioPct:          m.VMStat.DirtyRatioPercent,
+		DStateCount:            m.DState.Count,
+		DStateBlockedSamplePct: m.DState.BlockedSamplePercent,
+		BlockingFanotify:       m.BlockingHooks.BlockingCount,
+	}
+	if len(m.BlockingHooks.Fanotify) > 0 {
+		for _, h := range m.BlockingHooks.Fanotify {
+			if h.Blocking {
+				ev.BlockingHookComm = h.Comm
+				ev.BlockingHookPID = h.PID
+				break
+			}
+		}
 	}
 	if m.Pressure.IO.Available {
 		ev.PSIIOSomeAvg10 = m.Pressure.IO.Some.Avg10
@@ -354,13 +389,20 @@ func describeBlocked(c model.DStateCensus, stallMs int64) string {
 	if !c.Available {
 		return "D-state census disabled"
 	}
-	if c.Count == 0 {
+	if c.PeakCount == 0 {
+		if c.Samples > 0 {
+			return fmt.Sprintf("no tasks in uninterruptible sleep across %d sub-samples (%dms apart)",
+				c.Samples, c.SubSampledMs)
+		}
 		return "no tasks in uninterruptible sleep"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d task(s) in D state, longest %dms", c.Count, c.LongestMs)
+	fmt.Fprintf(&b, "peak %d task(s) in D, blocked in %.0f%% of %d sub-samples, longest %dms",
+		c.PeakCount, c.BlockedSamplePercent, c.Samples, c.LongestMs)
 	if c.LongestMs >= stallMs {
-		b.WriteString(" (STALL)")
+		b.WriteString(" (LONG STALL)")
+	} else if c.BlockedSamplePercent >= 50 {
+		b.WriteString(" (CONSTANT SHORT BLOCKING)")
 	}
 	shown := 0
 	for _, t := range c.Tasks {
@@ -371,11 +413,11 @@ func describeBlocked(c model.DStateCensus, stallMs int64) string {
 		if t.KernelThread {
 			kind = " [kthread]"
 		}
-		fmt.Fprintf(&b, "; %s(%d)%s", t.Comm, t.PID, kind)
+		fmt.Fprintf(&b, "; %s(tid %d, pid %d)%s", t.Comm, t.TID, t.PID, kind)
 		if t.Wchan != "" {
 			fmt.Fprintf(&b, " wchan=%s", t.Wchan)
 		}
-		fmt.Fprintf(&b, " %dms", t.InDStateMs)
+		fmt.Fprintf(&b, " %dms/%.0f%%", t.InDStateMs, t.ObservedPercent)
 		shown++
 	}
 	return b.String()
@@ -431,3 +473,57 @@ func humanBytes(b uint64) string {
 }
 
 func round2(f float64) float64 { return math.Round(f*100) / 100 }
+
+// stallWithoutDeviceSummary explains a genuine stall that the block device
+// cannot account for.
+func stallWithoutDeviceSummary(ev model.IOEvidence, constantBlocking bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b,
+		"REAL stall, but NOT block I/O: PSI io.full is %.1f%% (work genuinely could not proceed) "+
+			"while %s is idle — %.1f%% util, %.2f MB/s, in-flight %d.",
+		ev.PSIIOFullAvg10, orNA(ev.BusiestDevice), ev.DeviceUtilPct,
+		ev.DeviceMBPerSec, ev.DeviceInFlight)
+
+	if ev.BlockingFanotify > 0 {
+		fmt.Fprintf(&b,
+			" Most likely cause: %s (pid %d) holds a fanotify descriptor in PERMISSION mode — "+
+				"every file access waits for its verdict in D state, producing iowait with no disk traffic.",
+			orNA(ev.BlockingHookComm), ev.BlockingHookPID)
+	} else if constantBlocking {
+		fmt.Fprintf(&b,
+			" Something was blocked in %.0f%% of sub-samples yet the longest single block was only %dms — "+
+				"constant SHORT blocking, which points at a synchronous hook rather than a slow device.",
+			ev.DStateBlockedSamplePct, ev.DStateLongestMs)
+	}
+	if ev.TopBlockedWchan != "" {
+		fmt.Fprintf(&b, " Longest blocked task: %s waiting in %s.",
+			orNA(ev.TopBlockedComm), ev.TopBlockedWchan)
+	}
+	return b.String()
+}
+
+// stallWithoutDeviceNextSteps orders the candidate causes by how often each
+// turns out to be the answer, and names the concrete check for each.
+func stallWithoutDeviceNextSteps(ev model.IOEvidence) []string {
+	steps := make([]string, 0, 5)
+
+	if ev.BlockingFanotify > 0 {
+		steps = append(steps,
+			fmt.Sprintf("PRIMARY SUSPECT: %s (pid %d) is intercepting file access via fanotify permission events. "+
+				"Confirm with: cat /proc/%d/fdinfo/* | grep fanotify",
+				orNA(ev.BlockingHookComm), ev.BlockingHookPID, ev.BlockingHookPID),
+			"If it is an on-access antivirus scanner, exclude the hot data directories from real-time scanning "+
+				"(for a database this is usually its entire data dir) and re-measure.")
+	} else {
+		steps = append(steps,
+			"Check for an on-access scanner or audit agent: grep -l fanotify /proc/*/fdinfo/* 2>/dev/null")
+	}
+
+	steps = append(steps,
+		"Check for network/FUSE filesystems, whose latency never appears in /proc/diskstats: "+
+			"findmnt -t nfs,nfs4,cifs,fuse.* ; and for cgroup throttling: cat /sys/fs/cgroup/**/io.max",
+		"Attribute it precisely: GET /api/profile?pid=<pid>&mode=offcpu&format=folded — "+
+			"the blocking stack names the exact wait.",
+		"Alert on pressure.io.full.avg10 rather than cpu.iowait_percent; this condition is invisible to disk metrics.")
+	return steps
+}
