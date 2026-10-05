@@ -391,6 +391,21 @@ type MySQLConfig struct {
 	StaleSeconds int `yaml:"stale_seconds"`
 	// MaxRecentQueries: max slow-query events to keep in the recent ring.
 	MaxRecentQueries int `yaml:"max_recent_queries"`
+
+	// EmitAllQueries emits one kernel event per command (needed for digests).
+	// Default true. Env MYSQL_EMIT_ALL_QUERIES. false = legacy slow-only mode.
+	EmitAllQueries bool `yaml:"emit_all_queries"`
+	// DigestWindow: rolling window for top_digests. Env MYSQL_DIGEST_WINDOW.
+	DigestWindow time.Duration `yaml:"digest_window"`
+	// TopDigests: digests in mysql_report.top_digests (ranked by total CPU).
+	TopDigests int `yaml:"top_digests"`
+	// StickyDigestsMax / StickyDigestTTL bound the digests exported to Prometheus.
+	StickyDigestsMax int           `yaml:"sticky_digests_max"`
+	StickyDigestTTL  time.Duration `yaml:"sticky_digest_ttl"`
+	// CulpritCPUSharePercent: digest share of mysqld query CPU that marks it "culprit".
+	CulpritCPUSharePercent float64 `yaml:"culprit_cpu_share_percent"`
+	// VictimRunqRatio: run-queue wait > cpu × ratio (and wall ≥ slow threshold) marks "victim".
+	VictimRunqRatio float64 `yaml:"victim_runq_ratio"`
 }
 
 // Defaults returns a Config with sensible production defaults.
@@ -518,6 +533,14 @@ func Defaults() *Config {
 			TopN:                 20,
 			StaleSeconds:         60,
 			MaxRecentQueries:     100,
+
+			EmitAllQueries:         true,
+			DigestWindow:           60 * time.Second,
+			TopDigests:             20,
+			StickyDigestsMax:       50,
+			StickyDigestTTL:        time.Hour,
+			CulpritCPUSharePercent: 20,
+			VictimRunqRatio:        5,
 		},
 		Netflow: NetflowConfig{
 			Enabled:               true,
@@ -602,6 +625,14 @@ func applyMySQLEnvOverrides(cfg *Config) {
 	if v := os.Getenv("MYSQL_MYSQLD_PATH"); v != "" {
 		cfg.MySQL.MysqldPath = v
 	}
+	if v := os.Getenv("MYSQL_EMIT_ALL_QUERIES"); v != "" {
+		cfg.MySQL.EmitAllQueries = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("MYSQL_DIGEST_WINDOW"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.MySQL.DigestWindow = d
+		}
+	}
 }
 
 // applyNetflowEnvOverrides:
@@ -672,6 +703,17 @@ func applyProfileEnvOverrides(cfg *Config) {
 }
 
 func (c *Config) validate() error {
+	if c.MySQL.Enabled {
+		if c.MySQL.DigestWindow < c.MySQL.PollInterval {
+			return fmt.Errorf("mysql.digest_window must be >= mysql.poll_interval")
+		}
+		if c.MySQL.TopDigests <= 0 || c.MySQL.StickyDigestsMax <= 0 || c.MySQL.StickyDigestTTL <= 0 {
+			return fmt.Errorf("mysql.top_digests, sticky_digests_max and sticky_digest_ttl must be > 0")
+		}
+		if c.MySQL.CulpritCPUSharePercent <= 0 || c.MySQL.VictimRunqRatio <= 0 {
+			return fmt.Errorf("mysql.culprit_cpu_share_percent and victim_runq_ratio must be > 0")
+		}
+	}
 	if c.Netflow.Enabled {
 		if c.Netflow.PollInterval <= 0 || c.Netflow.Window < c.Netflow.PollInterval {
 			return fmt.Errorf("netflow.window must be >= netflow.poll_interval > 0")

@@ -48,3 +48,18 @@ func TestNetflowEnvOverride(t *testing.T) {
 		t.Fatalf("env overrides not applied: %+v", c.Netflow)
 	}
 }
+
+func TestMySQLDigestDefaults(t *testing.T) {
+	m := Defaults().MySQL
+	if m.Enabled || !m.EmitAllQueries || m.DigestWindow != 60*time.Second || m.TopDigests != 20 ||
+		m.StickyDigestsMax != 50 || m.StickyDigestTTL != time.Hour ||
+		m.CulpritCPUSharePercent != 20 || m.VictimRunqRatio != 5 {
+		t.Fatalf("mysql defaults = %+v", m)
+	}
+	c := Defaults()
+	c.MySQL.Enabled = true
+	c.MySQL.DigestWindow = time.Second
+	if err := c.validate(); err == nil {
+		t.Fatal("digest_window < poll_interval must be rejected when mysql is enabled")
+	}
+}

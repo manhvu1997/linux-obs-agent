@@ -24,6 +24,8 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	mysqlq "github.com/manhvu1997/linux-obs-agent/internal/ebpf/mysql_query"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
+	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 )
 
 // Analyzer owns the mysql_query eBPF loader and produces MySQLAnalysis snapshots.
@@ -31,6 +33,10 @@ type Analyzer struct {
 	cfg    *config.MySQLConfig
 	coll   *collector.Collector
 	loader *mysqlq.Loader
+
+	agg     *querystats.Aggregator
+	digests atomic.Pointer[querystats.Snapshot]
+	started atomic.Bool
 
 	// latest stores a *model.MySQLAnalysis; updated atomically.
 	latest atomic.Pointer[model.MySQLAnalysis]
@@ -48,7 +54,17 @@ func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 	return &Analyzer{
 		cfg:    cfg,
 		coll:   coll,
-		loader: mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, false),
+		loader: mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, cfg.EmitAllQueries),
+		agg: querystats.New(querystats.Config{
+			Window:                 cfg.DigestWindow,
+			TopN:                   cfg.TopDigests,
+			TopNBytes:              10,
+			CulpritCPUSharePercent: cfg.CulpritCPUSharePercent,
+			VictimRunqRatio:        cfg.VictimRunqRatio,
+			SlowWallNs:             thresholdNs,
+			StickyMax:              cfg.StickyDigestsMax,
+			StickyTTL:              cfg.StickyDigestTTL,
+		}),
 	}
 }
 
@@ -71,9 +87,12 @@ func (a *Analyzer) Start(ctx context.Context) error {
 		return err
 	}
 	defer a.loader.Stop()
+	a.started.Store(true)
+	defer a.started.Store(false)
 
 	// Drain slow-event ringbuf in background (only outliers, low volume).
 	go a.drainSlowEvents(ctx)
+	go a.drainCmdEvents(ctx)
 
 	tick := time.NewTicker(a.cfg.PollInterval)
 	defer tick.Stop()
@@ -94,15 +113,49 @@ func (a *Analyzer) Latest() *model.MySQLAnalysis {
 	return a.latest.Load()
 }
 
+// DigestSnapshot returns the latest digest snapshot (nil before the first
+// poll). Used by the Prometheus collector.
+func (a *Analyzer) DigestSnapshot() *querystats.Snapshot { return a.digests.Load() }
+
+// Dropped returns lost per-command events; 0 when the tracer is not running.
+func (a *Analyzer) Dropped() uint64 {
+	if !a.started.Load() {
+		return 0
+	}
+	return a.loader.Dropped()
+}
+
+// drainCmdEvents feeds every measured command into the digest aggregator.
+func (a *Analyzer) drainCmdEvents(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-a.loader.CmdEvents:
+			if !ok {
+				return
+			}
+			class, d, sample, trunc := cmdmap.Classify(ev.Command, ev.Query, ev.QueryLen)
+			a.agg.Add(querystats.Event{
+				PID: ev.PID, Command: class, Digest: d, SampleQuery: sample, Truncated: trunc,
+				WallNs: ev.WallNs, CPUNs: ev.CPUNs, RunqNs: ev.RunqNs,
+				BytesIn: ev.BytesIn, BytesOut: ev.BytesOut, At: time.Now(),
+			})
+		}
+	}
+}
+
 // ─── Internal ─────────────────────────────────────────────────────────────────
 
 // poll reads the LRU map, enriches each PID, and publishes a new snapshot.
 // Always publishes when there is data (no CPU/mem pressure gate).
 func (a *Analyzer) poll() {
+	snap := a.agg.Snapshot(time.Now())
+	a.digests.Store(&snap)
+
 	staleNs := uint64(a.cfg.StaleSeconds) * uint64(time.Second)
 	raw := a.loader.TopSlowPIDs(a.cfg.TopN, staleNs)
-
-	if len(raw) == 0 {
+	if len(raw) == 0 && len(snap.TopByCPU) == 0 {
 		return
 	}
 
@@ -137,12 +190,20 @@ func (a *Analyzer) poll() {
 		MysqldPath:        a.cfg.MysqldPath,
 		RecentSlowQueries: recent,
 		TopProcesses:      processes,
+
+		WindowSeconds:        snap.WindowSeconds,
+		CPUAccounting:        snap.CPUAccounting,
+		DroppedEvents:        a.loader.Dropped(),
+		Thresholds:           &snap.Thresholds,
+		TopDigests:           snap.TopByCPU,
+		TopDigestsByBytesOut: snap.TopByBytesOut,
 	}
 
 	a.latest.Store(analysis)
 	slog.Debug("mysql: analysis updated",
 		"processes", len(processes),
 		"recent_slow", len(recent),
+		"digests", len(snap.TopByCPU),
 	)
 }
 

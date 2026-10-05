@@ -978,6 +978,14 @@ type MySQLAnalysis struct {
 	MysqldPath        string              `json:"mysqld_path"`
 	RecentSlowQueries []MySQLSlowEvent    `json:"recent_slow_queries"`
 	TopProcesses      []MySQLProcessStats `json:"top_processes"`
+
+	// Query digests (present when mysql.emit_all_queries is on).
+	WindowSeconds        int                  `json:"window_seconds,omitempty"`
+	CPUAccounting        string               `json:"cpu_accounting,omitempty"` // "ok" | "run_delay_unavailable"
+	DroppedEvents        uint64               `json:"dropped_events"`
+	Thresholds           *QueryRoleThresholds `json:"thresholds,omitempty"`
+	TopDigests           []QueryDigestStats   `json:"top_digests,omitempty"` // by total CPU
+	TopDigestsByBytesOut []QueryDigestStats   `json:"top_digests_by_bytes_out,omitempty"`
 }
 
 // ─── DB Inspector (sidecar) ───────────────────────────────────────────────────
