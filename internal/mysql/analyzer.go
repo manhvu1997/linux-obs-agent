@@ -48,7 +48,7 @@ func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 	return &Analyzer{
 		cfg:    cfg,
 		coll:   coll,
-		loader: mysqlq.NewLoader(thresholdNs, cfg.MysqldPath),
+		loader: mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, false),
 	}
 }
 

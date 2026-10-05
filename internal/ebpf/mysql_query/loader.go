@@ -13,14 +13,20 @@
 //  1. uprobe  dispatch_command – record start timestamp + SQL text on entry
 //  2. uretprobe dispatch_command – compute latency on return, emit if slow
 //
-// Only COM_QUERY commands (command type == 3) are traced; all other MySQL
-// internal commands are filtered out at the uprobe level.
+// Every command is measured (wall, on-CPU, run-queue wait, bytes) and emitted
+// on cmd_events; COM_QUERY additionally feeds the per-PID stats map and
+// slow-query events. With emitAll == false only COM_QUERY is tracked and no
+// per-command events are emitted (legacy behaviour).
+//
+// Result bytes come from optional kretprobes on tcp_sendmsg and
+// unix_stream_sendmsg; when either symbol is unavailable bytes_out stays 0.
 //
 // # Lifecycle
 //
-//	l := NewLoader(100_000_000, "/usr/sbin/mysqld")  // 100ms threshold
-//	err := l.Start(ctx)                              // attach uprobes, start consumer
-//	stats := l.TopSlowPIDs(10, 0)                   // poll every 5 s
+//	l := NewLoader(100_000_000, "/usr/sbin/mysqld", true) // 100ms threshold
+//	err := l.Start(ctx)                                    // attach probes, start consumers
+//	stats := l.TopSlowPIDs(10, 0)                         // poll every 5 s
+//	ev := <-l.CmdEvents                                   // one per command
 //	l.Stop()
 package mysql_query
 
@@ -35,8 +41,10 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -49,21 +57,72 @@ import (
 type Loader struct {
 	thresholdNs uint64
 	mysqldPath  string // absolute path to the mysqld binary
+	emitAll     bool
 
-	objs  MysqlQueryObjects
-	links []link.Link
-	rd    *ringbuf.Reader
+	objs        MysqlQueryObjects
+	links       []link.Link
+	rd          *ringbuf.Reader
+	cmdRd       *ringbuf.Reader
+	userDropped atomic.Uint64
 
 	// SlowEvents receives slow-query outlier events (latency > threshold).
 	// Buffered to 256 so the consume goroutine never blocks the ringbuf reader.
 	SlowEvents chan model.EBPFEvent
+
+	// CmdEvents receives one record per dispatch_command call when emitAll
+	// is set. Buffered; when full, events are dropped and counted.
+	CmdEvents chan CmdEvent
+}
+
+// CmdEvent is one MySQL command measured in the kernel.
+type CmdEvent struct {
+	PID, TID, Command, QueryLen uint32
+	WallNs, CPUNs, RunqNs       uint64
+	BytesIn, BytesOut           uint64
+	Comm, Query                 string
+}
+
+const cmdEventSize = 584 // sizeof(struct mysql_cmd_event_t)
+
+// decodeCmdEvent reads struct mysql_cmd_event_t by fixed offsets. At up to
+// 20k events/s, reflection-based binary.Read would cost several percent of
+// a core; this costs a few hundred nanoseconds.
+func decodeCmdEvent(b []byte) (CmdEvent, bool) {
+	if len(b) < cmdEventSize {
+		return CmdEvent{}, false
+	}
+	le := binary.LittleEndian
+	return CmdEvent{
+		PID: le.Uint32(b[0:]), TID: le.Uint32(b[4:]), Command: le.Uint32(b[8:]), QueryLen: le.Uint32(b[12:]),
+		WallNs: le.Uint64(b[16:]), CPUNs: le.Uint64(b[24:]), RunqNs: le.Uint64(b[32:]),
+		BytesIn: le.Uint64(b[40:]), BytesOut: le.Uint64(b[48:]),
+		Comm:  nullTermU8(b[56:72]),
+		Query: nullTermU8(b[72:cmdEventSize]),
+	}, true
+}
+
+// Dropped returns command events lost in the kernel (ring buffer full) plus
+// events dropped because CmdEvents was full. Safe to call before Start.
+func (l *Loader) Dropped() uint64 {
+	total := l.userDropped.Load()
+	var perCPU []uint64
+	if l.objs.Dropped != nil {
+		if err := l.objs.Dropped.Lookup(uint32(0), &perCPU); err == nil {
+			for _, v := range perCPU {
+				total += v
+			}
+		}
+	}
+	return total
 }
 
 // NewLoader creates a Loader.
 //   - thresholdNs: minimum query latency in nanoseconds that triggers a ringbuf
 //     event (0 → default 100 000 000 ns = 100 ms).
 //   - mysqldPath: absolute path to the mysqld binary (0 → "/usr/sbin/mysqld").
-func NewLoader(thresholdNs uint64, mysqldPath string) *Loader {
+//   - emitAll: measure every command and emit it on CmdEvents; false keeps the
+//     legacy COM_QUERY-only stats + slow events.
+func NewLoader(thresholdNs uint64, mysqldPath string, emitAll bool) *Loader {
 	if thresholdNs == 0 {
 		thresholdNs = 100_000_000 // 100 ms
 	}
@@ -73,7 +132,9 @@ func NewLoader(thresholdNs uint64, mysqldPath string) *Loader {
 	return &Loader{
 		thresholdNs: thresholdNs,
 		mysqldPath:  mysqldPath,
+		emitAll:     emitAll,
 		SlowEvents:  make(chan model.EBPFEvent, 256),
+		CmdEvents:   make(chan CmdEvent, 8192),
 	}
 }
 
@@ -93,6 +154,13 @@ func (l *Loader) Start(ctx context.Context) error {
 	if err := spec.Variables["slow_query_threshold_ns"].Set(l.thresholdNs); err != nil {
 		slog.Warn("mysql_query: could not set slow_query_threshold_ns", "err", err)
 	}
+	var emit uint8
+	if l.emitAll {
+		emit = 1
+	}
+	if err := spec.Variables["emit_all_queries"].Set(emit); err != nil {
+		slog.Warn("mysql_query: could not set emit_all_queries", "err", err)
+	}
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return fmt.Errorf("mysql_query: loading eBPF objects: %w", err)
 	}
@@ -104,6 +172,13 @@ func (l *Loader) Start(ctx context.Context) error {
 		return fmt.Errorf("mysql_query: opening ringbuf: %w", err)
 	}
 	l.rd = rd
+
+	cmdRd, err := ringbuf.NewReader(l.objs.CmdEvents)
+	if err != nil {
+		l.cleanup()
+		return fmt.Errorf("mysql_query: opening cmd ringbuf: %w", err)
+	}
+	l.cmdRd = cmdRd
 
 	// Open the mysqld executable for uprobe attachment.
 	// link.OpenExecutable resolves the binary's build-ID from the ELF headers,
@@ -141,12 +216,30 @@ func (l *Loader) Start(ctx context.Context) error {
 	}
 	l.links = append(l.links, urp)
 
+	// Result bytes per command. Optional: without them bytes_out stays 0.
+	for _, fn := range []struct {
+		sym  string
+		prog *ebpf.Program
+	}{
+		{"tcp_sendmsg", l.objs.KretprobeTcpSendmsg},
+		{"unix_stream_sendmsg", l.objs.KretprobeUnixStreamSendmsg},
+	} {
+		krp, err := link.Kretprobe(fn.sym, fn.prog, nil)
+		if err != nil {
+			slog.Warn("mysql_query: bytes_out hook unavailable", "symbol", fn.sym, "err", err)
+			continue
+		}
+		l.links = append(l.links, krp)
+	}
+
 	slog.Info("mysql_query: started",
 		"threshold_ns", l.thresholdNs,
 		"mysqld_path", l.mysqldPath,
 		"symbol", symbol,
+		"emit_all", l.emitAll,
 		"hooks", "uprobe+uretprobe/dispatch_command")
 	go l.consume(ctx)
+	go l.consumeCmd(ctx)
 	return nil
 }
 
@@ -164,6 +257,10 @@ func (l *Loader) cleanup() {
 	if l.rd != nil {
 		l.rd.Close()
 		l.rd = nil
+	}
+	if l.cmdRd != nil {
+		l.cmdRd.Close()
+		l.cmdRd = nil
 	}
 	l.objs.Close()
 }
@@ -287,6 +384,35 @@ func (l *Loader) consume(ctx context.Context) {
 	}
 }
 
+// consumeCmd forwards per-command events. Never blocks the reader: a full
+// channel drops the event and counts it in Dropped().
+func (l *Loader) consumeCmd(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		rec, err := l.cmdRd.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				return
+			}
+			slog.Warn("mysql_query: cmd ringbuf read error", "err", err)
+			continue
+		}
+		ev, ok := decodeCmdEvent(rec.RawSample)
+		if !ok {
+			continue
+		}
+		select {
+		case l.CmdEvents <- ev:
+		default:
+			l.userDropped.Add(1)
+		}
+	}
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // nullTermU8 converts a null-terminated uint8 slice to a Go string.
@@ -367,4 +493,3 @@ func findCPPSymbol(binaryPath, substr string) (string, error) {
 	}
 	return "", fmt.Errorf("no function symbol containing %q found in %s", substr, binaryPath)
 }
-

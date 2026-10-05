@@ -7,8 +7,10 @@
 //   - Always-on, bounded memory: LRU map auto-evicts least-recently-used PIDs.
 //   - Trace the MySQL SERVER, not the client: attach uprobes to dispatch_command
 //     inside the running mysqld binary.
-//   - Only intercept COM_QUERY commands (command type 3) – skip all internal
-//     MySQL commands (ping, statistics, quit, etc.) that are not user queries.
+//   - Measure every command; COM_QUERY also feeds the legacy per-PID stats
+//     and slow events. Per command: wall time, on-CPU time, run-queue wait and
+//     result bytes, emitted once on the cmd_events ring buffer. With
+//     emit_all_queries == 0 only COM_QUERY is tracked (legacy behaviour).
 //   - Read the SQL query text directly from the COM_DATA argument at function
 //     entry — no wire-protocol parsing required, works with TLS connections.
 //   - Filter early (in kernel) to reduce overhead: only emit ringbuf events when
@@ -17,6 +19,10 @@
 // Hooks attached (uprobes on mysqld binary):
 //   uprobe/dispatch_command   – record start time + query text at entry
 //   uretprobe/dispatch_command – compute latency, update LRU stats, emit if slow
+//
+// Hooks attached (kretprobes, optional):
+//   kretprobe/tcp_sendmsg, kretprobe/unix_stream_sendmsg – result bytes sent
+//     by a thread while it is inside dispatch_command
 //
 // MySQL dispatch_command signature (MySQL 5.7+ / 8.0, x86-64 SysV ABI):
 //   bool dispatch_command(THD *thd, const COM_DATA *com_data,
@@ -65,265 +71,291 @@ struct x86_regs {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 #define TASK_COMM_LEN    16
-#define QUERY_MAX       256   /* max SQL bytes captured (truncated if longer) */
-#define MAX_ENTRIES   65536   /* in-flight pending entries                    */
-#define MAX_PID_ENTRIES 10240 /* LRU per-PID stats (auto-evicts oldest)       */
-
-/*
- * COM_QUERY = 3: the only command type that carries a user SQL statement.
- * All other commands (COM_PING, COM_QUIT, COM_STATISTICS, etc.) are skipped
- * at the uprobe entry to keep overhead near zero.
- */
+#define QUERY_MAX       512   /* must equal cmdmap.QueryMax in Go            */
+#define MAX_ENTRIES     8192  /* in-flight commands ≤ mysqld worker threads   */
+#define MAX_PID_ENTRIES 10240
 #define COM_QUERY 3
 
 // ─── Value structs ────────────────────────────────────────────────────────────
 
-/*
- * mysql_pending_t: in-flight query state recorded at uprobe entry.
- * Keyed by kernel TID (one entry per active dispatch_command call).
- * Deleted in the matching uretprobe so the map stays bounded.
- */
+/* In-flight command state, keyed by TID. 576 bytes: built in pending_scratch
+ * because it does not fit the 512-byte BPF stack. */
 struct mysql_pending_t {
-    __u64 start_ts;               /* bpf_ktime_get_ns() at uprobe entry     */
-    __u8  query[QUERY_MAX];       /* SQL text (NUL-terminated, may truncate) */
-    __u8  comm[TASK_COMM_LEN];    /* mysqld thread comm name                 */
-};
-
-/*
- * mysql_pid_stats_t: per-PID aggregated query statistics stored in the LRU map.
- * Monotonically increasing counters updated atomically.
- * Exported via bpf2go -type for map iteration in userspace.
- */
-struct mysql_pid_stats_t {
-    __u64 total_queries;     /* all COM_QUERY calls observed on this PID       */
-    __u64 slow_queries;      /* queries exceeding slow_query_threshold_ns      */
-    __u64 total_latency_ns;  /* sum of all query latencies                     */
-    __u64 max_latency_ns;    /* worst single-query latency                     */
-    __u64 last_seen_ts;      /* bpf_ktime_get_ns() of last update              */
+    __u64 start_ts;
+    __u64 cpu_start;   /* task->se.sum_exec_runtime at entry  */
+    __u64 rq_start;    /* task->sched_info.run_delay at entry */
+    __u64 bytes_in;    /* COM_QUERY length                    */
+    __u64 bytes_out;   /* tcp/unix sendmsg bytes during call   */
+    __u32 command;
+    __u32 query_len;
+    __u8  query[QUERY_MAX];
     __u8  comm[TASK_COMM_LEN];
 };
+_Static_assert(sizeof(struct mysql_pending_t) == 576, "pending layout");
 
-/* Force BTF emission for bpf2go -type. */
+struct mysql_pid_stats_t {
+    __u64 total_queries;
+    __u64 slow_queries;
+    __u64 total_latency_ns;
+    __u64 max_latency_ns;
+    __u64 last_seen_ts;
+    __u8  comm[TASK_COMM_LEN];
+};
 struct mysql_pid_stats_t *__mysql_pid_stats_t_unused __attribute__((unused));
 
-/*
- * mysql_slow_event_t: ringbuf event emitted for each slow query.
- * Contains all information needed for a useful /api/diagnose entry.
- * Exported via bpf2go -type for binary.Read in userspace.
- */
 struct mysql_slow_event_t {
-    __u32 pid;                 /* userspace PID (thread-group leader)          */
-    __u32 tid;                 /* kernel TID of the mysqld worker thread       */
-    __u64 latency_ns;          /* query duration in nanoseconds                */
-    __u64 timestamp_ns;        /* bpf_ktime_get_ns() at dispatch_command exit  */
-    __u8  comm[TASK_COMM_LEN]; /* mysqld thread comm (always "mysqld")         */
-    __u8  query[QUERY_MAX];    /* SQL text (NUL-terminated, may be truncated)  */
+    __u32 pid;
+    __u32 tid;
+    __u64 latency_ns;
+    __u64 timestamp_ns;
+    __u8  comm[TASK_COMM_LEN];
+    __u8  query[QUERY_MAX];
 };
-
-/* Force BTF emission for bpf2go -type. */
 struct mysql_slow_event_t *__mysql_slow_event_t_unused __attribute__((unused));
+
+/* One record per dispatch_command call. Layout is decoded by hand in
+ * loader.go (decodeCmdEvent) — keep offsets in sync: 584 bytes, no padding. */
+struct mysql_cmd_event_t {
+    __u32 pid;          /*   0 */
+    __u32 tid;          /*   4 */
+    __u32 command;      /*   8 */
+    __u32 query_len;    /*  12 */
+    __u64 wall_ns;      /*  16 */
+    __u64 cpu_ns;       /*  24 */
+    __u64 runq_ns;      /*  32 */
+    __u64 bytes_in;     /*  40 */
+    __u64 bytes_out;    /*  48 */
+    __u8  comm[TASK_COMM_LEN];  /* 56 */
+    __u8  query[QUERY_MAX];     /* 72 */
+};
+_Static_assert(sizeof(struct mysql_cmd_event_t) == 584, "cmd event layout");
+/* Force BTF emission for bpf2go -type. */
+struct mysql_cmd_event_t *__mysql_cmd_event_t_unused __attribute__((unused));
 
 // ─── Maps ─────────────────────────────────────────────────────────────────────
 
-/*
- * mysql_pending: in-flight query state keyed by kernel TID.
- * Entries are created in the uprobe and always deleted in the uretprobe –
- * no stale growth even at high query rates.
- */
+/* In-flight commands keyed by TID; always deleted in the uretprobe. */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key,   __u32);  /* kernel TID */
+    __type(key, __u32);
     __type(value, struct mysql_pending_t);
     __uint(max_entries, MAX_ENTRIES);
 } mysql_pending SEC(".maps");
 
-/*
- * mysql_pid_stats: per-PID aggregated stats.
- * LRU_HASH auto-evicts when full so memory is bounded regardless of PID churn.
- */
+/* Per-CPU scratch slot: mysql_pending_t (576 B) exceeds the 512-B stack. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, struct mysql_pending_t);
+    __uint(max_entries, 1);
+} pending_scratch SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __type(key,   __u32);  /* tgid (userspace PID) */
+    __type(key, __u32);
     __type(value, struct mysql_pid_stats_t);
     __uint(max_entries, MAX_PID_ENTRIES);
 } mysql_pid_stats SEC(".maps");
 
-/*
- * events: ringbuf for slow-query outlier notifications.
- * 256 KB ≈ 1 000 events before consumer must drain.
- * Events are dropped (not blocking) when the buffer is full.
- */
+/* Slow-query outliers (unchanged consumer). */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 18); /* 256 KB */
 } events SEC(".maps");
 
+/* Every command: < 20k QPS × 584 B ≈ 12 MB/s; 4 MB absorbs ~7k-event bursts. */
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 22); /* 4 MB */
+} cmd_events SEC(".maps");
+
+/* cmd_events reservations that failed (ring buffer full), per CPU. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, 1);
+} dropped SEC(".maps");
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-/*
- * slow_query_threshold_ns: emit a ringbuf event only when a single query takes
- * longer than this duration (nanoseconds).  Default 100 000 000 ns = 100 ms.
- * Override from Go before loading: spec.Variables["slow_query_threshold_ns"].Set(v).
- */
 const volatile __u64 slow_query_threshold_ns = 100000000ULL;
+/* 1: emit cmd_events for every command. 0: legacy COM_QUERY-only behaviour. */
+const volatile __u8 emit_all_queries = 1;
 
-// ─── Uprobe programs ──────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+static __always_inline __u64 task_cpu_ns(struct task_struct *t)
+{
+    return BPF_CORE_READ(t, se.sum_exec_runtime);
+}
+
+/* sched_info exists only with CONFIG_SCHED_INFO; report 0 otherwise and let
+ * userspace detect "run_delay_unavailable". */
+static __always_inline __u64 task_runq_ns(struct task_struct *t)
+{
+    if (bpf_core_field_exists(t->sched_info.run_delay))
+        return BPF_CORE_READ(t, sched_info.run_delay);
+    return 0;
+}
+
+// ─── Programs ─────────────────────────────────────────────────────────────────
 
 /*
- * uprobe_dispatch_command: fires at the entry of dispatch_command in mysqld.
- *
- * Reads the command type from RDX (third argument).  Only proceeds for
- * COM_QUERY (== 3) to avoid any overhead on internal MySQL commands.
- *
- * For COM_QUERY, reads the SQL text from the COM_DATA union:
- *   - com_data is RSI (second argument), a pointer to COM_DATA in userspace.
- *   - COM_DATA union offset 0 == COM_QUERY_DATA.query_str (a char * pointer).
- *   - bpf_probe_read_user_str copies the SQL into the pending map entry,
- *     NUL-terminates it, and silently truncates at QUERY_MAX bytes.
- *
- * Stack budget: pending(272) + comm/query inline into map = ~80 bytes total.
+ * Entry: x86-64 SysV ABI, dispatch_command(THD *thd, const COM_DATA *com_data,
+ * enum_server_command command): RSI = com_data, RDX = command. See the
+ * struct x86_regs comment for why ctx is cast instead of PT_REGS_PARM*.
  */
 SEC("uprobe/dispatch_command")
 int uprobe_dispatch_command(struct pt_regs *ctx)
 {
-    /*
-     * Cast ctx to struct x86_regs to read x86-64 argument registers.
-     *
-     * We cannot use PT_REGS_PARM* or PT_REGS_PARM*_CORE: both expand to
-     * short aliases ("dx", "si") that only exist in the kernel-internal
-     * definition of pt_regs, not in vmlinux.h.  We also cannot access
-     * ctx->rdx / ctx->rsi directly when vmlinux.h was generated from an
-     * ARM64 kernel (e.g. Docker on macOS Apple Silicon), because that
-     * pt_regs has no such fields.
-     *
-     * struct x86_regs is defined locally (above) with the exact x86-64
-     * push order, so the compiler resolves rdx/rsi without any vmlinux.h
-     * dependency.
-     *
-     * x86-64 SysV ABI:   RDI=arg1  RSI=arg2  RDX=arg3
-     * dispatch_command:  RDI=thd   RSI=com_data  RDX=command
-     */
     struct x86_regs *regs = (struct x86_regs *)ctx;
     __u32 command = (__u32)regs->rdx;
-    if (command != COM_QUERY)
+    if (!emit_all_queries && command != COM_QUERY)
         return 0;
 
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 tid      = (__u32)(pid_tgid & 0xffffffffULL);
+    __u32 tid = (__u32)bpf_get_current_pid_tgid();
+    __u32 zero = 0;
+    struct mysql_pending_t *p = bpf_map_lookup_elem(&pending_scratch, &zero);
+    if (!p)
+        return 0;
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
 
-    struct mysql_pending_t pending;
-    __builtin_memset(&pending, 0, sizeof(pending));
-    pending.start_ts = bpf_ktime_get_ns();
-    bpf_get_current_comm(&pending.comm, sizeof(pending.comm));
+    p->start_ts  = bpf_ktime_get_ns();
+    p->cpu_start = task_cpu_ns(task);
+    p->rq_start  = task_runq_ns(task);
+    p->bytes_in  = 0;
+    p->bytes_out = 0;
+    p->command   = command;
+    p->query_len = 0;
+    p->query[0]  = 0;
+    bpf_get_current_comm(&p->comm, sizeof(p->comm));
 
-    /*
-     * Second argument (RSI): const COM_DATA *com_data (userspace pointer).
-     * COM_DATA union layout for COM_QUERY:
-     *   offset 0: const char *query_str
-     *   offset 8: size_t      length
-     * Read the query_str pointer from userspace, then copy the SQL text.
-     */
+    /* COM_DATA for COM_QUERY: offset 0 = const char *query, offset 8 = size_t length. */
     void *com_data = (void *)regs->rsi;
-    if (com_data) {
+    if (command == COM_QUERY && com_data) {
         const char *query_str = NULL;
-        if (bpf_probe_read_user(&query_str, sizeof(query_str), com_data) == 0 &&
-            query_str != NULL) {
-            /*
-             * bpf_probe_read_user_str: copies up to QUERY_MAX bytes from
-             * userspace, stops at the first NUL, always NUL-terminates dst.
-             * The return value is the number of bytes written (including NUL).
-             * This is safe even if the SQL string is longer than QUERY_MAX.
-             */
-            bpf_probe_read_user_str(pending.query, sizeof(pending.query), query_str);
+        __u64 len = 0;
+        if (bpf_probe_read_user(&query_str, sizeof(query_str), com_data) == 0 && query_str)
+            bpf_probe_read_user_str(p->query, sizeof(p->query), query_str);
+        if (bpf_probe_read_user(&len, sizeof(len), (char *)com_data + 8) == 0) {
+            p->bytes_in  = len;
+            p->query_len = len > 0xffffffffULL ? 0xffffffff : (__u32)len;
         }
     }
-
-    bpf_map_update_elem(&mysql_pending, &tid, &pending, BPF_ANY);
+    /* Copies the scratch value (map-value pointer) into the per-TID entry. */
+    bpf_map_update_elem(&mysql_pending, &tid, p, BPF_ANY);
     return 0;
 }
 
+/* Result bytes: add the int return of the protocol sendmsg while the calling
+ * thread is inside dispatch_command. Hooked at tcp/unix level, not
+ * sock_sendmsg, because since 6.6 send()/write() reach the protocol through
+ * the static, inlinable __sock_sendmsg. */
+static __always_inline int add_bytes_out(struct pt_regs *ctx)
+{
+    int ret = (int)((struct x86_regs *)ctx)->rax;
+    if (ret <= 0)
+        return 0;
+    __u32 tid = (__u32)bpf_get_current_pid_tgid();
+    struct mysql_pending_t *p = bpf_map_lookup_elem(&mysql_pending, &tid);
+    if (p)
+        __sync_fetch_and_add(&p->bytes_out, (__u64)ret);
+    return 0;
+}
+
+SEC("kretprobe/tcp_sendmsg")
+int kretprobe_tcp_sendmsg(struct pt_regs *ctx) { return add_bytes_out(ctx); }
+
+SEC("kretprobe/unix_stream_sendmsg")
+int kretprobe_unix_stream_sendmsg(struct pt_regs *ctx) { return add_bytes_out(ctx); }
+
 /*
- * uretprobe_dispatch_command: fires at the return of dispatch_command in mysqld.
- *
- * Looks up the pending entry for this TID, computes latency, updates the
- * per-PID LRU stats, and emits a ringbuf event if latency exceeds the threshold.
- * The pending entry is deleted at the very end so its comm/query fields can be
- * referenced directly into the ringbuf-reserved memory — avoiding any local
- * copies on the BPF stack (which would consume ~272 bytes and overflow the 512B limit).
- *
- * Stack budget (this function):
- *   pid_tgid(8) + tgid(4) + tid(4) + now(8) + latency_ns(8)
- *   + pending ptr(8) + stats ptr(8) + new_stats(56) + ev ptr(8)
- *   ≈ 112 bytes — well under the 512-byte BPF limit.
+ * Return: everything is read through the mysql_pending map-value pointer (no
+ * 576-byte local); the entry is deleted on every path after a successful lookup.
  */
 SEC("uretprobe/dispatch_command")
 int uretprobe_dispatch_command(struct pt_regs *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 tgid     = (__u32)(pid_tgid >> 32);
-    __u32 tid      = (__u32)(pid_tgid & 0xffffffffULL);
+    __u32 tgid = pid_tgid >> 32;
+    __u32 tid  = (__u32)pid_tgid;
 
-    struct mysql_pending_t *pending = bpf_map_lookup_elem(&mysql_pending, &tid);
-    if (!pending)
+    struct mysql_pending_t *p = bpf_map_lookup_elem(&mysql_pending, &tid);
+    if (!p)
         return 0;
 
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     __u64 now        = bpf_ktime_get_ns();
-    __u64 latency_ns = now - pending->start_ts;
+    __u64 latency_ns = now - p->start_ts;
+    __u64 cpu_now = task_cpu_ns(task), rq_now = task_runq_ns(task);
+    __u64 cpu_ns  = cpu_now > p->cpu_start ? cpu_now - p->cpu_start : 0;
+    __u64 runq_ns = rq_now > p->rq_start ? rq_now - p->rq_start : 0;
+    /* sum_exec_runtime is tick-granular: keep cpu, runq <= wall. */
+    if (cpu_ns > latency_ns)
+        cpu_ns = latency_ns;
+    if (runq_ns > latency_ns)
+        runq_ns = latency_ns;
 
-    /*
-     * No local comm[]/query[] copies — pending->comm and pending->query are
-     * read directly from map memory into the ringbuf-reserved slot below.
-     * The delete is deferred to the very end so the pointer stays valid.
-     */
-
-    /* ── Update per-PID aggregated stats (LRU map) ─────────────────────────── */
-    struct mysql_pid_stats_t *stats = bpf_map_lookup_elem(&mysql_pid_stats, &tgid);
-    if (stats) {
-        __sync_fetch_and_add(&stats->total_queries, 1);
-        __sync_fetch_and_add(&stats->total_latency_ns, latency_ns);
-        if (latency_ns > stats->max_latency_ns)
-            stats->max_latency_ns = latency_ns;
-        if (latency_ns >= slow_query_threshold_ns)
-            __sync_fetch_and_add(&stats->slow_queries, 1);
-        stats->last_seen_ts = now;
-        bpf_get_current_comm(&stats->comm, sizeof(stats->comm));
-    } else {
-        /*
-         * new_stats is the only large stack object (56 bytes).
-         * It is kept as small as possible — no padding fields.
-         */
-        struct mysql_pid_stats_t new_stats;
-        __builtin_memset(&new_stats, 0, sizeof(new_stats));
-        new_stats.total_queries    = 1;
-        new_stats.total_latency_ns = latency_ns;
-        new_stats.max_latency_ns   = latency_ns;
-        new_stats.slow_queries     = (latency_ns >= slow_query_threshold_ns) ? 1 : 0;
-        new_stats.last_seen_ts     = now;
-        bpf_get_current_comm(&new_stats.comm, sizeof(new_stats.comm));
-        bpf_map_update_elem(&mysql_pid_stats, &tgid, &new_stats, BPF_NOEXIST);
-    }
-
-    /* ── Emit ringbuf slow event ────────────────────────────────────────────── */
-    if (latency_ns >= slow_query_threshold_ns) {
-        struct mysql_slow_event_t *ev =
-            bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
-        if (ev) {
-            ev->pid          = tgid;
-            ev->tid          = tid;
-            ev->latency_ns   = latency_ns;
-            ev->timestamp_ns = now;
-            /*
-             * Copy comm/query directly from the pending map entry into the
-             * ringbuf slot — no intermediate stack buffers needed.
-             * pending is still valid here; delete happens below.
-             */
-            __builtin_memcpy(ev->comm,  pending->comm,  sizeof(ev->comm));
-            __builtin_memcpy(ev->query, pending->query, sizeof(ev->query));
-            bpf_ringbuf_submit(ev, 0);
+    if (p->command == COM_QUERY) {
+        struct mysql_pid_stats_t *stats = bpf_map_lookup_elem(&mysql_pid_stats, &tgid);
+        if (stats) {
+            __sync_fetch_and_add(&stats->total_queries, 1);
+            __sync_fetch_and_add(&stats->total_latency_ns, latency_ns);
+            if (latency_ns > stats->max_latency_ns)
+                stats->max_latency_ns = latency_ns;
+            if (latency_ns >= slow_query_threshold_ns)
+                __sync_fetch_and_add(&stats->slow_queries, 1);
+            stats->last_seen_ts = now;
+            bpf_get_current_comm(&stats->comm, sizeof(stats->comm));
+        } else {
+            struct mysql_pid_stats_t ns;
+            __builtin_memset(&ns, 0, sizeof(ns));
+            ns.total_queries    = 1;
+            ns.total_latency_ns = latency_ns;
+            ns.max_latency_ns   = latency_ns;
+            ns.slow_queries     = latency_ns >= slow_query_threshold_ns ? 1 : 0;
+            ns.last_seen_ts     = now;
+            bpf_get_current_comm(&ns.comm, sizeof(ns.comm));
+            bpf_map_update_elem(&mysql_pid_stats, &tgid, &ns, BPF_NOEXIST);
+        }
+        if (latency_ns >= slow_query_threshold_ns) {
+            struct mysql_slow_event_t *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
+            if (ev) {
+                ev->pid = tgid;
+                ev->tid = tid;
+                ev->latency_ns = latency_ns;
+                ev->timestamp_ns = now;
+                __builtin_memcpy(ev->comm, p->comm, sizeof(ev->comm));
+                __builtin_memcpy(ev->query, p->query, sizeof(ev->query));
+                bpf_ringbuf_submit(ev, 0);
+            }
         }
     }
 
-    /* Always delete – prevents stale entries at any query rate. */
+    if (emit_all_queries) {
+        struct mysql_cmd_event_t *ev = bpf_ringbuf_reserve(&cmd_events, sizeof(*ev), 0);
+        if (ev) {
+            ev->pid       = tgid;
+            ev->tid       = tid;
+            ev->command   = p->command;
+            ev->query_len = p->query_len;
+            ev->wall_ns   = latency_ns;
+            ev->cpu_ns    = cpu_ns;
+            ev->runq_ns   = runq_ns;
+            ev->bytes_in  = p->bytes_in;
+            ev->bytes_out = p->bytes_out;
+            __builtin_memcpy(ev->comm, p->comm, sizeof(ev->comm));
+            __builtin_memcpy(ev->query, p->query, sizeof(ev->query));
+            bpf_ringbuf_submit(ev, 0);
+        } else {
+            __u32 zero = 0;
+            __u64 *d = bpf_map_lookup_elem(&dropped, &zero);
+            if (d)
+                *d += 1; /* per-CPU slot: no atomic needed */
+        }
+    }
+
     bpf_map_delete_elem(&mysql_pending, &tid);
     return 0;
 }
