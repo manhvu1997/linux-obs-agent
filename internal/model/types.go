@@ -314,6 +314,12 @@ type ProcessStats struct {
 	ContainerID  string `json:"container_id,omitempty"`
 	K8sPodName   string `json:"k8s_pod_name,omitempty"`
 	K8sNamespace string `json:"k8s_namespace,omitempty"`
+	// Family is the process family (systemd unit, or cgroup path) used to
+	// aggregate forked workers under the service that owns them.
+	Family string `json:"family,omitempty"`
+	// StartTime is /proc/[pid]/stat field 22 (clock ticks since boot); used
+	// to pick the oldest process of a family as its root.
+	StartTime uint64 `json:"-"`
 }
 
 // ─── eBPF Events ─────────────────────────────────────────────────────────────
@@ -1029,4 +1035,26 @@ type QueryDigestStats struct {
 type QueryRoleThresholds struct {
 	CulpritCPUSharePercent float64 `json:"culprit_cpu_share_percent"`
 	VictimRunqRatio        float64 `json:"victim_runq_ratio"`
+}
+
+// ─── Process families ─────────────────────────────────────────────────────────
+
+// FamilyMember is a compact view of one process inside a FamilyStats.
+type FamilyMember struct {
+	PID         uint32  `json:"pid"`
+	Comm        string  `json:"comm"`
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemRSSBytes uint64  `json:"mem_rss_bytes"`
+}
+
+// FamilyStats aggregates every process in one family (systemd unit).
+type FamilyStats struct {
+	Family       string         `json:"family"`
+	RootPID      uint32         `json:"root_pid"`
+	RootCmdline  string         `json:"root_cmdline"`
+	ProcessCount int            `json:"process_count"`
+	CPUPercent   float64        `json:"cpu_percent"`
+	MemRSSBytes  uint64         `json:"mem_rss_bytes"`
+	MemPercent   float64        `json:"mem_percent"`
+	TopMembers   []FamilyMember `json:"top_members"`
 }

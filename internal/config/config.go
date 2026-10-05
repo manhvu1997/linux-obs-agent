@@ -126,6 +126,14 @@ type ProcessConfig struct {
 	ScanInterval time.Duration `yaml:"scan_interval"`
 	// IncludeIO: read per-process IO (requires CAP_SYS_PTRACE on some kernels).
 	IncludeIO bool `yaml:"include_io"`
+	// ReportTopN: processes and families per list in process_report.
+	ReportTopN int `yaml:"report_top_n"`
+	// FamilyBy: "systemd_unit" (default) or "cgroup" (full cgroup path).
+	FamilyBy string `yaml:"family_by"`
+	// MaxConnectionsPerProcess caps the live connection list per process.
+	MaxConnectionsPerProcess int `yaml:"max_connections_per_process"`
+	// MaxPeersPerProcess caps network.top_peers per process / family.
+	MaxPeersPerProcess int `yaml:"max_peers_per_process"`
 }
 
 // RunQueueConfig controls the two-level run-queue analysis.
@@ -399,9 +407,13 @@ func Defaults() *Config {
 			Timeout:       10 * time.Second,
 		},
 		Process: ProcessConfig{
-			TopN:         20,
-			ScanInterval: 10 * time.Second,
-			IncludeIO:    true,
+			TopN:                     20,
+			ScanInterval:             10 * time.Second,
+			IncludeIO:                true,
+			ReportTopN:               10,
+			FamilyBy:                 "systemd_unit",
+			MaxConnectionsPerProcess: 50,
+			MaxPeersPerProcess:       20,
 		},
 		DiskScan: DiskScanConfig{
 			Enabled:            true,
@@ -623,6 +635,15 @@ func (c *Config) validate() error {
 	}
 	if c.Process.TopN <= 0 {
 		return fmt.Errorf("process.top_n must be > 0")
+	}
+	if c.Process.ReportTopN <= 0 {
+		return fmt.Errorf("process.report_top_n must be > 0")
+	}
+	if c.Process.FamilyBy != "systemd_unit" && c.Process.FamilyBy != "cgroup" {
+		return fmt.Errorf("process.family_by must be systemd_unit or cgroup")
+	}
+	if c.Process.MaxConnectionsPerProcess <= 0 || c.Process.MaxPeersPerProcess <= 0 {
+		return fmt.Errorf("process.max_connections_per_process and max_peers_per_process must be > 0")
 	}
 	if c.RunQueue.Enabled && c.RunQueue.TopN <= 0 {
 		return fmt.Errorf("runq.top_n must be > 0")

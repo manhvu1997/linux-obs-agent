@@ -39,12 +39,17 @@ type prevSample struct {
 
 // Inspector scans /proc periodically and maintains a sorted top-N snapshot.
 type Inspector struct {
-	cfg      *config.ProcessConfig
-	mu       sync.RWMutex
-	topCPU   []model.ProcessStats
-	topMem   []model.ProcessStats
-	prev     map[uint32]prevSample
-	memTotal uint64
+	cfg       *config.ProcessConfig
+	mu        sync.RWMutex
+	topCPU    []model.ProcessStats
+	topMem    []model.ProcessStats
+	reportCPU []model.ProcessStats
+	reportMem []model.ProcessStats
+	famCPU    []model.FamilyStats // all families, sorted by CPU desc
+	famMem    []model.FamilyStats // all families, sorted by RSS desc
+	pidFamily map[uint32]string
+	prev      map[uint32]prevSample
+	memTotal  uint64
 }
 
 func NewInspector(cfg *config.ProcessConfig) *Inspector {
@@ -89,6 +94,55 @@ func (i *Inspector) TopMem() []model.ProcessStats {
 	return out
 }
 
+// ReportTopCPU / ReportTopMem return process.report_top_n processes for
+// process_report (independent of the legacy top_n list).
+func (i *Inspector) ReportTopCPU() []model.ProcessStats {
+	return i.copyProcs(func() []model.ProcessStats { return i.reportCPU })
+}
+func (i *Inspector) ReportTopMem() []model.ProcessStats {
+	return i.copyProcs(func() []model.ProcessStats { return i.reportMem })
+}
+
+// TopFamiliesCPU / TopFamiliesMem return the top report_top_n families.
+func (i *Inspector) TopFamiliesCPU() []model.FamilyStats {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return head(i.famCPU, i.cfg.ReportTopN)
+}
+
+func (i *Inspector) TopFamiliesMem() []model.FamilyStats {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return head(i.famMem, i.cfg.ReportTopN)
+}
+
+// AllFamilies returns every family sorted by CPU desc (for Prometheus).
+func (i *Inspector) AllFamilies() []model.FamilyStats {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return head(i.famCPU, len(i.famCPU))
+}
+
+// PIDFamilies returns a copy of the pid → family map from the last scan.
+func (i *Inspector) PIDFamilies() map[uint32]string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	out := make(map[uint32]string, len(i.pidFamily))
+	for k, v := range i.pidFamily {
+		out[k] = v
+	}
+	return out
+}
+
+func (i *Inspector) copyProcs(get func() []model.ProcessStats) []model.ProcessStats {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	src := get()
+	out := make([]model.ProcessStats, len(src))
+	copy(out, src)
+	return out
+}
+
 // ─── Scanning ────────────────────────────────────────────────────────────────
 
 func (i *Inspector) scan() {
@@ -130,30 +184,45 @@ func (i *Inspector) scan() {
 		}
 	}
 
-	// Sort by CPU descending.
-	byCPU := make([]model.ProcessStats, len(all))
-	copy(byCPU, all)
-	sort.Slice(byCPU, func(a, b int) bool {
-		return byCPU[a].CPUPercent > byCPU[b].CPUPercent
-	})
-	if len(byCPU) > i.cfg.TopN {
-		byCPU = byCPU[:i.cfg.TopN]
-	}
+	byCPU := sortedProcs(all, func(a, b model.ProcessStats) bool { return a.CPUPercent > b.CPUPercent })
+	byMem := sortedProcs(all, func(a, b model.ProcessStats) bool { return a.MemRSSBytes > b.MemRSSBytes })
 
-	// Sort by RSS descending.
-	byMem := make([]model.ProcessStats, len(all))
-	copy(byMem, all)
-	sort.Slice(byMem, func(a, b int) bool {
-		return byMem[a].MemRSSBytes > byMem[b].MemRSSBytes
-	})
-	if len(byMem) > i.cfg.TopN {
-		byMem = byMem[:i.cfg.TopN]
+	fams := BuildFamilies(all, 5)
+	famCPU := append([]model.FamilyStats(nil), fams...)
+	sort.SliceStable(famCPU, func(a, b int) bool { return famCPU[a].CPUPercent > famCPU[b].CPUPercent })
+	famMem := append([]model.FamilyStats(nil), fams...)
+	sort.SliceStable(famMem, func(a, b int) bool { return famMem[a].MemRSSBytes > famMem[b].MemRSSBytes })
+
+	pidFamily := make(map[uint32]string, len(all))
+	for _, s := range all {
+		pidFamily[s.PID] = s.Family
 	}
 
 	i.mu.Lock()
-	i.topCPU = byCPU
-	i.topMem = byMem
+	i.topCPU = head(byCPU, i.cfg.TopN)
+	i.topMem = head(byMem, i.cfg.TopN)
+	i.reportCPU = head(byCPU, i.cfg.ReportTopN)
+	i.reportMem = head(byMem, i.cfg.ReportTopN)
+	i.famCPU = famCPU
+	i.famMem = famMem
+	i.pidFamily = pidFamily
 	i.mu.Unlock()
+}
+
+func sortedProcs(all []model.ProcessStats, less func(a, b model.ProcessStats) bool) []model.ProcessStats {
+	out := make([]model.ProcessStats, len(all))
+	copy(out, all)
+	sort.SliceStable(out, func(a, b int) bool { return less(out[a], out[b]) })
+	return out
+}
+
+func head[T any](s []T, n int) []T {
+	if len(s) > n {
+		s = s[:n]
+	}
+	out := make([]T, len(s))
+	copy(out, s)
+	return out
 }
 
 // readProc reads all interesting fields for one PID.
@@ -171,7 +240,8 @@ func (i *Inspector) readProc(pid uint32, now time.Time, numCPU float64) (model.P
 	}
 
 	cmdline := readCmdline(base + "/cmdline")
-	cgroupPath := readFirstLine(base + "/cgroup")
+	cgroupRaw, _ := os.ReadFile(base + "/cgroup")
+	cgroupPath := strings.SplitN(string(cgroupRaw), "\n", 2)[0]
 
 	s := model.ProcessStats{
 		PID:         pid,
@@ -183,6 +253,8 @@ func (i *Inspector) readProc(pid uint32, now time.Time, numCPU float64) (model.P
 		MemRSSBytes: stat.rss * 4096, // pages → bytes
 		MemVMSBytes: uint64(stat.vsize),
 		CgroupPath:  cgroupPath,
+		Family:      FamilyKey(string(cgroupRaw), i.cfg.FamilyBy),
+		StartTime:   stat.starttime,
 	}
 
 	if i.memTotal > 0 {
@@ -248,6 +320,7 @@ type procStatFields struct {
 	numThreads uint32
 	vsize      uint64 // bytes
 	rss        uint64 // pages
+	starttime  uint64 // clock ticks since boot
 }
 
 func readProcStat(path string) (procStatFields, error) {
@@ -283,6 +356,7 @@ func readProcStat(path string) (procStatFields, error) {
 		numThreads: uint32(u(17)),
 		vsize:      u(20),
 		rss:        u(21),
+		starttime:  u(19),
 	}, nil
 }
 
@@ -312,19 +386,6 @@ func readCmdline(path string) string {
 	// cmdline is NUL-separated.
 	s := strings.ReplaceAll(string(data), "\x00", " ")
 	return strings.TrimSpace(s)
-}
-
-func readFirstLine(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	if sc.Scan() {
-		return sc.Text()
-	}
-	return ""
 }
 
 // readProcIO parses /proc/[pid]/io for read_bytes and write_bytes.
