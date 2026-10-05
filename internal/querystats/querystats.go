@@ -229,6 +229,7 @@ func (a *Aggregator) Add(e Event) {
 	a.runqSum += e.RunqNs
 }
 
+// addLife: life may exceed MaxDigests by at most StickyMax (see markSticky).
 func (a *Aggregator) addLife(id, text string, e Event) {
 	l, ok := a.life[id]
 	if !ok {
@@ -298,13 +299,15 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		stats = append(stats, a.toStats(k, x, cpuByPID[k.pid], acct))
 	}
 	byCPU := topBy(stats, a.cfg.TopN, func(s model.QueryDigestStats) float64 { return s.CPUMsTotal })
-	byOut := topBy(stats, a.cfg.TopNBytes, func(s model.QueryDigestStats) float64 { return float64(s.BytesOutTotal) })
+	bytesOut := func(s model.QueryDigestStats) float64 { return float64(s.BytesOutTotal) }
+	byOut := topBy(stats, a.cfg.TopNBytes, bytesOut)
+	// Sticky entry uses top-TopN by bytes (spec §4.2); the reported list stays TopNBytes.
+	stickyOut := topBy(stats, a.cfg.TopN, bytesOut)
 
-	for _, s := range byCPU {
-		a.sticky[s.DigestID] = now
-	}
-	for _, s := range byOut {
-		a.sticky[s.DigestID] = now
+	for _, list := range [][]model.QueryDigestStats{byCPU, stickyOut} {
+		for _, s := range list {
+			a.markSticky(s.DigestID, stats, now)
+		}
 	}
 	a.expire(now)
 
@@ -332,6 +335,33 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		Exported:      exported,
 		Commands:      cmds,
 	}
+}
+
+// markSticky adds id to the sticky set (never the synthetic <other>) and makes
+// sure a lifetime entry exists, seeding it from the window counters when the
+// digest was folded into "other" in life.
+func (a *Aggregator) markSticky(id string, stats []model.QueryDigestStats, now time.Time) {
+	if id == OtherDigestID {
+		return
+	}
+	a.sticky[id] = now
+	if _, ok := a.life[id]; ok {
+		return
+	}
+	l := &life{lastSeen: now}
+	for _, s := range stats {
+		if s.DigestID != id {
+			continue
+		}
+		l.text = s.DigestText
+		l.c.Calls += s.Calls
+		l.c.CPUNs += uint64(s.CPUMsTotal*1e6 + 0.5)
+		l.c.WallNs += uint64(s.WallMsAvg*float64(s.Calls)*1e6 + 0.5)
+		l.c.RunqNs += uint64(s.RunqWaitMsAvg*float64(s.Calls)*1e6 + 0.5)
+		l.c.BytesIn += s.BytesInTotal
+		l.c.BytesOut += s.BytesOutTotal
+	}
+	a.life[id] = l
 }
 
 func (a *Aggregator) expire(now time.Time) {
@@ -384,6 +414,9 @@ func (a *Aggregator) toStats(k key, x *acc, pidCPU uint64, acct string) model.Qu
 		role = RoleCulprit
 	case wait > cpuAvg*a.cfg.VictimRunqRatio && wallAvg >= ms(a.cfg.SlowWallNs):
 		role = RoleVictim
+	}
+	if k.id == OtherDigestID {
+		role = ""
 	}
 	return model.QueryDigestStats{
 		PID: k.pid, DigestID: k.id, Command: x.command, DigestText: x.text,

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/sqldigest"
 )
 
@@ -162,4 +163,114 @@ func exported(s Snapshot, id string) bool {
 		}
 	}
 	return false
+}
+
+func exportedCounters(s Snapshot, id string) (ExportedDigest, bool) {
+	for _, e := range s.Exported {
+		if e.ID == id {
+			return e, true
+		}
+	}
+	return ExportedDigest{}, false
+}
+
+func TestStickyDigestSurvivesLifeOverflow(t *testing.T) {
+	c := cfg()
+	c.MaxDigests = 2
+	a := New(c)
+	a.Add(ev("SELECT a FROM t1", t0, 1, 0, 1, 1))
+	a.Add(ev("SELECT a FROM t2", t0, 1, 0, 1, 1))
+	later := t0.Add(70 * time.Second)
+	for i := 0; i < 5; i++ {
+		a.Add(ev("SELECT a FROM t3", later, 5, 0, 5, 1))
+	}
+	d := sqldigest.Normalize("SELECT a FROM t3")
+	s := a.Snapshot(t0.Add(71 * time.Second))
+	e, ok := exportedCounters(s, d.ID)
+	if !ok {
+		t.Fatalf("sticky digest missing from Exported: %+v", s.Exported)
+	}
+	if e.Counters.Calls < 5 || e.Text != d.Text {
+		t.Fatalf("got %+v, want calls>=5 text %q", e, d.Text)
+	}
+}
+
+func TestOtherDigestHasNoRoleAndIsNotSticky(t *testing.T) {
+	c := cfg()
+	c.MaxDigests = 1
+	a := New(c)
+	a.Add(ev("SELECT a FROM t0", t0, 1, 0, 1, 1))
+	for _, n := range []string{"b", "c", "d", "e"} {
+		a.Add(ev("SELECT a FROM "+n, t0, 5, 0, 5, 1))
+	}
+	s := a.Snapshot(t0.Add(time.Second))
+	found := false
+	for _, d := range s.TopByCPU {
+		if d.DigestID == OtherDigestID {
+			found = true
+			if d.Role != "" {
+				t.Fatalf("other role = %q", d.Role)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no <other> entry")
+	}
+	if _, ok := exportedCounters(s, OtherDigestID); ok {
+		t.Fatal("<other> must not be exported")
+	}
+}
+
+func TestStickyFromTopNBytesNotTopNBytesList(t *testing.T) {
+	a := New(cfg())
+	names := "abcdefghijklmnopqrstuvwxy" // 25 digests
+	var target string
+	for i := 0; i < 25; i++ {
+		sql := "SELECT x FROM t" + string(names[i])
+		var out uint64 = 1
+		switch {
+		case i < 10:
+			out = 1000
+		case i == 24:
+			out = 500 // 11th by bytes, lowest by CPU
+			target = sql
+		}
+		a.Add(ev(sql, t0, float64(25-i), 0, float64(25-i), out))
+	}
+	s := a.Snapshot(t0.Add(time.Second))
+	if len(s.TopByBytesOut) != 10 {
+		t.Fatalf("TopByBytesOut = %d, want 10", len(s.TopByBytesOut))
+	}
+	if _, ok := exportedCounters(s, sqldigest.Normalize(target).ID); !ok {
+		t.Fatal("11th-by-bytes digest should be sticky (top-N bytes)")
+	}
+}
+
+func TestStickyCounterMonotonic(t *testing.T) {
+	a := New(cfg())
+	sql := "SELECT COUNT(*) FROM big"
+	id := sqldigest.Normalize(sql).ID
+	a.Add(ev(sql, t0, 400, 2, 410, 7))
+	before, ok := exportedCounters(a.Snapshot(t0.Add(time.Second)), id)
+	if !ok {
+		t.Fatal("not exported initially")
+	}
+	mid, ok := exportedCounters(a.Snapshot(t0.Add(5*time.Minute)), id)
+	if !ok {
+		t.Fatal("should stay sticky outside window")
+	}
+	a.Add(ev(sql, t0.Add(6*time.Minute), 400, 2, 410, 7))
+	after, ok := exportedCounters(a.Snapshot(t0.Add(6*time.Minute+time.Second)), id)
+	if !ok {
+		t.Fatal("not exported after re-entry")
+	}
+	for _, p := range [][2]model.QueryCounters{{before.Counters, mid.Counters}, {mid.Counters, after.Counters}} {
+		x, y := p[0], p[1]
+		if y.Calls < x.Calls || y.CPUNs < x.CPUNs || y.RunqNs < x.RunqNs || y.WallNs < x.WallNs || y.BytesIn < x.BytesIn || y.BytesOut < x.BytesOut {
+			t.Fatalf("counters decreased: %+v -> %+v", x, y)
+		}
+	}
+	if after.Counters.Calls != 2 {
+		t.Fatalf("calls = %d, want 2", after.Counters.Calls)
+	}
 }
