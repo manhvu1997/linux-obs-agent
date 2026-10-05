@@ -29,7 +29,10 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mongo"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
+	"github.com/manhvu1997/linux-obs-agent/internal/netflow"
+	"github.com/manhvu1997/linux-obs-agent/internal/netinv"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
+	"github.com/manhvu1997/linux-obs-agent/internal/procreport"
 	"github.com/manhvu1997/linux-obs-agent/internal/runq"
 	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
 )
@@ -49,6 +52,13 @@ type PrometheusExporter struct {
 	writebackAnalyzer *writeback.Analyzer
 	mongoAnalyzer     *mongo.Analyzer
 	mysqlAnalyzer     *mysql.Analyzer
+
+	// process_report sources – set via RegisterProcessReportSources.
+	procCfg     *config.ProcessConfig
+	netAcc      *netflow.Accumulator
+	netSource   string
+	inboundAcct string
+	inv         *netinv.Inventory
 
 	// Run-queue / on-demand profiling config – set via RegisterRunQueueSources.
 	runqCfg    *config.RunQueueConfig
@@ -201,6 +211,29 @@ func (p *PrometheusExporter) RegisterMySQLAnalyzer(a *mysql.Analyzer) {
 	p.mysqlAnalyzer = a
 }
 
+// RegisterProcessReportSources wires process_report. acc is nil when
+// netflow is disabled or failed to load; networkSource says why.
+func (p *PrometheusExporter) RegisterProcessReportSources(
+	cfg *config.ProcessConfig,
+	acc *netflow.Accumulator,
+	networkSource, inboundAccounting string,
+	inv *netinv.Inventory,
+) {
+	p.procCfg = cfg
+	p.netAcc = acc
+	p.netSource = networkSource
+	p.inboundAcct = inboundAccounting
+	p.inv = inv
+}
+
+// RegisterCollectors registers extra Prometheus collectors on the default
+// registry (served by /metrics).
+func (p *PrometheusExporter) RegisterCollectors(cs ...prometheus.Collector) {
+	for _, c := range cs {
+		prometheus.MustRegister(c)
+	}
+}
+
 // RecordEBPFEvent increments the per-module event counter.
 func (p *PrometheusExporter) RecordEBPFEvent(ev model.EBPFEvent) {
 	p.ebpfEventsTotal.WithLabelValues(string(ev.Type)).Inc()
@@ -304,6 +337,30 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 	// Top processes from /proc.
 	if p.insp != nil {
 		report.TopProcesses = p.insp.TopCPU()
+	}
+
+	// Process report: top processes and families by CPU/memory with their
+	// network activity (eBPF netflow) and live connections (/proc inventory).
+	if p.insp != nil && p.procCfg != nil {
+		in := procreport.Inputs{
+			TopCPU:            p.insp.ReportTopCPU(),
+			TopMem:            p.insp.ReportTopMem(),
+			FamiliesCPU:       p.insp.TopFamiliesCPU(),
+			FamiliesMem:       p.insp.TopFamiliesMem(),
+			NetworkSource:     p.netSource,
+			InboundAccounting: p.inboundAcct,
+			MaxConnections:    p.procCfg.MaxConnectionsPerProcess,
+		}
+		// Assign interfaces only from non-nil pointers: a typed nil stored in
+		// an interface is != nil and would be called.
+		if p.inv != nil {
+			in.Inventory = p.inv
+		}
+		if p.netAcc != nil {
+			in.Net = p.netAcc
+			in.WindowSeconds = p.netAcc.WindowSeconds()
+		}
+		report.ProcessReport = procreport.Build(in, time.Now())
 	}
 
 	// Recent eBPF events from the ring buffer.

@@ -34,12 +34,16 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
 	ebpfmgr "github.com/manhvu1997/linux-obs-agent/internal/ebpf"
+	netflowbpf "github.com/manhvu1997/linux-obs-agent/internal/ebpf/netflow"
 	"github.com/manhvu1997/linux-obs-agent/internal/exporter"
 	"github.com/manhvu1997/linux-obs-agent/internal/fsync"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mongo"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
+	"github.com/manhvu1997/linux-obs-agent/internal/netflow"
+	"github.com/manhvu1997/linux-obs-agent/internal/netinv"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
+	"github.com/manhvu1997/linux-obs-agent/internal/promcollect"
 	"github.com/manhvu1997/linux-obs-agent/internal/trigger"
 	"github.com/manhvu1997/linux-obs-agent/internal/writeback"
 )
@@ -75,6 +79,7 @@ func main() {
 		"ebpf_enabled", cfg.EBPF.Enabled,
 		"mongo_tracing_enabled", cfg.Mongo.Enabled,
 		"mysql_tracing_enabled", cfg.MySQL.Enabled,
+		"netflow_enabled", cfg.Netflow.Enabled,
 	)
 
 	// Root context wired to OS signals (SIGTERM / SIGINT for systemd).
@@ -89,6 +94,34 @@ func main() {
 	// ── Process inspector ───────────────────────────────────────────────────
 	insp := process.NewInspector(&cfg.Process)
 	go insp.Run(ctx)
+
+	// ── Network flow accounting (always-on, eBPF netflow) ──────────────────
+	// Counts TCP bytes/connections per (process, direction, peer, service
+	// port) in-kernel; feeds process_report.network and obs_agent_family_net_*.
+	inv := netinv.New("/proc")
+	var netAcc *netflow.Accumulator
+	netSource, inboundAcct := "disabled", ""
+	switch {
+	case !cfg.Netflow.Enabled:
+	case !cfg.EBPF.Enabled:
+		netSource = "disabled: ebpf.enabled=false"
+	default:
+		ld := netflowbpf.NewLoader(cfg.Netflow.IncludeLoopback)
+		if err := ld.Start(); err != nil {
+			netSource = "unavailable: " + err.Error()
+			slog.Warn("netflow: eBPF unavailable; process_report.network omitted", "err", err)
+			break
+		}
+		defer ld.Stop()
+		netAcc = netflow.NewAccumulator(netflow.Config{
+			Window:             cfg.Netflow.Window,
+			MaxFamilies:        cfg.Netflow.MaxFamilies,
+			MaxOutboundPeers:   cfg.Netflow.MaxOutboundPeers,
+			MaxPeersPerProcess: cfg.Process.MaxPeersPerProcess,
+		})
+		go netflow.NewAnalyzer(ld, inv, insp, netAcc, cfg.Netflow.PollInterval, cfg.Netflow.ListenRefreshInterval).Run(ctx)
+		netSource, inboundAcct = "ebpf", ld.InboundAccounting()
+	}
 
 	// ── eBPF manager (lazy – nothing loaded until triggered) ────────────────
 	ebpfMgr := ebpfmgr.NewManager(&cfg.EBPF, &cfg.RunQueue, &cfg.OffCPU, &cfg.Profile)
@@ -181,6 +214,17 @@ func main() {
 		promExp.RegisterWritebackAnalyzer(writebackAnalyzer)
 		promExp.RegisterMongoAnalyzer(mongoAnalyzer)
 		promExp.RegisterMySQLAnalyzer(mysqlAnalyzer)
+		promExp.RegisterProcessReportSources(&cfg.Process, netAcc, netSource, inboundAcct, inv)
+		netCounters := func() (netflow.Counters, bool) {
+			if netAcc == nil {
+				return netflow.Counters{}, false
+			}
+			return netAcc.Counters(), true
+		}
+		promExp.RegisterCollectors(promcollect.NewFamilyCollector(insp.AllFamilies, netCounters, cfg.Netflow.MaxFamilies))
+		if cfg.MySQL.Enabled {
+			promExp.RegisterCollectors(promcollect.NewMySQLCollector(mysqlAnalyzer.DigestSnapshot, mysqlAnalyzer.Dropped))
+		}
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)
