@@ -28,6 +28,7 @@ type Config struct {
 	Writeback WritebackConfig `yaml:"writeback"`
 	Mongo     MongoConfig     `yaml:"mongo"`
 	MySQL     MySQLConfig     `yaml:"mysql"`
+	Netflow   NetflowConfig   `yaml:"netflow"`
 }
 
 type AgentConfig struct {
@@ -346,6 +347,26 @@ type MongoConfig struct {
 	MaxRecentQueries int `yaml:"max_recent_queries"`
 }
 
+// NetflowConfig controls always-on per-process TCP flow accounting
+// (eBPF netflow module). It feeds process_report.network and the
+// obs_agent_family_net_* Prometheus metrics.
+type NetflowConfig struct {
+	// Enabled is the master switch. Default true. Env NETFLOW_ENABLED.
+	Enabled bool `yaml:"enabled"`
+	// PollInterval: how often the in-kernel flow map is read.
+	PollInterval time.Duration `yaml:"poll_interval"`
+	// Window: length of the bytes/connection window in process_report.
+	Window time.Duration `yaml:"window"`
+	// IncludeLoopback counts 127.0.0.0/8 and ::1 traffic. Env NETFLOW_INCLUDE_LOOPBACK.
+	IncludeLoopback bool `yaml:"include_loopback"`
+	// ListenRefreshInterval: how often listening ports are pushed to the kernel.
+	ListenRefreshInterval time.Duration `yaml:"listen_refresh_interval"`
+	// MaxFamilies caps the family label; overflow -> "other".
+	MaxFamilies int `yaml:"max_families"`
+	// MaxOutboundPeers caps the peer_ip label per node; overflow -> "other".
+	MaxOutboundPeers int `yaml:"max_outbound_peers"`
+}
+
 // MySQLConfig controls the eBPF MySQL slow-query tracer.
 // When enabled, uprobes are attached to dispatch_command in the mysqld binary to
 // capture COM_QUERY calls and their latency directly on the server side.
@@ -498,6 +519,15 @@ func Defaults() *Config {
 			StaleSeconds:         60,
 			MaxRecentQueries:     100,
 		},
+		Netflow: NetflowConfig{
+			Enabled:               true,
+			PollInterval:          5 * time.Second,
+			Window:                60 * time.Second,
+			IncludeLoopback:       true,
+			ListenRefreshInterval: 30 * time.Second,
+			MaxFamilies:           50,
+			MaxOutboundPeers:      100,
+		},
 	}
 }
 
@@ -507,6 +537,7 @@ func Load(path string) (*Config, error) {
 	if path == "" {
 		applyMongoEnvOverrides(cfg)
 		applyMySQLEnvOverrides(cfg)
+		applyNetflowEnvOverrides(cfg)
 		return cfg, nil
 	}
 
@@ -519,6 +550,7 @@ func Load(path string) (*Config, error) {
 	}
 	applyMongoEnvOverrides(cfg)
 	applyMySQLEnvOverrides(cfg)
+	applyNetflowEnvOverrides(cfg)
 	applyRunQueueEnvOverrides(cfg)
 	applyOffCPUEnvOverrides(cfg)
 	applyProfileEnvOverrides(cfg)
@@ -569,6 +601,19 @@ func applyMySQLEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("MYSQL_MYSQLD_PATH"); v != "" {
 		cfg.MySQL.MysqldPath = v
+	}
+}
+
+// applyNetflowEnvOverrides:
+//
+//	NETFLOW_ENABLED=true|false           – master switch
+//	NETFLOW_INCLUDE_LOOPBACK=true|false  – count loopback traffic
+func applyNetflowEnvOverrides(cfg *Config) {
+	if v := os.Getenv("NETFLOW_ENABLED"); v != "" {
+		cfg.Netflow.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("NETFLOW_INCLUDE_LOOPBACK"); v != "" {
+		cfg.Netflow.IncludeLoopback = v == "true" || v == "1" || v == "yes"
 	}
 }
 
@@ -627,6 +672,14 @@ func applyProfileEnvOverrides(cfg *Config) {
 }
 
 func (c *Config) validate() error {
+	if c.Netflow.Enabled {
+		if c.Netflow.PollInterval <= 0 || c.Netflow.Window < c.Netflow.PollInterval {
+			return fmt.Errorf("netflow.window must be >= netflow.poll_interval > 0")
+		}
+		if c.Netflow.ListenRefreshInterval <= 0 || c.Netflow.MaxFamilies < 1 || c.Netflow.MaxOutboundPeers < 1 {
+			return fmt.Errorf("netflow.listen_refresh_interval, max_families and max_outbound_peers must be > 0")
+		}
+	}
 	if c.Collect.Interval < time.Second {
 		return fmt.Errorf("collect.interval must be >= 1s")
 	}

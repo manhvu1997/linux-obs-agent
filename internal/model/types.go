@@ -1084,3 +1084,35 @@ type ProcessConnections struct {
 	Truncated      int          `json:"connections_truncated"`
 	Error          string       `json:"connections_error,omitempty"`
 }
+
+// ─── Network flows (eBPF netflow) ─────────────────────────────────────────────
+
+// DirectionStats are TCP totals for one direction over the report window.
+// Inbound = connections the process accepted; outbound = connections it
+// initiated. Rx/Tx are bytes received/sent on those connections.
+type DirectionStats struct {
+	ConnsActive   int64   `json:"conns_active"`
+	ConnsOpened   uint64  `json:"conns_opened"`
+	ConnsClosed   uint64  `json:"conns_closed"`
+	BytesRx       uint64  `json:"bytes_rx"`
+	BytesTx       uint64  `json:"bytes_tx"`
+	BytesRxPerSec float64 `json:"bytes_rx_per_sec"`
+	BytesTxPerSec float64 `json:"bytes_tx_per_sec"`
+}
+
+// PeerStats aggregates traffic with one remote IP on one service port.
+type PeerStats struct {
+	Direction   string `json:"direction"`
+	PeerIP      string `json:"peer_ip"`
+	ServicePort uint16 `json:"service_port"`
+	ConnsActive int64  `json:"conns_active"`
+	BytesRx     uint64 `json:"bytes_rx"`
+	BytesTx     uint64 `json:"bytes_tx"`
+}
+
+// NetworkSummary is the eBPF-derived network view of a process or family.
+type NetworkSummary struct {
+	Inbound  DirectionStats `json:"inbound"`
+	Outbound DirectionStats `json:"outbound"`
+	TopPeers []PeerStats    `json:"top_peers"`
+}
