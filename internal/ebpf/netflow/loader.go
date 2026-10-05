@@ -58,7 +58,7 @@ func (l *Loader) Start() error {
 		}},
 		{"kprobe tcp_sendmsg", func() (link.Link, error) { return link.Kprobe("tcp_sendmsg", l.objs.KprobeTcpSendmsg, nil) }},
 		{"kretprobe tcp_sendmsg", func() (link.Link, error) {
-			return link.Kretprobe("tcp_sendmsg", l.objs.KretprobeTcpSendmsg, nil)
+			return attachKretprobeMaxActive("tcp_sendmsg", l.objs.KretprobeTcpSendmsg)
 		}},
 		{"kprobe tcp_cleanup_rbuf", func() (link.Link, error) {
 			return link.Kprobe("tcp_cleanup_rbuf", l.objs.KprobeTcpCleanupRbuf, nil)
@@ -160,4 +160,25 @@ func (l *Loader) SetListenPorts(ports []uint16) error {
 		}
 	}
 	return nil
+}
+
+// kretprobeMaxActive raises the number of concurrent kretprobe instances.
+// The kernel default is max(10, 2*NCPU); tcp_sendmsg sleeps in
+// sk_stream_wait_memory for slow receivers, so sleeping senders exhaust the
+// default and returns are silently dropped (nmissed) -> sent bytes undercount.
+const kretprobeMaxActive = 2048
+
+// attachKretprobeMaxActive attaches a kretprobe with RetprobeMaxActive set.
+// cilium/ebpf v0.21 cannot pass maxactive through the perf_kprobe PMU and
+// falls back to tracefs; when that fails (no tracefs mounted, old kernel),
+// retry with default options so a required hook never fails Start because of
+// the tuning alone.
+func attachKretprobeMaxActive(sym string, prog *ebpf.Program) (link.Link, error) {
+	krp, err := link.Kretprobe(sym, prog, &link.KprobeOptions{RetprobeMaxActive: kretprobeMaxActive})
+	if err == nil {
+		return krp, nil
+	}
+	slog.Debug("netflow: kretprobe with maxactive failed, retrying with defaults",
+		"symbol", sym, "maxactive", kretprobeMaxActive, "err", err)
+	return link.Kretprobe(sym, prog, nil)
 }
