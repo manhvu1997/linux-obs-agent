@@ -26,6 +26,12 @@ func TestNormalize(t *testing.T) {
 		{"group by", "SELECT status, COUNT(*) FROM orders WHERE created_at > '2026-10-01' GROUP BY status",
 			"select status , count ( * ) from orders where created_at > ? group by status"},
 		{"empty", "", ""},
+		{"negative in list", "SELECT a FROM t WHERE id IN (-1, -2, 3)", "select a from t where id in ( ?+ )"},
+		{"negative values rows", "INSERT INTO t (a,b) VALUES (1,-5),(2,3)", "insert into t ( a , b ) values ( ?+ )"},
+		{"negative comparison", "SELECT * FROM t WHERE x = -5", "select * from t where x = ?"},
+		{"binary minus kept", "SELECT a-1, 5 -1 FROM t", "select a - ? , ? - ? from t"},
+		{"plus unary", "SELECT * FROM t WHERE x > +7", "select * from t where x > ?"},
+		{"binary minus after ident digits", "SELECT t1-1 FROM t", "select t1 - ? from t"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -63,7 +69,7 @@ func TestNormalizeInvalidUTF8(t *testing.T) {
 }
 
 func FuzzNormalize(f *testing.F) {
-	for _, s := range []string{"SELECT 1", "x'", "`", "/*", "IN (", "VALUES (?,", "\xff\xfe", "'\\"} {
+	for _, s := range []string{"SELECT 1", "x'", "`", "/*", "IN (", "VALUES (?,", "\xff\xfe", "'\\", "-", "+", "--", "1-", "\\"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {

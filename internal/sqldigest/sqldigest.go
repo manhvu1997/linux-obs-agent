@@ -98,6 +98,9 @@ func tokenize(s string) []string {
 			}
 			toks = append(toks, w)
 			i = j
+		case (c == '-' || c == '+') && i+1 < n && (isDigit(s[i+1]) || (s[i+1] == '.' && i+2 < n && isDigit(s[i+2]))) && unaryContext(toks):
+			toks = append(toks, "?")
+			i = skipNumber(s, i+1)
 		default:
 			if i+2 < n && s[i:i+3] == "<=>" {
 				toks = append(toks, "<=>")
@@ -117,6 +120,22 @@ func tokenize(s string) []string {
 		}
 	}
 	return toks
+}
+
+// unaryContext reports whether a sign following toks is unary (part of a
+// numeric literal) rather than a binary operator.
+func unaryContext(toks []string) bool {
+	if len(toks) == 0 {
+		return true
+	}
+	switch toks[len(toks)-1] {
+	case "(", ",", "=", "<", ">", "<=", ">=", "<>", "!=", "<=>", ":=", "||", "&&",
+		"+", "-", "*", "/", "%",
+		"in", "values", "and", "or", "not", "between", "then", "else", "when",
+		"select", "set", "where", "limit", "offset", "like", "is", "on", "having":
+		return true
+	}
+	return false
 }
 
 // skipQuoted returns the index just past the closing quote that matches
