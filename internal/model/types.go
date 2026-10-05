@@ -987,3 +987,46 @@ type InspectReport struct {
 	Timestamp time.Time         `json:"timestamp"`
 	Databases []DBInspectReport `json:"databases"`
 }
+
+// ─── Query digests (generic, DB-agnostic) ─────────────────────────────────────
+
+// QueryCounters are cumulative totals for one digest or one command class.
+type QueryCounters struct {
+	Calls    uint64 `json:"calls"`
+	CPUNs    uint64 `json:"cpu_ns"`
+	RunqNs   uint64 `json:"runq_ns"`
+	WallNs   uint64 `json:"wall_ns"`
+	BytesIn  uint64 `json:"bytes_in"`
+	BytesOut uint64 `json:"bytes_out"`
+}
+
+// QueryDigestStats is one digest's aggregate over the report window.
+// Ranking by CPUMsTotal separates the query that consumes the CPU (culprit)
+// from queries that are slow only because they waited for a CPU (victims).
+type QueryDigestStats struct {
+	PID             uint32  `json:"pid"`
+	DigestID        string  `json:"digest_id"`
+	Command         string  `json:"command"`
+	DigestText      string  `json:"digest_text"`
+	SampleQuery     string  `json:"sample_query,omitempty"`
+	Normalized      bool    `json:"normalized"`
+	Truncated       bool    `json:"truncated"`
+	Calls           uint64  `json:"calls"`
+	CPUMsTotal      float64 `json:"cpu_ms_total"`
+	CPUMsAvg        float64 `json:"cpu_ms_avg"`
+	CPUMsMax        float64 `json:"cpu_ms_max"`
+	RunqWaitMsAvg   float64 `json:"runq_wait_ms_avg"`
+	WallMsAvg       float64 `json:"wall_ms_avg"`
+	WallMsMax       float64 `json:"wall_ms_max"`
+	BytesInTotal    uint64  `json:"bytes_in_total"`
+	BytesOutTotal   uint64  `json:"bytes_out_total"`
+	BytesOutAvg     float64 `json:"bytes_out_avg"`
+	CPUSharePercent float64 `json:"cpu_share_percent"`
+	Role            string  `json:"role"`
+}
+
+// QueryRoleThresholds echoes the culprit/victim cut-offs into the report.
+type QueryRoleThresholds struct {
+	CulpritCPUSharePercent float64 `json:"culprit_cpu_share_percent"`
+	VictimRunqRatio        float64 `json:"victim_runq_ratio"`
+}
