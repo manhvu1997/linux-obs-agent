@@ -229,7 +229,14 @@ int kretprobe_inet_csk_accept(struct pt_regs *ctx)
 
 /* account charges bytes to the current tgid. Sockets with no sock_meta
  * (open before the agent started, or accept hook unavailable) are adopted
- * lazily: direction comes from listen_ports, filled by userspace. */
+ * lazily: direction comes from listen_ports, filled by userspace.
+ *
+ * A socket already in TCP_CLOSE is never adopted: its sock_meta was deleted
+ * at the ->CLOSE transition (e.g. FIN_WAIT2 -> tcp_time_wait -> tcp_done, or
+ * an RST) while the application may still be reading queued data. Adopting
+ * it would count an `opened` with no matching `closed`, and leave an entry no
+ * later CLOSE deletes - which a new socket reusing the same `sk` address
+ * would then inherit. Those trailing bytes are charged without adoption. */
 static __always_inline void account(struct sock *sk, __u64 tx, __u64 rx)
 {
     __u64 skp = (__u64)sk;
@@ -244,11 +251,21 @@ static __always_inline void account(struct sock *sk, __u64 tx, __u64 rx)
         nm.k.tgid = tgid;
         nm.established = 1;
         nm.ignored = !include_loopback && is_loopback(nm.k.peer);
-        bpf_map_update_elem(&sock_meta, &skp, &nm, BPF_NOEXIST);
+
+        __u8 state = BPF_CORE_READ(sk, __sk_common.skc_state);
+        if (state == ST_CLOSE) {
+            if (!nm.ignored)
+                bump(&nm.k, tx, rx, 0, 0);
+            return;
+        }
+
+        /* Only the CPU whose insert wins counts the adoption as opened; a
+         * concurrent adopter loses BPF_NOEXIST and just uses the entry. */
+        int won = bpf_map_update_elem(&sock_meta, &skp, &nm, BPF_NOEXIST) == 0;
         m = bpf_map_lookup_elem(&sock_meta, &skp);
         if (!m)
             return;
-        if (!m->ignored)
+        if (won && !m->ignored)
             bump(&m->k, 0, 0, 1, 0);   /* adopted counts as opened */
     }
     if (m->ignored)

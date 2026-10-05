@@ -93,14 +93,33 @@ func (l *Loader) Stop() {
 
 func (l *Loader) InboundAccounting() string { return l.inbound }
 
-// ReadFlows iterates flow_stats. IPv4 and v4-mapped IPv6 sockets of the
-// same peer collapse into one key (the family is not part of FlowKey).
+// ReadFlows reads flow_stats and collapses it into per-FlowKey totals.
+//
+// Raw entries are first collected into a map keyed by the generated BPF key,
+// so a key yielded twice by Iterate() overwrites instead of summing: when the
+// current key is evicted from the LRU mid-walk the kernel restarts the walk
+// from the first key, and summing those duplicates would over-report one poll
+// and make the next poll look like an eviction to the accumulator.
 func (l *Loader) ReadFlows() (map[nf.FlowKey]nf.FlowValue, error) {
-	out := make(map[nf.FlowKey]nf.FlowValue)
+	raw := make(map[NetflowFlowKey]NetflowFlowVal)
 	var k NetflowFlowKey
 	var v NetflowFlowVal
 	it := l.objs.FlowStats.Iterate()
 	for it.Next(&k, &v) {
+		raw[k] = v
+	}
+	if err := it.Err(); err != nil {
+		return nil, err
+	}
+	return collapseFlows(raw), nil
+}
+
+// collapseFlows sums raw BPF entries that differ only in the address family
+// byte: IPv4 and v4-mapped IPv6 sockets of the same peer become one FlowKey
+// (the family is not part of FlowKey). Each raw key contributes exactly once.
+func collapseFlows(raw map[NetflowFlowKey]NetflowFlowVal) map[nf.FlowKey]nf.FlowValue {
+	out := make(map[nf.FlowKey]nf.FlowValue, len(raw))
+	for k, v := range raw {
 		key := nf.FlowKey{TGID: k.Tgid, Dir: nf.Direction(k.Dir), Peer: nf.PeerFromBytes(k.Peer), ServicePort: k.SvcPort}
 		cur := out[key]
 		cur.BytesTx += v.BytesTx
@@ -109,7 +128,7 @@ func (l *Loader) ReadFlows() (map[nf.FlowKey]nf.FlowValue, error) {
 		cur.Closed += v.Closed
 		out[key] = cur
 	}
-	return out, it.Err()
+	return out
 }
 
 // SetListenPorts makes listen_ports equal to ports.
