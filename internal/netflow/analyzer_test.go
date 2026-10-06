@@ -28,7 +28,7 @@ type fakeProcs map[uint32]string
 func (f fakeProcs) PIDFamilies() map[uint32]string { return f }
 
 func TestAnalyzerPollAndListen(t *testing.T) {
-	src := &fakeSource{flows: map[FlowKey]FlowValue{k(7, Inbound, "10.0.0.9", 3306): {BytesRx: 42}}}
+	src := &fakeSource{flows: map[FlowKey]FlowValue{}}
 	inv := fakeInv{socks: []netinv.Socket{{State: "LISTEN", Local: netip.MustParseAddrPort("0.0.0.0:3306")}}}
 	acc := NewAccumulator(cfg())
 	an := NewAnalyzer(src, inv, fakeProcs{7: "mysql.service"}, acc, 5*time.Second, 30*time.Second)
@@ -37,6 +37,8 @@ func TestAnalyzerPollAndListen(t *testing.T) {
 	if len(src.listen) != 1 || src.listen[0] != 3306 {
 		t.Fatalf("listen ports pushed = %v", src.listen)
 	}
+	an.PollOnce(t0.Add(-5 * time.Second)) // window baseline poll
+	src.flows = map[FlowKey]FlowValue{k(7, Inbound, "10.0.0.9", 3306): {BytesRx: 42}}
 	an.PollOnce(t0)
 	if got := acc.Family("mysql.service").Inbound.BytesRx; got != 42 {
 		t.Fatalf("family rx = %d", got)

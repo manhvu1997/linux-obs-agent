@@ -4,6 +4,7 @@ package netflow
 import (
 	"net/netip"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -21,6 +22,10 @@ type Config struct {
 	MaxFamilies        int           // 50
 	MaxOutboundPeers   int           // 100
 	MaxPeersPerProcess int           // 20
+	// MaxServicePorts bounds the distinct service_port values of the
+	// outbound peer counters node-wide; later ports fold into port 0
+	// (exported as service_port="other"). Internal, not in YAML.
+	MaxServicePorts int // 200
 	// LabelIdleTTL: counters for a label idle longer than this are dropped to
 	// bound memory (churning unit names would otherwise grow the maps without
 	// limit). If the label returns it restarts from 0, a normal Prometheus
@@ -41,6 +46,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxPeersPerProcess <= 0 {
 		c.MaxPeersPerProcess = 20
+	}
+	if c.MaxServicePorts <= 0 {
+		c.MaxServicePorts = 200
 	}
 	if c.LabelIdleTTL <= 0 {
 		c.LabelIdleTTL = time.Hour
@@ -64,6 +72,9 @@ type FamilyPortCounter struct {
 	BytesRx, BytesTx uint64
 }
 
+// FamilyPeerCounter is one outbound (family, peer, service port) counter.
+// ServicePort 0 means "other": the node-wide service-port budget
+// (Config.MaxServicePorts) was exhausted and the port was folded.
 type FamilyPeerCounter struct {
 	Family, PeerIP   string
 	ServicePort      uint16
@@ -147,6 +158,7 @@ type Accumulator struct {
 	famOut     map[famPeerKey]*byteCounter
 	famLabels  labelBudget
 	peerLabels labelBudget
+	portLabels labelBudget // outbound service ports, node-wide
 }
 
 func NewAccumulator(cfg Config) *Accumulator {
@@ -162,6 +174,7 @@ func NewAccumulator(cfg Config) *Accumulator {
 		famOut:     make(map[famPeerKey]*byteCounter),
 		famLabels:  labelBudget{max: cfg.MaxFamilies, seen: make(map[string]time.Time)},
 		peerLabels: labelBudget{max: cfg.MaxOutboundPeers, seen: make(map[string]time.Time)},
+		portLabels: labelBudget{max: cfg.MaxServicePorts, seen: make(map[string]time.Time)},
 	}
 }
 
@@ -178,7 +191,12 @@ func delta(cur, prev uint64) uint64 {
 func (a *Accumulator) Ingest(now time.Time, cur map[FlowKey]FlowValue, pidFamily map[uint32]string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.firstAt.IsZero() {
+	// The first poll's deltas span agent start → first poll (the whole
+	// cumulative kernel value) while elapsed starts at the first poll, so
+	// it is a window baseline only: lifetime counters, active tracking and
+	// pid seen-tracking still use it, window samples do not.
+	baseline := a.firstAt.IsZero()
+	if baseline {
 		a.firstAt = now
 	}
 	a.lastAt = now
@@ -200,9 +218,13 @@ func (a *Accumulator) Ingest(now time.Time, cur map[FlowKey]FlowValue, pidFamily
 	}
 	a.prev = cur
 
-	a.samples = append(a.samples, sample{at: now, deltas: deltas})
+	if !baseline {
+		a.samples = append(a.samples, sample{at: now, deltas: deltas})
+	}
+	// Keep ages < Window: a sample covers the interval ending at its time,
+	// so Window/interval samples span exactly Window.
 	cut := 0
-	for cut < len(a.samples) && now.Sub(a.samples[cut].at) > a.cfg.Window {
+	for cut < len(a.samples) && now.Sub(a.samples[cut].at) >= a.cfg.Window {
 		cut++
 	}
 	a.samples = a.samples[cut:]
@@ -231,7 +253,11 @@ func (a *Accumulator) Ingest(now time.Time, cur map[FlowKey]FlowValue, pidFamily
 			bc.tx += d.BytesTx
 		} else {
 			peer := a.peerLabels.label(k.Peer.String(), now)
-			pk := famPeerKey{fam, peer, k.ServicePort}
+			port := k.ServicePort
+			if a.portLabels.label(strconv.Itoa(int(port)), now) == otherLabel {
+				port = 0
+			}
+			pk := famPeerKey{fam, peer, port}
 			bc := a.famOut[pk]
 			if bc == nil {
 				bc = &byteCounter{}
@@ -299,6 +325,13 @@ func (a *Accumulator) Ingest(now time.Time, cur map[FlowKey]FlowValue, pidFamily
 	if gone := a.peerLabels.expire(now, a.cfg.LabelIdleTTL); len(gone) > 0 {
 		for k := range a.famOut {
 			if gone[k.peer] {
+				delete(a.famOut, k)
+			}
+		}
+	}
+	if gone := a.portLabels.expire(now, a.cfg.LabelIdleTTL); len(gone) > 0 {
+		for k := range a.famOut {
+			if k.port != 0 && gone[strconv.Itoa(int(k.port))] {
 				delete(a.famOut, k)
 			}
 		}

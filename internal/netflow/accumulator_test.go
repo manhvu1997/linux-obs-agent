@@ -12,6 +12,12 @@ var t0 = time.Unix(1_800_000_000, 0)
 
 func cfg() Config { return Config{MaxPeersPerProcess: 20} }
 
+// baseline feeds the first (window-baseline) poll with an empty map, so the
+// next Ingest's deltas land in the window.
+func baseline(a *Accumulator, fam map[uint32]string) {
+	a.Ingest(t0.Add(-5*time.Second), map[FlowKey]FlowValue{}, fam)
+}
+
 func k(tgid uint32, dir Direction, peer string, port uint16) FlowKey {
 	return FlowKey{TGID: tgid, Dir: dir, Peer: netip.MustParseAddr(peer), ServicePort: port}
 }
@@ -24,8 +30,9 @@ func TestDeltaAcrossEviction(t *testing.T) {
 	a.Ingest(t0.Add(5*time.Second), map[FlowKey]FlowValue{key: {BytesTx: 150}}, fam)
 	// Entry evicted from the LRU and re-created: value restarts below previous.
 	a.Ingest(t0.Add(10*time.Second), map[FlowKey]FlowValue{key: {BytesTx: 30}}, fam)
-	if got := a.Process(10).Outbound.BytesTx; got != 180 {
-		t.Fatalf("window tx = %d, want 180", got)
+	// The first poll (100) is the window baseline; the window holds 50+30.
+	if got := a.Process(10).Outbound.BytesTx; got != 80 {
+		t.Fatalf("window tx = %d, want 80", got)
 	}
 	c := a.Counters()
 	if len(c.Dir) != 1 || c.Dir[0].BytesTx != 180 || c.Dir[0].Family != "app.service" || c.Dir[0].Direction != "outbound" {
@@ -51,6 +58,7 @@ func TestActiveConnections(t *testing.T) {
 	a := NewAccumulator(cfg())
 	key := k(10, Inbound, "10.0.3.15", 3306)
 	fam := map[uint32]string{10: "mysql.service"}
+	baseline(a, fam)
 	a.Ingest(t0, map[FlowKey]FlowValue{key: {Opened: 3, Closed: 1}}, fam)
 	s := a.Process(10)
 	if s.Inbound.ConnsActive != 2 || s.Inbound.ConnsOpened != 3 || s.Inbound.ConnsClosed != 1 {
@@ -69,6 +77,7 @@ func TestActiveConnections(t *testing.T) {
 func TestFamilyAggregation(t *testing.T) {
 	a := NewAccumulator(cfg())
 	fam := map[uint32]string{1301: "php-fpm.service", 1302: "php-fpm.service", 99: "other.service"}
+	baseline(a, fam)
 	a.Ingest(t0, map[FlowKey]FlowValue{
 		k(1301, Outbound, "10.0.5.2", 3306): {BytesTx: 10, BytesRx: 100},
 		k(1302, Outbound, "10.0.5.2", 3306): {BytesTx: 20, BytesRx: 200},
@@ -141,6 +150,7 @@ func TestTopPeersCapAndOrder(t *testing.T) {
 	c := cfg()
 	c.MaxPeersPerProcess = 2
 	a := NewAccumulator(c)
+	baseline(a, nil)
 	a.Ingest(t0, map[FlowKey]FlowValue{
 		k(1, Outbound, "10.0.0.1", 443): {BytesTx: 1},
 		k(1, Outbound, "10.0.0.2", 443): {BytesTx: 50},
@@ -163,8 +173,9 @@ func TestProcessRatesFiniteAfterFirstIngest(t *testing.T) {
 		t.Fatalf("summary not JSON-encodable: %v", err)
 	}
 	a.Ingest(t0.Add(10*time.Second), map[FlowKey]FlowValue{k(1, Outbound, "10.0.0.1", 443): {BytesTx: 2000}}, nil)
-	if got := a.Process(1).Outbound.BytesTxPerSec; got != 200 {
-		t.Fatalf("rate = %v, want 200 B/s", got)
+	// First poll is the baseline: 1000 B over the 10 s polled interval.
+	if got := a.Process(1).Outbound.BytesTxPerSec; got != 100 {
+		t.Fatalf("rate = %v, want 100 B/s", got)
 	}
 }
 
@@ -233,5 +244,66 @@ func TestAliveProcessAbsentFromMapKeepsActive(t *testing.T) {
 	a.Ingest(t0.Add(15*time.Minute), map[FlowKey]FlowValue{}, fam)
 	if got := a.Process(10).Inbound.ConnsActive; got != 3 {
 		t.Fatalf("alive process active = %d, want 3", got)
+	}
+}
+
+// Constant 1000 B per 5 s poll is a true rate of 200 B/s. The window must
+// hold exactly Window worth of intervals (ages < Window), not one extra.
+func TestSteadyStateRateMatchesTruth(t *testing.T) {
+	c := cfg()
+	c.Window = 60 * time.Second
+	a := NewAccumulator(c)
+	key := k(1, Outbound, "10.0.0.1", 443)
+	for i := 0; i < 30; i++ {
+		a.Ingest(t0.Add(time.Duration(i)*5*time.Second), map[FlowKey]FlowValue{key: {BytesTx: uint64(i+1) * 1000}}, nil)
+	}
+	got := a.Process(1).Outbound.BytesTxPerSec
+	if got < 198 || got > 202 {
+		t.Fatalf("steady-state rate = %v B/s, want 200 ±1%%", got)
+	}
+}
+
+// The first poll's delta covers agent start → first poll (the whole kernel
+// cumulative value) while elapsed only starts at the first poll; it must
+// be a baseline, not part of the window.
+func TestSecondPollRateNotInflatedByBaseline(t *testing.T) {
+	a := NewAccumulator(cfg())
+	key := k(1, Outbound, "10.0.0.1", 443)
+	a.Ingest(t0, map[FlowKey]FlowValue{key: {BytesTx: 1000}}, nil)
+	a.Ingest(t0.Add(5*time.Second), map[FlowKey]FlowValue{key: {BytesTx: 2000}}, nil)
+	if got := a.Process(1).Outbound.BytesTxPerSec; got > 202 {
+		t.Fatalf("second-poll rate = %v B/s, want ≤ 200 +1%%", got)
+	}
+	// Lifetime counters still include the baseline delta.
+	if got := a.Counters().Dir[0].BytesTx; got != 2000 {
+		t.Fatalf("lifetime tx = %d, want 2000", got)
+	}
+}
+
+// Client ephemeral ports misread as service ports must not explode the
+// series count: ports beyond the budget fold into port 0 ("other").
+func TestOutboundServicePortBudget(t *testing.T) {
+	a := NewAccumulator(cfg())
+	if a.cfg.MaxServicePorts != 200 {
+		t.Fatalf("default MaxServicePorts = %d, want 200", a.cfg.MaxServicePorts)
+	}
+	cur := map[FlowKey]FlowValue{}
+	for p := 0; p < 250; p++ {
+		cur[k(1, Outbound, "10.0.0.1", uint16(40000+p))] = FlowValue{BytesTx: 10}
+	}
+	a.Ingest(t0, cur, map[uint32]string{1: "app.service"})
+	out := a.Counters().Outbound
+	series := map[FamilyPeerCounter]bool{}
+	var total uint64
+	sawOther := false
+	for _, o := range out {
+		total += o.BytesTx
+		if o.ServicePort == 0 {
+			sawOther = true
+		}
+		series[FamilyPeerCounter{Family: o.Family, PeerIP: o.PeerIP, ServicePort: o.ServicePort}] = true
+	}
+	if len(series) > 201 || !sawOther || total != 2500 {
+		t.Fatalf("series=%d (want ≤ 201) other=%v total=%d (want 2500)", len(series), sawOther, total)
 	}
 }
