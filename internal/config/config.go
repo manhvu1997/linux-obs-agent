@@ -395,6 +395,11 @@ type MySQLConfig struct {
 	// EmitAllQueries emits one kernel event per command (needed for digests).
 	// Default true. Env MYSQL_EMIT_ALL_QUERIES. false = legacy slow-only mode.
 	EmitAllQueries bool `yaml:"emit_all_queries"`
+	// SampleQueries keeps the raw text of the first execution of each digest
+	// as top_digests[].sample_query. It contains literals (possibly secrets,
+	// e.g. CREATE USER ... IDENTIFIED BY '...'); digest_text never does.
+	// Default true. Env MYSQL_SAMPLE_QUERIES. false = never store/emit it.
+	SampleQueries bool `yaml:"sample_queries"`
 	// DigestWindow: rolling window for top_digests. Env MYSQL_DIGEST_WINDOW.
 	DigestWindow time.Duration `yaml:"digest_window"`
 	// TopDigests: digests in mysql_report.top_digests (ranked by total CPU).
@@ -535,6 +540,7 @@ func Defaults() *Config {
 			MaxRecentQueries:     100,
 
 			EmitAllQueries:         true,
+			SampleQueries:          true,
 			DigestWindow:           60 * time.Second,
 			TopDigests:             20,
 			StickyDigestsMax:       50,
@@ -627,6 +633,9 @@ func applyMySQLEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("MYSQL_EMIT_ALL_QUERIES"); v != "" {
 		cfg.MySQL.EmitAllQueries = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("MYSQL_SAMPLE_QUERIES"); v != "" {
+		cfg.MySQL.SampleQueries = v == "true" || v == "1" || v == "yes"
 	}
 	if v := os.Getenv("MYSQL_DIGEST_WINDOW"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {

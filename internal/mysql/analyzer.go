@@ -135,13 +135,22 @@ func (a *Analyzer) drainCmdEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
-			class, d, sample, trunc := cmdmap.Classify(ev.Command, ev.Query, ev.QueryLen)
-			a.agg.Add(querystats.Event{
-				PID: ev.PID, Command: class, Digest: d, SampleQuery: sample, Truncated: trunc,
-				WallNs: ev.WallNs, CPUNs: ev.CPUNs, RunqNs: ev.RunqNs,
-				BytesIn: ev.BytesIn, BytesOut: ev.BytesOut, At: time.Now(),
-			})
+			a.agg.Add(a.toEvent(ev, time.Now()))
 		}
+	}
+}
+
+// toEvent classifies one command. With mysql.sample_queries off the raw
+// statement text (which carries literals) is never stored.
+func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time) querystats.Event {
+	class, d, sample, trunc := cmdmap.Classify(ev.Command, ev.Query, ev.QueryLen)
+	if !a.cfg.SampleQueries {
+		sample = ""
+	}
+	return querystats.Event{
+		PID: ev.PID, Command: class, Digest: d, SampleQuery: sample, Truncated: trunc,
+		WallNs: ev.WallNs, CPUNs: ev.CPUNs, RunqNs: ev.RunqNs,
+		BytesIn: ev.BytesIn, BytesOut: ev.BytesOut, At: now,
 	}
 }
 

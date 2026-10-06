@@ -146,15 +146,15 @@ linux-obs-agent/
 │   │   │   ├── fsync.bpf.c          ← eBPF C: kprobe/kretprobe + LRU_HASH aggregation
 │   │   │   ├── gen.go
 │   │   │   └── loader.go            ← Go: attach kprobes, TopOffenders() map poll
-│   │   └── mongo_query/             ← client-side MongoDB query latency tracer
-│   │       ├── mongo_query.bpf.c    ← eBPF C: syscall tracepoints on connect/write/read
-│   │       ├── gen.go
-│   │       └── loader.go            ← Go: track connections to port 27017, parse OP_MSG
-│   │   ├── netflow/                 ← always-on TCP flow accounting
-│   │   │   ├── netflow.bpf.c        ← inet_sock_set_state, inet_csk_accept,
-│   │   │   │                          tcp_sendmsg, tcp_cleanup_rbuf
+│   │   ├── mongo_query/             ← client-side MongoDB query latency tracer
+│   │   │   ├── mongo_query.bpf.c    ← eBPF C: syscall tracepoints on connect/write/read
 │   │   │   ├── gen.go
-│   │   │   └── loader.go            ← implements netflow.Source
+│   │   │   └── loader.go            ← Go: track connections to port 27017, parse OP_MSG
+│   │   └── netflow/                 ← always-on TCP flow accounting
+│   │       ├── netflow.bpf.c        ← inet_sock_set_state, inet_csk_accept,
+│   │       │                          tcp_sendmsg, tcp_cleanup_rbuf
+│   │       ├── gen.go
+│   │       └── loader.go            ← implements netflow.Source
 │   │
 │   ├── trigger/
 │   │   └── engine.go                ← threshold evaluator → calls ebpf.Manager.Activate
@@ -1071,14 +1071,14 @@ All metrics are prefixed with `obs_agent_`.
 | **eBPF fsync (always-on)** | **~0.01% at 10k fsync/s** | **~1 MB (LRU map + ringbuf)** |
 | **Fsync analyzer poll (5s)** | **~0.001%** | **< 1 MB** |
 | Go runtime overhead | ~0.02% | ~12 MB |
-| **eBPF netflow (always-on, ~100k hook calls/s)** | **~0.4%** | **~6 MB (maps)** |
-| **MySQL per-command events (20k QPS)** | **~0.3% kernel + ~1% userspace** | **4 MB ringbuf + ~5 MB digests** |
-| **Family grouping (10s scan)** | **~0.02%** | **< 1 MB** |
-| netinv (per /api/diagnose) | 20–50 ms per call | transient |
-| **Total (all eBPF active + fsync)** | **~0.61%** | **~55 MB** |
-| **Total (no trigger-eBPF, fsync only)** | **~0.17%** | **~20 MB** |
+| **eBPF netflow (always-on, ~100k hook calls/s)** — estimated, not measured | **~0.4%** | **~6 MB (maps)** |
+| **MySQL per-command events (20k QPS)** — estimated, not measured | **~0.3% kernel + ~1% userspace** | **4 MB ringbuf + ~5 MB digests** |
+| **Family grouping (10s scan)** — estimated, not measured | **~0.02%** | **< 1 MB** |
+| netinv (per /api/diagnose) — estimated, not measured | 20–50 ms per call | transient |
+| **Total (all eBPF active + fsync + netflow + MySQL events)** — estimated, not measured | **~2.3%** | **~70 MB** |
+| **Total (no trigger-eBPF; fsync + netflow + MySQL events)** — estimated, not measured | **~1.9%** | **~35 MB** |
 
-All measurements are on a 4-core 8GB VM under moderate load. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
+The totals add the always-on netflow (~0.4 % / ~6 MB) and MySQL per-command events (~1.3 % / ~9 MB, only when `mysql.enabled`) to the previously measured figures. All other measurements are on a 4-core 8GB VM under moderate load. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
 
 **Fsync overhead detail**: At 10 000 fsync/s with a 5 ms slow threshold, the kprobe/kretprobe pair executes ~20 000 times/s. Each execution does one map lookup + one atomic add (~50 ns each). Total: ~1 ms/s ≈ **0.01% CPU** on a single core. The ringbuf emits zero events at normal latencies.
 
@@ -1604,11 +1604,11 @@ curl -s localhost:9200/api/diagnose | jq '.process_report.top_families_cpu[] | {
 
 ### Configuration
 
-`process.report_top_n`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `culprit_cpu_share_percent`, `victim_runq_ratio`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`.
+`process.report_top_n`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `culprit_cpu_share_percent`, `victim_runq_ratio`, `sample_queries`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`, `MYSQL_SAMPLE_QUERIES`.
 
 ### Prometheus
 
-Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound peers, 50 sticky digests; overflow → `"other"`.
+Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound peers, 200 outbound service ports (node-wide), 50 sticky digests; overflow → `"other"`. A label value that is not valid UTF-8 after sanitising is logged and its series skipped, never a failed scrape.
 
 | Metric | Labels |
 |---|---|
@@ -1631,11 +1631,14 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 
 - Per-call CPU is ± one scheduler tick (1–4 ms); per-digest **totals** are accurate. `cpu_ms_avg` is unreliable below 1 ms.
 - Query text is captured up to 511 bytes (`truncated: true` beyond).
+- **Privacy:** `top_digests[].sample_query` is the raw text of the first execution of each digest, **literals included** — potentially secrets (e.g. `CREATE USER … IDENTIFIED BY '…'`). `digest_text` (and the `digest_info` metric) is literal-free. Set `mysql.sample_queries: false` (`MYSQL_SAMPLE_QUERIES=false`) to never store or emit it. `/api/diagnose` and `/metrics` are unauthenticated (with peer IPs and cmdlines): restrict network access to `:9200`.
 - `COM_STMT_EXECUTE` (server-side prepared statements) is measured under the placeholder digest `<COM_STMT_EXECUTE: prepared, text unavailable>`.
 - Process-level network covers TCP only (no UDP, no unix sockets). Pre-existing idle connections are invisible to eBPF until they carry traffic; the `/proc` `connections` list still shows them.
+- `listening_ports` / `connections` come from `/proc/1/net/tcp{,6}` — pid 1's (the host's, with `hostPID: true`) network namespace — falling back to the agent's own namespace when that cannot be read. Processes in **other** network namespaces (containers with their own netns) have no ports/connections listed; their traffic is still counted by the netflow eBPF module.
+- Window rates (`bytes_*_per_sec`) cover only polled intervals: the first poll after start is a baseline, so rates are 0 until the second poll.
 - Uprobes attach to the mysqld binary inode: a mysqld restart is traced automatically; a package upgrade that replaces the binary needs an agent restart.
 - Sent bytes (`bytes_tx`, netflow) count `tcp_sendmsg` returns. `sendfile`/`splice` on kernels < 6.5 go through `tcp_sendpage` and are **not** counted (nginx static files, Kafka); MySQL is unaffected. Received bytes are counted at `tcp_cleanup_rbuf` and can be double counted for reads using `MSG_WAITALL` / `SO_RCVLOWAT > 1`; kTLS/sockmap receive paths are not attributed to the reading process.
-- The eBPF programs are **x86_64 only** (register-level access via a local `pt_regs` layout). The kernel floor is **5.5** (BTF/CO-RE helpers such as `bpf_probe_read_kernel`), not 5.4.
+- The eBPF programs are **x86_64 only** (register-level access via a local `pt_regs` layout); on other architectures the netflow and mysql_query loaders refuse to start (`network_source: "unavailable: …"`). The kernel floor is **5.5** (BTF/CO-RE helpers such as `bpf_probe_read_kernel`), not 5.4.
 - The result-bytes kretprobes use `RetprobeMaxActive=2048` via tracefs when available. When tracefs is unavailable the loader falls back to the kernel default instance count, and with the default many concurrent slow-client senders can make the kernel drop kretprobe returns and under-count `bytes_out` / `bytes_tx`. Tracefs-based probes can leave `ebpf_*` events in `/sys/kernel/tracing/kprobe_events` after a crash.
 - Lifetime counters for a family or outbound-peer label that was idle for more than 1 h restart from 0 if it returns (bounded memory; a normal Prometheus counter reset).
 - `COM_QUERY` length is read as a 4-byte `unsigned int` (MySQL 5.7/8.0). `run_delay` needs scheduler stats; on kernels where it reads 0 the report sets `cpu_accounting: run_delay_unavailable`.
@@ -1649,6 +1652,8 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 | mysql per-command events (20k QPS) | ~0.3 % kernel + ~1 % userspace | 4 MB ringbuf + ~5 MB digests |
 | family grouping (10 s scan) | ~0.02 % | < 1 MB |
 | netinv (per /api/diagnose) | 20–50 ms per call | transient |
+
+All figures in this table are **estimated, not measured**.
 
 ---
 

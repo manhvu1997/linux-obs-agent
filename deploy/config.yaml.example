@@ -351,6 +351,11 @@ mysql:
   # wait, wall time and bytes. Ranks by TOTAL CPU so the query that causes a
   # CPU incident is separated from the queries merely slowed by it.
   emit_all_queries: true        # MYSQL_EMIT_ALL_QUERIES; false = slow-only legacy mode
+  # top_digests[].sample_query is the raw text of the first execution of each
+  # digest, literals included (possibly secrets, e.g. CREATE USER ...
+  # IDENTIFIED BY '...'). digest_text is literal-free. /api/diagnose is
+  # unauthenticated: restrict network access to metrics_addr (:9200).
+  sample_queries: true          # MYSQL_SAMPLE_QUERIES; false = never store/emit sample_query
   digest_window: 60s            # MYSQL_DIGEST_WINDOW
   top_digests: 20
   sticky_digests_max: 50        # digests exported to Prometheus

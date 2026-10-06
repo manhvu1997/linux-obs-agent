@@ -63,3 +63,15 @@ func TestMySQLDigestDefaults(t *testing.T) {
 		t.Fatal("digest_window < poll_interval must be rejected when mysql is enabled")
 	}
 }
+
+func TestMySQLSampleQueries(t *testing.T) {
+	if !Defaults().MySQL.SampleQueries {
+		t.Fatal("mysql.sample_queries must default to true")
+	}
+	t.Setenv("MYSQL_SAMPLE_QUERIES", "false")
+	c := Defaults()
+	applyMySQLEnvOverrides(c)
+	if c.MySQL.SampleQueries {
+		t.Fatal("MYSQL_SAMPLE_QUERIES=false not applied")
+	}
+}
