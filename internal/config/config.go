@@ -400,6 +400,11 @@ type MySQLConfig struct {
 	// e.g. CREATE USER ... IDENTIFIED BY '...'); digest_text never does.
 	// Default true. Env MYSQL_SAMPLE_QUERIES. false = never store/emit it.
 	SampleQueries bool `yaml:"sample_queries"`
+	// FoldSystemSchemas merges every statement that qualifies an object with
+	// information_schema, performance_schema, sys or mysql (exporter and
+	// monitoring queries) into one aggregate digest, and drops its sample.
+	// Default true. Env MYSQL_FOLD_SYSTEM_SCHEMAS. false = one digest each.
+	FoldSystemSchemas bool `yaml:"fold_system_schemas"`
 	// DigestWindow: rolling window for top_digests. Env MYSQL_DIGEST_WINDOW.
 	DigestWindow time.Duration `yaml:"digest_window"`
 	// TopDigests: digests in mysql_report.top_digests (ranked by total CPU).
@@ -541,6 +546,7 @@ func Defaults() *Config {
 
 			EmitAllQueries:         true,
 			SampleQueries:          true,
+			FoldSystemSchemas:      true,
 			DigestWindow:           60 * time.Second,
 			TopDigests:             20,
 			StickyDigestsMax:       50,
@@ -636,6 +642,9 @@ func applyMySQLEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("MYSQL_SAMPLE_QUERIES"); v != "" {
 		cfg.MySQL.SampleQueries = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("MYSQL_FOLD_SYSTEM_SCHEMAS"); v != "" {
+		cfg.MySQL.FoldSystemSchemas = v == "true" || v == "1" || v == "yes"
 	}
 	if v := os.Getenv("MYSQL_DIGEST_WINDOW"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {

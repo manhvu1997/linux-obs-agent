@@ -257,3 +257,31 @@ func isIdentStart(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$' || c == '@' || c >= 0x80
 }
 func isIdentPart(c byte) bool { return isIdentStart(c) || isDigit(c) }
+
+// systemSchemas are the MySQL schemas that hold server metadata. Queries
+// against them come from exporters and monitoring tools, not applications.
+var systemSchemas = map[string]bool{
+	"information_schema": true,
+	"performance_schema": true,
+	"sys":                true,
+	"mysql":              true,
+}
+
+// ReferencesSystemSchema reports whether normalizedText (the space-separated
+// output of Normalize) qualifies an object with a system schema, i.e. a token
+// that is one of information_schema, performance_schema, sys or mysql
+// (backticks stripped, case-insensitive) immediately followed by ".".
+// A bare name ("select sys from t") or one AFTER the dot ("t . mysql", a
+// column or table named mysql) is not a schema qualifier.
+func ReferencesSystemSchema(normalizedText string) bool {
+	toks := strings.Fields(normalizedText)
+	for i := 0; i+1 < len(toks); i++ {
+		if toks[i+1] != "." {
+			continue
+		}
+		if systemSchemas[strings.ToLower(strings.Trim(toks[i], "`"))] {
+			return true
+		}
+	}
+	return false
+}

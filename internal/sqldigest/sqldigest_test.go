@@ -82,3 +82,32 @@ func FuzzNormalize(f *testing.F) {
 		}
 	})
 }
+
+func TestReferencesSystemSchema(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"select * from information_schema . columns where table_schema = ?", true},
+		{"select * from `performance_schema` . events_statements_summary_by_digest", true},
+		{"select * from sys . statement_analysis", true},
+		{"select user from mysql . user", true},
+		{"select * from `INFORMATION_SCHEMA` . `TABLES`", true},
+		// Normalize lower-cases identifiers; the real path is Normalize → check.
+		{Normalize("SELECT * FROM performance_schema.threads").Text, true},
+		{"select mysql_version from t", false},
+		{"select * from information_schema_backup . t", false},
+		{"select sys from t", false},
+		// A column (or table) NAMED mysql after the dot is not a schema
+		// qualifier: only "<schema> ." counts.
+		{"select t . mysql from t", false},
+		{"select * from users where id = ?", false},
+		{"", false},
+		{"mysql", false},
+	}
+	for _, c := range cases {
+		if got := ReferencesSystemSchema(c.text); got != c.want {
+			t.Errorf("ReferencesSystemSchema(%q) = %v, want %v", c.text, got, c.want)
+		}
+	}
+}

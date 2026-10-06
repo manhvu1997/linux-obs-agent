@@ -75,3 +75,15 @@ func TestMySQLSampleQueries(t *testing.T) {
 		t.Fatal("MYSQL_SAMPLE_QUERIES=false not applied")
 	}
 }
+
+func TestMySQLFoldSystemSchemas(t *testing.T) {
+	if !Defaults().MySQL.FoldSystemSchemas {
+		t.Fatal("mysql.fold_system_schemas must default to true")
+	}
+	t.Setenv("MYSQL_FOLD_SYSTEM_SCHEMAS", "false")
+	c := Defaults()
+	applyMySQLEnvOverrides(c)
+	if c.MySQL.FoldSystemSchemas {
+		t.Fatal("MYSQL_FOLD_SYSTEM_SCHEMAS=false not applied")
+	}
+}
