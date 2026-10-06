@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -141,6 +142,11 @@ func NewLoader(thresholdNs uint64, mysqldPath string, emitAll bool) *Loader {
 // Start loads the eBPF objects, configures the slow-query threshold, attaches
 // uprobes to dispatch_command in mysqld, and launches the ringbuf consumer.
 func (l *Loader) Start(ctx context.Context) error {
+	// The probes read registers through struct x86_regs casts; on any other
+	// architecture they would return plausible garbage, not "unavailable".
+	if runtime.GOARCH != "amd64" {
+		return fmt.Errorf("mysql_query: eBPF programs support only amd64 (running on %s)", runtime.GOARCH)
+	}
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("mysql_query: removing memlock: %w", err)
 	}
@@ -280,7 +286,8 @@ func attachKretprobeMaxActive(sym string, prog *ebpf.Program) (link.Link, error)
 	if err == nil {
 		return krp, nil
 	}
-	slog.Debug("mysql_query: kretprobe with maxactive failed, retrying with defaults",
+	slog.Info("mysql_query: RetprobeMaxActive could not be applied, retrying with defaults; "+
+		"concurrent slow senders may be under-counted",
 		"symbol", sym, "maxactive", kretprobeMaxActive, "err", err)
 	return link.Kretprobe(sym, prog, nil)
 }

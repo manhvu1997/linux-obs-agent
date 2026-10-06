@@ -136,9 +136,11 @@ struct mysql_cmd_event_t *__mysql_cmd_event_t_unused __attribute__((unused));
 
 // ─── Maps ─────────────────────────────────────────────────────────────────────
 
-/* In-flight commands keyed by TID; always deleted in the uretprobe. */
+/* In-flight commands keyed by TID; always deleted in the uretprobe. LRU so
+ * entries of threads that never returned (killed thread, crashed mysqld)
+ * are reclaimed instead of filling the map. */
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __type(key, __u32);
     __type(value, struct mysql_pending_t);
     __uint(max_entries, MAX_ENTRIES);

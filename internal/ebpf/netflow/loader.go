@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 
 	nf "github.com/manhvu1997/linux-obs-agent/internal/netflow"
+	"github.com/manhvu1997/linux-obs-agent/internal/netinv"
 )
 
 var _ nf.Source = (*Loader)(nil)
@@ -28,9 +30,15 @@ func NewLoader(includeLoopback bool) *Loader {
 	return &Loader{includeLoopback: includeLoopback}
 }
 
-// Start loads the program and attaches all hooks. The accept kretprobe is
-// optional: without it inbound sockets are adopted on first bytes.
+// Start loads the program, seeds listen_ports and attaches all hooks. The
+// accept kretprobe is optional: without it inbound sockets are adopted on
+// first bytes.
 func (l *Loader) Start() error {
+	// The probes read registers through struct x86_regs casts; on any other
+	// architecture they would return plausible garbage, not "unavailable".
+	if runtime.GOARCH != "amd64" {
+		return fmt.Errorf("netflow: eBPF programs support only amd64 (running on %s)", runtime.GOARCH)
+	}
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("netflow: removing memlock: %w", err)
 	}
@@ -47,6 +55,14 @@ func (l *Loader) Start() error {
 	}
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return fmt.Errorf("netflow: loading objects: %w", err)
+	}
+	// Seed listen_ports BEFORE any hook is attached: a pre-existing inbound
+	// connection adopted while the map is empty is classified outbound with
+	// the client's ephemeral port as service port, for its whole lifetime.
+	if socks, err := netinv.New("/proc").Listening(); err != nil {
+		slog.Warn("netflow: seeding listen_ports: listing listening sockets", "err", err)
+	} else if err := l.SetListenPorts(netinv.ListenPorts(socks)); err != nil {
+		slog.Warn("netflow: seeding listen_ports", "err", err)
 	}
 
 	required := []struct {
@@ -178,7 +194,8 @@ func attachKretprobeMaxActive(sym string, prog *ebpf.Program) (link.Link, error)
 	if err == nil {
 		return krp, nil
 	}
-	slog.Debug("netflow: kretprobe with maxactive failed, retrying with defaults",
+	slog.Info("netflow: RetprobeMaxActive could not be applied, retrying with defaults; "+
+		"concurrent slow senders may be under-counted",
 		"symbol", sym, "maxactive", kretprobeMaxActive, "err", err)
 	return link.Kretprobe(sym, prog, nil)
 }
