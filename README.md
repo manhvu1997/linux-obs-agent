@@ -93,6 +93,32 @@ sudo ./build/obs-agent -config deploy/config.yaml.example -loglevel debug
 
 ---
 
+## Download (GitHub Packages / Releases)
+
+CI (`.github/workflows/ci.yml`) lints, tests and builds a static **linux/amd64** binary on every push to `main` and every pull request.
+Pushes to `main` and `v*` tags also publish a container image to GitHub Container Registry; tags also publish a release tarball.
+
+```bash
+# Container image (linux/amd64) — :latest and :sha-<short> follow main, :<version> / :<major>.<minor> follow v* tags
+docker pull ghcr.io/manhvu1997/linux-obs-agent:latest
+docker run --rm --privileged --pid=host -p 9200:9200 ghcr.io/manhvu1997/linux-obs-agent:latest
+
+# Bare metal / VM: download the release tarball (contains obs-agent, config.yaml.example, obs-agent.service)
+VERSION=1.2.3   # a v* tag without the leading "v"
+curl -fsSLO https://github.com/manhvu1997/linux-obs-agent/releases/download/v${VERSION}/obs-agent_${VERSION}_linux_amd64.tar.gz
+curl -fsSLO https://github.com/manhvu1997/linux-obs-agent/releases/download/v${VERSION}/obs-agent_${VERSION}_linux_amd64.tar.gz.sha256
+sha256sum -c obs-agent_${VERSION}_linux_amd64.tar.gz.sha256
+```
+
+A new GHCR package starts **private**. Pulling it needs `docker login ghcr.io` with a token that has `read:packages`; to let anyone pull it, set the
+visibility to public once under *Packages → linux-obs-agent → Package settings*. The image is linked to this repository through
+`org.opencontainers.image.source`, so repository collaborators get access automatically.
+
+To cut a release: `git tag v1.2.3 && git push origin v1.2.3`. The eBPF programs are **x86_64 only** (see AGENTS.md §20), so only `linux/amd64` is built.
+The `eBPF integration tests` job is manual: *Actions → CI → Run workflow → ebpf_integration*; it runs the netflow integration tests with `sudo` on a real runner kernel.
+
+---
+
 ## Configuration
 
 Copy the annotated example and edit as needed:

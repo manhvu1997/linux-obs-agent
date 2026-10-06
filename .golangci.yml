@@ -1,0 +1,28 @@
+# golangci-lint v2 configuration.
+# Linters: the v2 "standard" set (errcheck, govet, ineffassign, staticcheck, unused)
+# plus gofmt as a formatter check.
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # Buffered writers report write errors at Flush(), which the callers do check.
+      exclude-functions:
+        - (*bufio.Writer).Write
+        - (*bufio.Writer).WriteByte
+        - (*bufio.Writer).WriteRune
+        - (*bufio.Writer).WriteString
+  exclusions:
+    rules:
+      # Unchecked errors from cleanup calls (closing links, readers, files, bodies)
+      # and best-effort version parsing are intentional throughout the eBPF loaders.
+      - linters: [errcheck]
+        text: "Error return value of .*(Close|Sscanf).* is not checked"
+
+formatters:
+  enable:
+    - gofmt

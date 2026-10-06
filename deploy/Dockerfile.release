@@ -1,0 +1,26 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Release image for linux-obs-agent (linux/amd64).
+#
+# Unlike deploy/Dockerfile, this does NOT compile anything: CI builds the static
+# binary on the runner (where /sys/kernel/btf/vmlinux is available for CO-RE
+# header generation) and this file only packages it. The build context is the
+# directory holding `obs-agent` and `config.yaml.example` (see .github/workflows/ci.yml).
+# ──────────────────────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12:nonroot
+
+LABEL org.opencontainers.image.title="linux-obs-agent"
+LABEL org.opencontainers.image.description="eBPF-powered Linux observability agent"
+LABEL org.opencontainers.image.source="https://github.com/manhvu1997/linux-obs-agent"
+
+# --chmod: artifact transfer between CI jobs does not preserve the executable bit.
+COPY --chmod=0755 obs-agent /obs-agent
+COPY config.yaml.example /etc/obs-agent/config.yaml
+
+# The agent needs root (or CAP_BPF/CAP_PERFMON/CAP_SYS_ADMIN/CAP_SYS_PTRACE) to load eBPF.
+# For Kubernetes prefer securityContext.capabilities.add over running privileged.
+USER root
+
+EXPOSE 9200
+
+ENTRYPOINT ["/obs-agent"]
+CMD ["-config", "/etc/obs-agent/config.yaml"]

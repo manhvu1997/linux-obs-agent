@@ -1,0 +1,27 @@
+name: Generate eBPF objects
+description: >
+  Install the eBPF toolchain, build vmlinux.h from the runner kernel's BTF and run
+  bpf2go (make generate). The generated *_bpfel.go / *.o files are not committed, so
+  every job that compiles or type-checks the agent needs this step.
+  Requires actions/checkout and actions/setup-go to have run first.
+runs:
+  using: composite
+  steps:
+    - name: Install clang, libbpf and bpftool
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev linux-tools-common linux-tools-generic
+        # linux-tools-generic puts bpftool under a versioned directory.
+        BPFTOOL=$(find /usr/lib/linux-tools -name bpftool 2>/dev/null | sort | tail -1)
+        test -n "$BPFTOOL" || { echo "::error::bpftool not found after install"; exit 1; }
+        sudo ln -sf "$BPFTOOL" /usr/local/bin/bpftool
+        bpftool version | head -1
+        clang --version | head -1
+    - name: Generate vmlinux.h and bpf2go objects
+      shell: bash
+      run: |
+        test -r /sys/kernel/btf/vmlinux || { echo "::error::runner kernel has no BTF (/sys/kernel/btf/vmlinux)"; exit 1; }
+        make generate
+        test -s internal/ebpf/headers/vmlinux.h
+        ls internal/ebpf/*/*_bpfel.go | wc -l
