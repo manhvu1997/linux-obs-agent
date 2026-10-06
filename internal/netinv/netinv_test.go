@@ -84,6 +84,46 @@ func fakeProc(t *testing.T, tcp string, fds map[uint32][]string) string {
 	return root
 }
 
+// withInitNetns adds <root>/1/net/tcp{,6}: the socket tables of pid 1's
+// network namespace (the host's, when the agent runs with hostPID).
+func withInitNetns(t *testing.T, root, tcp string) {
+	t.Helper()
+	dir := filepath.Join(root, "1", "net")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tcp"), []byte(header+tcp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tcp6"), []byte(header), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSocketsPreferInitNetns(t *testing.T) {
+	// <root>/net is the agent's own (pod) netns; <root>/1/net is the host's.
+	root := fakeProc(t, row(0, v4hex("0.0.0.0", 9200), v4hex("0.0.0.0", 0), "0A", 1), nil)
+	withInitNetns(t, root, row(0, v4hex("0.0.0.0", 3306), v4hex("0.0.0.0", 0), "0A", 2))
+	socks, err := New(root).Listening()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(ListenPorts(socks)); got != "[3306]" {
+		t.Fatalf("listen ports = %s, want [3306] from pid 1's netns", got)
+	}
+}
+
+func TestSocketsFallBackToOwnNetns(t *testing.T) {
+	root := fakeProc(t, row(0, v4hex("0.0.0.0", 9200), v4hex("0.0.0.0", 0), "0A", 1), nil)
+	socks, err := New(root).Listening()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(ListenPorts(socks)); got != "[9200]" {
+		t.Fatalf("listen ports = %s, want [9200] from <root>/net fallback", got)
+	}
+}
+
 func TestForPIDs(t *testing.T) {
 	tcp := row(0, v4hex("0.0.0.0", 3306), v4hex("0.0.0.0", 0), "0A", 1001) +
 		row(1, v4hex("10.0.1.7", 3306), v4hex("10.0.3.15", 51844), "01", 1002) +

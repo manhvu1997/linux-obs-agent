@@ -111,11 +111,25 @@ func New(procRoot string) *Inventory {
 	return &Inventory{root: procRoot}
 }
 
-// Sockets returns all TCP sockets in the agent's network namespace.
+// Sockets returns all TCP sockets in pid 1's network namespace.
+//
+// <root>/net resolves to <root>/self/net, the agent's OWN namespace; in a pod
+// with hostNetwork: false that is the pod's, not the host's. With hostPID,
+// <root>/1/net is the init process's (host) namespace, so it is preferred.
+// If it cannot be opened (no hostPID, permission, not found) the agent's own
+// namespace is used instead. Sockets of processes in other network
+// namespaces (containers with their own netns) are never listed; their
+// traffic is still counted by the netflow eBPF module.
 func (v *Inventory) Sockets() ([]Socket, error) {
+	base := filepath.Join(v.root, "1")
+	if f, err := os.Open(filepath.Join(base, "net", "tcp")); err == nil {
+		f.Close()
+	} else {
+		base = v.root
+	}
 	var all []Socket
 	for _, p := range []struct{ file, proto string }{{"net/tcp", "tcp"}, {"net/tcp6", "tcp6"}} {
-		f, err := os.Open(filepath.Join(v.root, p.file))
+		f, err := os.Open(filepath.Join(base, p.file))
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
