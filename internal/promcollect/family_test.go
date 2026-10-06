@@ -3,6 +3,7 @@ package promcollect
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -83,5 +84,54 @@ obs_agent_family_cpu_percent{family="php-fpm.service"} 64
 `
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want), "obs_agent_family_cpu_percent"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ServicePort 0 is the accumulator's folded "other" bucket for outbound
+// service ports beyond its budget.
+func TestFamilyOutboundPortZeroRendersOther(t *testing.T) {
+	counters := netflow.Counters{
+		Outbound: []netflow.FamilyPeerCounter{{Family: "app.service", PeerIP: "10.0.5.2", ServicePort: 0, BytesRx: 5, BytesTx: 6}},
+	}
+	c := NewFamilyCollector(families, func() (netflow.Counters, bool) { return counters, true }, 50)
+	want := `
+# HELP obs_agent_family_outbound_peer_bytes_total Outbound TCP bytes per process family, remote peer IP and remote service port.
+# TYPE obs_agent_family_outbound_peer_bytes_total counter
+obs_agent_family_outbound_peer_bytes_total{family="app.service",flow="rx",peer_ip="10.0.5.2",service_port="other"} 5
+obs_agent_family_outbound_peer_bytes_total{family="app.service",flow="tx",peer_ip="10.0.5.2",service_port="other"} 6
+`
+	if err := testutil.CollectAndCompare(c, strings.NewReader(want), "obs_agent_family_outbound_peer_bytes_total"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Family names come from raw cgroup/unit names; invalid UTF-8 must never
+// break the scrape or crash the agent, on the gauge path or the counters.
+func TestFamilyInvalidUTF8Label(t *testing.T) {
+	bad := "a\xffpp.service"
+	fams := func() []model.FamilyStats {
+		return []model.FamilyStats{{Family: bad, CPUPercent: 5, MemRSSBytes: 1, ProcessCount: 1}}
+	}
+	counters := netflow.Counters{
+		Dir:      []netflow.FamilyDirCounter{{Family: bad, Direction: "outbound", BytesTx: 1}},
+		Inbound:  []netflow.FamilyPortCounter{{Family: bad, ServicePort: 80, BytesRx: 1}},
+		Outbound: []netflow.FamilyPeerCounter{{Family: bad, PeerIP: "10.0.5.2", ServicePort: 3306, BytesTx: 1}},
+	}
+	c := NewFamilyCollector(fams, func() (netflow.Counters, bool) { return counters, true }, 50)
+	for name, perSeries := range map[string]int{
+		"obs_agent_family_cpu_percent":               1,
+		"obs_agent_family_net_bytes_total":           2,
+		"obs_agent_family_inbound_bytes_total":       2,
+		"obs_agent_family_outbound_peer_bytes_total": 2,
+	} {
+		vals := gatherOne(t, c, name, "family")
+		if len(vals) != perSeries {
+			t.Fatalf("%s: %d series, want %d", name, len(vals), perSeries)
+		}
+		for _, v := range vals {
+			if !utf8.ValidString(v) || v != "a?pp.service" {
+				t.Fatalf("%s: family label %q, want valid %q", name, v, "a?pp.service")
+			}
+		}
 	}
 }

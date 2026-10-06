@@ -4,6 +4,7 @@
 package promcollect
 
 import (
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,27 +91,43 @@ func (c *FamilyCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, d := range nc.Dir {
 		fam := SanitizeLabel(d.Family, 200)
-		ch <- prometheus.MustNewConstMetric(famNetBytesDesc, prometheus.CounterValue, float64(d.BytesRx), fam, d.Direction, "rx")
-		ch <- prometheus.MustNewConstMetric(famNetBytesDesc, prometheus.CounterValue, float64(d.BytesTx), fam, d.Direction, "tx")
-		ch <- prometheus.MustNewConstMetric(famOpenedDesc, prometheus.CounterValue, float64(d.Opened), fam, d.Direction)
-		ch <- prometheus.MustNewConstMetric(famActiveDesc, prometheus.GaugeValue, float64(d.Active), fam, d.Direction)
+		emit(ch, famNetBytesDesc, prometheus.CounterValue, float64(d.BytesRx), fam, d.Direction, "rx")
+		emit(ch, famNetBytesDesc, prometheus.CounterValue, float64(d.BytesTx), fam, d.Direction, "tx")
+		emit(ch, famOpenedDesc, prometheus.CounterValue, float64(d.Opened), fam, d.Direction)
+		emit(ch, famActiveDesc, prometheus.GaugeValue, float64(d.Active), fam, d.Direction)
 	}
 	for _, p := range nc.Inbound {
 		fam, port := SanitizeLabel(p.Family, 200), strconv.Itoa(int(p.ServicePort))
-		ch <- prometheus.MustNewConstMetric(famInDesc, prometheus.CounterValue, float64(p.BytesRx), fam, port, "rx")
-		ch <- prometheus.MustNewConstMetric(famInDesc, prometheus.CounterValue, float64(p.BytesTx), fam, port, "tx")
+		emit(ch, famInDesc, prometheus.CounterValue, float64(p.BytesRx), fam, port, "rx")
+		emit(ch, famInDesc, prometheus.CounterValue, float64(p.BytesTx), fam, port, "tx")
 	}
 	for _, p := range nc.Outbound {
-		fam, port := SanitizeLabel(p.Family, 200), strconv.Itoa(int(p.ServicePort))
-		ch <- prometheus.MustNewConstMetric(famOutDesc, prometheus.CounterValue, float64(p.BytesRx), fam, p.PeerIP, port, "rx")
-		ch <- prometheus.MustNewConstMetric(famOutDesc, prometheus.CounterValue, float64(p.BytesTx), fam, p.PeerIP, port, "tx")
+		// ServicePort 0 is the accumulator's fold for ports beyond its budget.
+		fam, port := SanitizeLabel(p.Family, 200), "other"
+		if p.ServicePort != 0 {
+			port = strconv.Itoa(int(p.ServicePort))
+		}
+		emit(ch, famOutDesc, prometheus.CounterValue, float64(p.BytesRx), fam, p.PeerIP, port, "rx")
+		emit(ch, famOutDesc, prometheus.CounterValue, float64(p.BytesTx), fam, p.PeerIP, port, "tx")
 	}
 }
 
 func emitFamily(ch chan<- prometheus.Metric, label string, f model.FamilyStats) {
-	ch <- prometheus.MustNewConstMetric(famCPUDesc, prometheus.GaugeValue, f.CPUPercent, label)
-	ch <- prometheus.MustNewConstMetric(famMemDesc, prometheus.GaugeValue, float64(f.MemRSSBytes), label)
-	ch <- prometheus.MustNewConstMetric(famProcsDesc, prometheus.GaugeValue, float64(f.ProcessCount), label)
+	emit(ch, famCPUDesc, prometheus.GaugeValue, f.CPUPercent, label)
+	emit(ch, famMemDesc, prometheus.GaugeValue, float64(f.MemRSSBytes), label)
+	emit(ch, famProcsDesc, prometheus.GaugeValue, float64(f.ProcessCount), label)
+}
+
+// emit sends one const metric. A series NewConstMetric rejects (e.g. a label
+// value that is not valid UTF-8) is logged and skipped: MustNewConstMetric
+// would panic inside Registry.Gather's collector goroutine and kill the agent.
+func emit(ch chan<- prometheus.Metric, desc *prometheus.Desc, vt prometheus.ValueType, v float64, labels ...string) {
+	m, err := prometheus.NewConstMetric(desc, vt, v, labels...)
+	if err != nil {
+		slog.Warn("promcollect: skipping invalid series", "desc", desc.String(), "err", err)
+		return
+	}
+	ch <- m
 }
 
 // SanitizeLabel returns s as valid UTF-8 of at most max bytes, never

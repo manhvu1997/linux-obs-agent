@@ -58,19 +58,19 @@ func (c *MySQLCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	sec := func(ns uint64) float64 { return float64(ns) / 1e9 }
 	for cmd, q := range s.Commands {
-		ch <- prometheus.MustNewConstMetric(myQueriesDesc, prometheus.CounterValue, float64(q.Calls), cmd)
-		ch <- prometheus.MustNewConstMetric(myCPUDesc, prometheus.CounterValue, sec(q.CPUNs), cmd)
-		ch <- prometheus.MustNewConstMetric(myRunqDesc, prometheus.CounterValue, sec(q.RunqNs), cmd)
-		ch <- prometheus.MustNewConstMetric(myWallDesc, prometheus.CounterValue, sec(q.WallNs), cmd)
-		ch <- prometheus.MustNewConstMetric(myBytesDesc, prometheus.CounterValue, float64(q.BytesIn), cmd, "in")
-		ch <- prometheus.MustNewConstMetric(myBytesDesc, prometheus.CounterValue, float64(q.BytesOut), cmd, "out")
+		emit(ch, myQueriesDesc, prometheus.CounterValue, float64(q.Calls), cmd)
+		emit(ch, myCPUDesc, prometheus.CounterValue, sec(q.CPUNs), cmd)
+		emit(ch, myRunqDesc, prometheus.CounterValue, sec(q.RunqNs), cmd)
+		emit(ch, myWallDesc, prometheus.CounterValue, sec(q.WallNs), cmd)
+		emit(ch, myBytesDesc, prometheus.CounterValue, float64(q.BytesIn), cmd, "in")
+		emit(ch, myBytesDesc, prometheus.CounterValue, float64(q.BytesOut), cmd, "out")
 	}
 	for _, d := range s.Exported {
-		ch <- prometheus.MustNewConstMetric(myDigestCPUDesc, prometheus.CounterValue, sec(d.Counters.CPUNs), d.ID)
-		ch <- prometheus.MustNewConstMetric(myDigestCallsDesc, prometheus.CounterValue, float64(d.Counters.Calls), d.ID)
-		ch <- prometheus.MustNewConstMetric(myDigestOutDesc, prometheus.CounterValue, float64(d.Counters.BytesOut), d.ID)
-		ch <- prometheus.MustNewConstMetric(myDigestRunqDesc, prometheus.CounterValue, sec(d.Counters.RunqNs), d.ID)
-		ch <- prometheus.MustNewConstMetric(myDigestInfoDesc, prometheus.GaugeValue, 1, d.ID, SanitizeLabel(d.Text, digestTextMaxBytes))
+		emit(ch, myDigestCPUDesc, prometheus.CounterValue, sec(d.Counters.CPUNs), d.ID)
+		emit(ch, myDigestCallsDesc, prometheus.CounterValue, float64(d.Counters.Calls), d.ID)
+		emit(ch, myDigestOutDesc, prometheus.CounterValue, float64(d.Counters.BytesOut), d.ID)
+		emit(ch, myDigestRunqDesc, prometheus.CounterValue, sec(d.Counters.RunqNs), d.ID)
+		emit(ch, myDigestInfoDesc, prometheus.GaugeValue, 1, d.ID, SanitizeLabel(d.Text, digestTextMaxBytes))
 	}
-	ch <- prometheus.MustNewConstMetric(myDroppedDesc, prometheus.CounterValue, float64(c.dropped()))
+	emit(ch, myDroppedDesc, prometheus.CounterValue, float64(c.dropped()))
 }
