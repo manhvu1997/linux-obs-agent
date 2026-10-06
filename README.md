@@ -93,28 +93,47 @@ sudo ./build/obs-agent -config deploy/config.yaml.example -loglevel debug
 
 ---
 
-## Download (GitHub Packages / Releases)
+## Download
 
 CI (`.github/workflows/ci.yml`) lints, tests and builds a static **linux/amd64** binary on every push to `main` and every pull request.
-Pushes to `main` and `v*` tags also publish a container image to GitHub Container Registry; tags also publish a release tarball.
+The eBPF programs are **x86_64 only** (see AGENTS.md §20), so only `linux/amd64` is built.
+
+| What | Where | Updated |
+|---|---|---|
+| **Binary** (`obs-agent-linux-amd64`, tarball, `SHA256SUMS`) — versioned | repo → **Releases** → `vX.Y.Z` | when you push a `v*` tag |
+| **Binary** — newest build of `main` | repo → **Releases** → *Latest build (main)* (pre-release, tag `edge`) | every push to `main` |
+| **Container image** | repo → **Packages** → `linux-obs-agent` (`ghcr.io/manhvu1997/linux-obs-agent`) | every push to `main` / `v*` tag |
+
+> GitHub's **Packages** tab only hosts container images (and npm/Maven/… packages), not plain binaries — the downloadable binary is under **Releases**.
 
 ```bash
-# Container image (linux/amd64) — :latest and :sha-<short> follow main, :<version> / :<major>.<minor> follow v* tags
+# Binary on a VM / bare metal (needs root or CAP_BPF/CAP_PERFMON/CAP_SYS_ADMIN/CAP_SYS_PTRACE to load eBPF)
+BASE=https://github.com/manhvu1997/linux-obs-agent/releases
+curl -fSL -o obs-agent "$BASE/latest/download/obs-agent-linux-amd64"   # newest tagged release
+# curl -fSL -o obs-agent "$BASE/download/edge/obs-agent-linux-amd64"   # newest build of main
+# curl -fSL -o obs-agent "$BASE/download/v1.2.3/obs-agent-linux-amd64" # a specific version
+chmod +x obs-agent
+sudo ./obs-agent -config /etc/obs-agent/config.yaml
+
+# Verify (download SHA256SUMS from the same release; it lists the binary and the tarball)
+curl -fSLO "$BASE/latest/download/SHA256SUMS" && sha256sum -c --ignore-missing SHA256SUMS
+
+# Tarball: obs-agent, config.yaml.example and the obs-agent.service systemd unit
+curl -fSLO "$BASE/download/v1.2.3/obs-agent_1.2.3_linux_amd64.tar.gz"
+
+# Container image
 docker pull ghcr.io/manhvu1997/linux-obs-agent:latest
 docker run --rm --privileged --pid=host -p 9200:9200 ghcr.io/manhvu1997/linux-obs-agent:latest
-
-# Bare metal / VM: download the release tarball (contains obs-agent, config.yaml.example, obs-agent.service)
-VERSION=1.2.3   # a v* tag without the leading "v"
-curl -fsSLO https://github.com/manhvu1997/linux-obs-agent/releases/download/v${VERSION}/obs-agent_${VERSION}_linux_amd64.tar.gz
-curl -fsSLO https://github.com/manhvu1997/linux-obs-agent/releases/download/v${VERSION}/obs-agent_${VERSION}_linux_amd64.tar.gz.sha256
-sha256sum -c obs-agent_${VERSION}_linux_amd64.tar.gz.sha256
 ```
+
+`releases/latest/download/...` always points at the newest **tagged** release (pre-releases such as `edge` are skipped), so it returns 404 until the first
+`v*` tag exists — use the `edge` URL before that. Cut a release with `git tag v1.2.3 && git push origin v1.2.3`.
+If the repository is private, direct `curl` links need authentication; use `gh release download <tag> --repo manhvu1997/linux-obs-agent -p 'obs-agent-linux-amd64'` instead.
 
 A new GHCR package starts **private**. Pulling it needs `docker login ghcr.io` with a token that has `read:packages`; to let anyone pull it, set the
 visibility to public once under *Packages → linux-obs-agent → Package settings*. The image is linked to this repository through
 `org.opencontainers.image.source`, so repository collaborators get access automatically.
 
-To cut a release: `git tag v1.2.3 && git push origin v1.2.3`. The eBPF programs are **x86_64 only** (see AGENTS.md §20), so only `linux/amd64` is built.
 The `eBPF integration tests` job is manual: *Actions → CI → Run workflow → ebpf_integration*; it runs the netflow integration tests with `sudo` on a real runner kernel.
 
 ---

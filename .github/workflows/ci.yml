@@ -2,11 +2,16 @@ name: CI
 
 # lint → test+build (linux/amd64) → publish
 #   * every push to main / pull request : lint, test, build, and a dry-run image build
-#   * push to main                      : also pushes ghcr.io/<owner>/<repo>:{main,sha-<short>,latest}
-#   * tag v*                            : pushes :<version>, :<major>.<minor>, :latest and
-#                                         attaches obs-agent_<version>_linux_amd64.tar.gz to a GitHub Release
+#   * push to main                      : pushes ghcr.io/<owner>/<repo>:{main,sha-<short>,latest} AND
+#                                         refreshes the rolling "Latest build (main)" GitHub Release (tag `edge`)
+#                                         with the downloadable binary + tarball + SHA256SUMS
+#   * tag v*                            : pushes :<version>, :<major>.<minor>, :latest and creates a versioned
+#                                         GitHub Release with the same downloadable assets
 #   * workflow_dispatch                 : optional job that runs the eBPF integration tests with sudo
 #                                         (the only place real kernel behaviour is exercised)
+#
+# Where things show up: the container image is under the repo's "Packages"; the plain binary
+# is under "Releases" (GitHub Packages cannot host raw binaries).
 
 on:
   push:
@@ -91,7 +96,11 @@ jobs:
           install -m 0755 dist/obs-agent "dist/$NAME/obs-agent"
           cp deploy/config.yaml.example deploy/obs-agent.service "dist/$NAME/"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
-          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+          # Stable file name so direct links keep working:
+          #   .../releases/latest/download/obs-agent-linux-amd64   (newest tagged release)
+          #   .../releases/download/edge/obs-agent-linux-amd64     (newest build of main)
+          install -m 0755 dist/obs-agent dist/obs-agent-linux-amd64
+          (cd dist && sha256sum obs-agent-linux-amd64 "$NAME.tar.gz" > SHA256SUMS && cat SHA256SUMS)
           # Build context for the image job (see deploy/Dockerfile.release).
           install -m 0755 dist/obs-agent dist/image/obs-agent
           cp deploy/config.yaml.example dist/image/config.yaml.example
@@ -100,8 +109,9 @@ jobs:
         with:
           name: obs-agent-linux-amd64
           path: |
+            dist/obs-agent-linux-amd64
             dist/*.tar.gz
-            dist/*.sha256
+            dist/SHA256SUMS
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
@@ -154,7 +164,7 @@ jobs:
           provenance: false
 
   release:
-    name: GitHub Release (binary download)
+    name: GitHub Release (versioned binary download)
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [lint, build]
     runs-on: ubuntu-24.04
@@ -169,6 +179,35 @@ jobs:
         with:
           files: release/*
           generate_release_notes: true
+
+  edge:
+    name: GitHub Release (rolling latest build of main)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    # Serialise: the release is deleted and recreated on every run.
+    concurrency:
+      group: edge-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: obs-agent-linux-amd64
+          path: release
+      - name: Publish the "edge" pre-release
+        run: |
+          # Recreate instead of editing so the tag moves to this commit and old assets never linger.
+          gh release delete edge --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+          gh release create edge release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Latest build (main)" \
+            --notes "Automated linux/amd64 build of \`main\` at ${GITHUB_SHA}. Not a stable release; use a versioned release for production. Verify with \`sha256sum -c SHA256SUMS\`."
 
   ebpf-integration:
     name: eBPF integration tests (manual, sudo)
