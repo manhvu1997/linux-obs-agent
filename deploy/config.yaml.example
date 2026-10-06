@@ -218,6 +218,11 @@ process:
   scan_interval: 10s
   # Include per-process IO stats (may need CAP_SYS_PTRACE).
   include_io: true
+  # process_report (GET /api/diagnose)
+  report_top_n: 10              # processes and families per list
+  family_by: systemd_unit       # systemd_unit | cgroup — how forked workers are grouped
+  max_connections_per_process: 50
+  max_peers_per_process: 20
 
 # ─── HTTP exporter (send to central server) ───────────────────────────────────
 exporter:
@@ -342,3 +347,24 @@ mysql:
   top_n: 5
   stale_seconds: 60
   max_recent_queries: 20
+  # Query digests: one kernel event per command → per-pattern CPU, run-queue
+  # wait, wall time and bytes. Ranks by TOTAL CPU so the query that causes a
+  # CPU incident is separated from the queries merely slowed by it.
+  emit_all_queries: true        # MYSQL_EMIT_ALL_QUERIES; false = slow-only legacy mode
+  digest_window: 60s            # MYSQL_DIGEST_WINDOW
+  top_digests: 20
+  sticky_digests_max: 50        # digests exported to Prometheus
+  sticky_digest_ttl: 1h
+  culprit_cpu_share_percent: 20
+  victim_runq_ratio: 5
+
+# Always-on per-process TCP flow accounting (eBPF). Feeds
+# process_report.*.network and obs_agent_family_net_* metrics.
+netflow:
+  enabled: true                 # NETFLOW_ENABLED
+  poll_interval: 5s
+  window: 60s
+  include_loopback: true        # NETFLOW_INCLUDE_LOOPBACK
+  listen_refresh_interval: 30s
+  max_families: 50              # Prometheus family label cap (overflow → "other")
+  max_outbound_peers: 100       # Prometheus peer_ip label cap per node

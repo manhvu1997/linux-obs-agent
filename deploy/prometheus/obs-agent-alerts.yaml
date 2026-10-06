@@ -1,0 +1,110 @@
+# deploy/prometheus/obs-agent-alerts.yaml
+# Alert rules for obs-agent process-family, network-flow and MySQL digest
+# metrics. Thresholds are starting points: tune them against each fleet's
+# baseline. Every alert links to /api/diagnose for the full evidence.
+groups:
+  - name: obs-agent-mysql
+    rules:
+      - alert: MySQLQueryDigestCPUHog
+        expr: |
+          (
+            sum by (instance, digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total[5m]))
+              / on (instance) group_left
+            sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total[5m]))
+          ) > 0.30
+          and on (instance) obs_agent_cpu_usage_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL digest {{ $labels.digest_id }} dominates query CPU on {{ $labels.instance }}"
+          description: "One query pattern uses more than 30% of mysqld query CPU while the node is above 85% CPU. Look it up in mysql_report.top_digests or obs_agent_mysql_digest_info."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: MySQLQueriesStarvedForCPU
+        expr: |
+          sum by (instance) (rate(obs_agent_mysql_query_runq_wait_seconds_total[5m]))
+            / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total[5m])) > 0.30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL queries on {{ $labels.instance }} spend more than 30% of their time waiting for a CPU"
+          description: "Slow queries here are cascade victims of CPU saturation. Fix the culprit digest (role=culprit in mysql_report.top_digests) instead of tuning the slow queries."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: MySQLDigestResultSizeSpike
+        expr: |
+          (
+            rate(obs_agent_mysql_digest_bytes_out_total[10m]) / rate(obs_agent_mysql_digest_calls_total[10m])
+          ) > 5 * (
+            rate(obs_agent_mysql_digest_bytes_out_total[10m] offset 1d)
+              / rate(obs_agent_mysql_digest_calls_total[10m] offset 1d)
+          )
+          and rate(obs_agent_mysql_digest_bytes_out_total[10m]) > 5e6
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL digest {{ $labels.digest_id }} returns 5x more data per call than yesterday on {{ $labels.instance }}"
+          description: "Result size per execution jumped (missing LIMIT, data growth, or a changed query). See mysql_report.top_digests_by_bytes_out."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: ObsAgentMySQLEventsDropped
+        expr: rate(obs_agent_mysql_events_dropped_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "obs-agent is dropping MySQL command events on {{ $labels.instance }}"
+          description: "Digest totals undercount. Per-PID kernel totals remain exact. Consider a larger ring buffer or check agent CPU throttling."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+  - name: obs-agent-process
+    rules:
+      - alert: ProcessFamilyCPUHigh
+        expr: obs_agent_family_cpu_percent > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.family }} uses {{ $value | printf \"%.0f\" }}% CPU on {{ $labels.instance }}"
+          description: "Process family CPU above 80% for 10 minutes. process_report.top_families_cpu lists its top members; open profile_url on a member for its stacks."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: ProcessFamilyMemoryExhaustion
+        expr: |
+          predict_linear(obs_agent_family_mem_rss_bytes[1h], 4 * 3600)
+            > on (instance) group_left obs_agent_mem_total_bytes * 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.family }} on {{ $labels.instance }} is on track to use 90% of RAM within 4h"
+          description: "Linear projection of the family's RSS over the last hour. Check process_report.top_families_mem."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+  - name: obs-agent-network
+    rules:
+      - alert: OutboundTrafficAnomaly
+        expr: |
+          sum by (instance, family, peer_ip, service_port) (rate(obs_agent_family_outbound_peer_bytes_total[10m]))
+            > 3 * sum by (instance, family, peer_ip, service_port) (rate(obs_agent_family_outbound_peer_bytes_total[10m] offset 1w))
+          and sum by (instance, family, peer_ip, service_port) (rate(obs_agent_family_outbound_peer_bytes_total[10m])) > 10e6
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.family }} on {{ $labels.instance }} sends/receives 3x more to {{ $labels.peer_ip }}:{{ $labels.service_port }} than last week"
+          description: "Outbound traffic to this dependency is above 10 MB/s and 3x the same window one week ago."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: ConnectionChurnHigh
+        expr: sum by (instance, family, direction) (rate(obs_agent_family_net_connections_opened_total[5m])) > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.family }} on {{ $labels.instance }} opens more than 500 {{ $labels.direction }} connections/s"
+          description: "Sustained connection churn usually means a missing or broken connection pool."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"

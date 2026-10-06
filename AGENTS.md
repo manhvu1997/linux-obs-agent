@@ -26,6 +26,8 @@
 17. [Run-Queue Analysis & On-Demand CPU Profiling](#17-run-queue-analysis--on-demand-cpu-profiling)
 18. [Off-CPU Profiling — the module that explains iowait](#18-off-cpu-profiling--the-module-that-explains-iowait)
 19. [Correlated I/O Diagnosis — connecting the chain](#19-correlated-io-diagnosis--connecting-the-chain)
+20. [Process Families, Network Flows & Query Digests](#20-process-families-network-flows--query-digests)
+21. [Review output](#21-review-output)
 
 ---
 
@@ -148,6 +150,11 @@ linux-obs-agent/
 │   │       ├── mongo_query.bpf.c    ← eBPF C: syscall tracepoints on connect/write/read
 │   │       ├── gen.go
 │   │       └── loader.go            ← Go: track connections to port 27017, parse OP_MSG
+│   │   ├── netflow/                 ← always-on TCP flow accounting
+│   │   │   ├── netflow.bpf.c        ← inet_sock_set_state, inet_csk_accept,
+│   │   │   │                          tcp_sendmsg, tcp_cleanup_rbuf
+│   │   │   ├── gen.go
+│   │   │   └── loader.go            ← implements netflow.Source
 │   │
 │   ├── trigger/
 │   │   └── engine.go                ← threshold evaluator → calls ebpf.Manager.Activate
@@ -182,6 +189,14 @@ linux-obs-agent/
 │   │   ├── inspector.go             ← DBInspector interface (Name/Start/Report)
 │   │   ├── registry.go              ← Registry: Register, StartAll, Report
 │   │   └── mongo.go                 ← MongoInspector adapter (wraps mongo.Analyzer)
+│   │
+│   ├── sqldigest/sqldigest.go       ← SQL → normalised digest (DB-agnostic)
+│   ├── querystats/querystats.go     ← rolling per-digest CPU/runq/bytes, culprit/victim roles
+│   ├── netinv/netinv.go             ← on-demand /proc TCP inventory (listen ports, connections)
+│   ├── netflow/                     ← windowed per-process/family flow accounting
+│   ├── procreport/procreport.go     ← builds process_report
+│   ├── promcollect/                 ← family + MySQL digest Prometheus collectors
+│   ├── mysql/cmdmap/cmdmap.go       ← MySQL command → class + digest
 │   │
 │   ├── process/
 │   │   └── inspector.go             ← /proc/[pid] scanner, top-N CPU/RSS, K8s metadata
@@ -1037,6 +1052,8 @@ All metrics are prefixed with `obs_agent_`.
 | `net_rx_errors_total{interface}` | Gauge | RX errors (cumulative) |
 | `ebpf_events_total{module}` | Counter | eBPF events emitted per module |
 | `ebpf_events_total{module="fsync"}` | Counter | Fsync outlier events (latency > threshold) |
+| `family_*` (cpu_percent, mem_rss_bytes, processes, net_*, inbound/outbound bytes) | Gauge/Counter | Per process family; never per PID. See §20 |
+| `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes, digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. See §20 |
 
 ---
 
@@ -1054,6 +1071,10 @@ All metrics are prefixed with `obs_agent_`.
 | **eBPF fsync (always-on)** | **~0.01% at 10k fsync/s** | **~1 MB (LRU map + ringbuf)** |
 | **Fsync analyzer poll (5s)** | **~0.001%** | **< 1 MB** |
 | Go runtime overhead | ~0.02% | ~12 MB |
+| **eBPF netflow (always-on, ~100k hook calls/s)** | **~0.4%** | **~6 MB (maps)** |
+| **MySQL per-command events (20k QPS)** | **~0.3% kernel + ~1% userspace** | **4 MB ringbuf + ~5 MB digests** |
+| **Family grouping (10s scan)** | **~0.02%** | **< 1 MB** |
+| netinv (per /api/diagnose) | 20–50 ms per call | transient |
 | **Total (all eBPF active + fsync)** | **~0.61%** | **~55 MB** |
 | **Total (no trigger-eBPF, fsync only)** | **~0.17%** | **~20 MB** |
 
@@ -1545,5 +1566,91 @@ These were requested and are **not** implemented — they need new eBPF modules 
 
 ---
 
-## 20. Review output
+## 20. Process Families, Network Flows & Query Digests
+
+### Why
+
+In a MySQL CPU incident every query's wall time inflates, so the slow-query
+list fills with *victims*. This feature separates the query pattern that
+**consumes** the CPU from the queries that only **waited** for it, and shows
+which services (process families) are heavy and who they talk to.
+
+```
+wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
+       culprit     cascade victim
+```
+
+### Components
+
+| Unit | What it does |
+|---|---|
+| `ebpf/netflow` | Always-on. Counts TCP bytes and connections per {tgid, direction, peer, service port} in an LRU map. Owner is recorded at connect/accept (process context); bytes are charged to the current process at `tcp_sendmsg` / `tcp_cleanup_rbuf`. |
+| `ebpf/mysql_query` | Per `dispatch_command`: wall, on-CPU (`se.sum_exec_runtime` Δ), run-queue wait (`sched_info.run_delay` Δ), result bytes (`tcp_sendmsg` / `unix_stream_sendmsg` returns). One ring-buffer event per command. |
+| `sqldigest` + `querystats` | Normalise SQL → digest; aggregate over a 60 s window; rank by **total** CPU; label `culprit` (≥ 20 % of mysqld query CPU) or `victim` (run-queue wait > 5 × CPU and slow). |
+| `process` | Groups processes into families by systemd unit (`nginx.service`), falling back to `.scope` / cgroup path. |
+| `netinv` | On demand only: listening ports and live connections (`src → dst`, client → server) from `/proc/net/tcp*` + `/proc/<pid>/fd`. |
+
+### GET /api/diagnose
+
+- `process_report.top_cpu[]` / `top_mem[]` — top 10 processes with `listening_ports`, `network` (inbound/outbound conns and bytes over the window, `top_peers`), `connections` (≤ 50, `connections_truncated`), `profile_url`.
+- `process_report.top_families_cpu[]` / `top_families_mem[]` — top 10 families with `process_count`, `root_pid`, `top_members`, summed `network`.
+- `mysql_report.top_digests[]` — top 20 by `cpu_ms_total` with `calls`, `cpu_ms_avg`, `runq_wait_ms_avg`, `wall_ms_avg`, `bytes_out_total`, `cpu_share_percent`, `role`. `top_digests_by_bytes_out[]` ranks by result size.
+- `mysql_report.cpu_accounting` = `run_delay_unavailable` when the kernel lacks scheduler stats; victims are then judged on `wall − cpu`.
+
+```bash
+curl -s localhost:9200/api/diagnose | jq '.mysql_report.top_digests[] | {digest_text, role, cpu_share_percent, runq_wait_ms_avg}'
+curl -s localhost:9200/api/diagnose | jq '.process_report.top_families_cpu[] | {family, process_count, cpu_percent, net: .network.inbound}'
+```
+
+### Configuration
+
+`process.report_top_n`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `culprit_cpu_share_percent`, `victim_runq_ratio`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`.
+
+### Prometheus
+
+Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound peers, 50 sticky digests; overflow → `"other"`.
+
+| Metric | Labels |
+|---|---|
+| `obs_agent_family_cpu_percent`, `_mem_rss_bytes`, `_processes` | `family` |
+| `obs_agent_family_net_bytes_total` | `family, direction, flow` |
+| `obs_agent_family_net_connections_opened_total`, `_active` | `family, direction` |
+| `obs_agent_family_inbound_bytes_total` | `family, service_port, flow` |
+| `obs_agent_family_outbound_peer_bytes_total` | `family, peer_ip, service_port, flow` |
+| `obs_agent_mysql_queries_total`, `_query_cpu_seconds_total`, `_query_runq_wait_seconds_total`, `_query_wall_seconds_total` | `command` |
+| `obs_agent_mysql_query_bytes_total` | `command, flow` |
+| `obs_agent_mysql_digest_{cpu_seconds,calls,bytes_out,runq_wait_seconds}_total` | `digest_id` |
+| `obs_agent_mysql_digest_info` (=1) | `digest_id, digest_text` |
+| `obs_agent_mysql_events_dropped_total` | — |
+
+Join digest text in Grafana: `topk(10, rate(obs_agent_mysql_digest_cpu_seconds_total[5m])) * on(instance, digest_id) group_left(digest_text) obs_agent_mysql_digest_info`.
+
+Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test rules deploy/prometheus/obs-agent-alerts_test.yaml`).
+
+### Accuracy and limits
+
+- Per-call CPU is ± one scheduler tick (1–4 ms); per-digest **totals** are accurate. `cpu_ms_avg` is unreliable below 1 ms.
+- Query text is captured up to 511 bytes (`truncated: true` beyond).
+- `COM_STMT_EXECUTE` (server-side prepared statements) is measured under the placeholder digest `<COM_STMT_EXECUTE: prepared, text unavailable>`.
+- Process-level network covers TCP only (no UDP, no unix sockets). Pre-existing idle connections are invisible to eBPF until they carry traffic; the `/proc` `connections` list still shows them.
+- Uprobes attach to the mysqld binary inode: a mysqld restart is traced automatically; a package upgrade that replaces the binary needs an agent restart.
+- Sent bytes (`bytes_tx`, netflow) count `tcp_sendmsg` returns. `sendfile`/`splice` on kernels < 6.5 go through `tcp_sendpage` and are **not** counted (nginx static files, Kafka); MySQL is unaffected. Received bytes are counted at `tcp_cleanup_rbuf` and can be double counted for reads using `MSG_WAITALL` / `SO_RCVLOWAT > 1`; kTLS/sockmap receive paths are not attributed to the reading process.
+- The eBPF programs are **x86_64 only** (register-level access via a local `pt_regs` layout). The kernel floor is **5.5** (BTF/CO-RE helpers such as `bpf_probe_read_kernel`), not 5.4.
+- The result-bytes kretprobes use `RetprobeMaxActive=2048` via tracefs when available. When tracefs is unavailable the loader falls back to the kernel default instance count, and with the default many concurrent slow-client senders can make the kernel drop kretprobe returns and under-count `bytes_out` / `bytes_tx`. Tracefs-based probes can leave `ebpf_*` events in `/sys/kernel/tracing/kprobe_events` after a crash.
+- Lifetime counters for a family or outbound-peer label that was idle for more than 1 h restart from 0 if it returns (bounded memory; a normal Prometheus counter reset).
+- `COM_QUERY` length is read as a 4-byte `unsigned int` (MySQL 5.7/8.0). `run_delay` needs scheduler stats; on kernels where it reads 0 the report sets `cpu_accounting: run_delay_unavailable`.
+- **Not verified at runtime in the development environment** (compile-checked only, on arm64 Linux): verifier acceptance, attach behaviour and byte/connection counts on x86_64. Run the verification commands in the spec/plan before relying on the numbers.
+
+### Overhead
+
+| Component | CPU | Memory |
+|---|---|---|
+| netflow eBPF (~100k hook calls/s) | ~0.4 % | ~6 MB maps |
+| mysql per-command events (20k QPS) | ~0.3 % kernel + ~1 % userspace | 4 MB ringbuf + ~5 MB digests |
+| family grouping (10 s scan) | ~0.02 % | < 1 MB |
+| netinv (per /api/diagnose) | 20–50 ms per call | transient |
+
+---
+
+## 21. Review output
 Use codex to review output of this code each change

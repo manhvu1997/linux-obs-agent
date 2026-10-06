@@ -1,0 +1,140 @@
+# deploy/prometheus/obs-agent-alerts_test.yaml
+# Run: promtool test rules deploy/prometheus/obs-agent-alerts_test.yaml
+rule_files:
+  - obs-agent-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      # digest aaa burns 0.8 cores, bbb 0.1 cores, total query CPU 0.9 cores
+      - series: 'obs_agent_mysql_digest_cpu_seconds_total{instance="db1:9200",digest_id="aaa"}'
+        values: '0+48x20'
+      - series: 'obs_agent_mysql_digest_cpu_seconds_total{instance="db1:9200",digest_id="bbb"}'
+        values: '0+6x20'
+      - series: 'obs_agent_mysql_query_cpu_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+54x20'
+      - series: 'obs_agent_cpu_usage_percent{instance="db1:9200"}'
+        values: '95x20'
+      # queries spend 40% of their wall time waiting for a CPU
+      - series: 'obs_agent_mysql_query_runq_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+20x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+50x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLQueryDigestCPUHog
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "db1:9200", digest_id: "aaa" }
+            exp_annotations:
+              summary: "MySQL digest aaa dominates query CPU on db1:9200"
+              description: "One query pattern uses more than 30% of mysqld query CPU while the node is above 85% CPU. Look it up in mysql_report.top_digests or obs_agent_mysql_digest_info."
+              diagnose: "http://db1:9200/api/diagnose"
+      - eval_time: 15m
+        alertname: MySQLQueriesStarvedForCPU
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "db1:9200" }
+            exp_annotations:
+              summary: "MySQL queries on db1:9200 spend more than 30% of their time waiting for a CPU"
+              description: "Slow queries here are cascade victims of CPU saturation. Fix the culprit digest (role=culprit in mysql_report.top_digests) instead of tuning the slow queries."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_family_cpu_percent{instance="web1:9200",family="php-fpm.service"}'
+        values: '95x20'
+      - series: 'obs_agent_family_cpu_percent{instance="web1:9200",family="cron.service"}'
+        values: '5x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ProcessFamilyCPUHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "web1:9200", family: "php-fpm.service" }
+            exp_annotations:
+              summary: "php-fpm.service uses 95% CPU on web1:9200"
+              description: "Process family CPU above 80% for 10 minutes. process_report.top_families_cpu lists its top members; open profile_url on a member for its stacks."
+              diagnose: "http://web1:9200/api/diagnose"
+
+  # RSS grows 50 MB/min (3 GB/h) from 2 GB on a 16 GB host: the 4h projection
+  # crosses 90% of RAM (14.4 GB); the flat "stable" family never does.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_family_mem_rss_bytes{instance="app1:9200",family="leaky.service"}'
+        values: '2000000000+50000000x60'
+      - series: 'obs_agent_family_mem_rss_bytes{instance="app1:9200",family="stable.service"}'
+        values: '2000000000x60'
+      - series: 'obs_agent_mem_total_bytes{instance="app1:9200"}'
+        values: '16000000000x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ProcessFamilyMemoryExhaustion
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "app1:9200", family: "leaky.service" }
+            exp_annotations:
+              summary: "leaky.service on app1:9200 is on track to use 90% of RAM within 4h"
+              description: "Linear projection of the family's RSS over the last hour. Check process_report.top_families_mem."
+              diagnose: "http://app1:9200/api/diagnose"
+
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_family_net_connections_opened_total{instance="web1:9200",family="php-fpm.service",direction="outbound"}'
+        values: '0+36000x20'
+      - series: 'obs_agent_family_net_connections_opened_total{instance="web1:9200",family="cron.service",direction="outbound"}'
+        values: '0+60x20'
+      - series: 'obs_agent_mysql_events_dropped_total{instance="db1:9200"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ConnectionChurnHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "web1:9200", family: "php-fpm.service", direction: "outbound" }
+            exp_annotations:
+              summary: "php-fpm.service on web1:9200 opens more than 500 outbound connections/s"
+              description: "Sustained connection churn usually means a missing or broken connection pool."
+              diagnose: "http://web1:9200/api/diagnose"
+      - eval_time: 15m
+        alertname: ObsAgentMySQLEventsDropped
+        exp_alerts:
+          - exp_labels: { severity: info, instance: "db1:9200" }
+            exp_annotations:
+              summary: "obs-agent is dropping MySQL command events on db1:9200"
+              description: "Digest totals undercount. Per-PID kernel totals remain exact. Consider a larger ring buffer or check agent CPU throttling."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # Result size per call: old regime (steps 0..300, 25h):
+  # 5e8 bytes / 5 calls per 5m step = 1e8 B/call (1.67 MB/s); new regime
+  # (from step 300 = 25h) 3e9 bytes / 5 calls = 6e8 B/call (6x) and 10 MB/s.
+  # Evaluated at 40h, offset 1d lands in the old regime.
+  - interval: 5m
+    input_series:
+      - series: 'obs_agent_mysql_digest_bytes_out_total{instance="db1:9200",digest_id="fat"}'
+        values: '0+500000000x300 150000000000+3000000000x300'
+      - series: 'obs_agent_mysql_digest_calls_total{instance="db1:9200",digest_id="fat"}'
+        values: '0+5x600'
+    alert_rule_test:
+      - eval_time: 40h
+        alertname: MySQLDigestResultSizeSpike
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "db1:9200", digest_id: "fat" }
+            exp_annotations:
+              summary: "MySQL digest fat returns 5x more data per call than yesterday on db1:9200"
+              description: "Result size per execution jumped (missing LIMIT, data growth, or a changed query). See mysql_report.top_digests_by_bytes_out."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # Old regime (first 2200 steps = 7.6d): 1.2e9 B/step = 4 MB/s.
+  # New regime: 4.5e9 B/step = 15 MB/s (3.75x, above 10 MB/s).
+  # Evaluated at 8d (step 2304); offset 1w lands at step 288, old regime.
+  - interval: 5m
+    input_series:
+      - series: 'obs_agent_family_outbound_peer_bytes_total{instance="web1:9200",family="php-fpm.service",peer_ip="10.0.0.9",service_port="6379",flow="tx"}'
+        values: '0+1200000000x2200 2640000000000+4500000000x110'
+    alert_rule_test:
+      - eval_time: 192h
+        alertname: OutboundTrafficAnomaly
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "web1:9200", family: "php-fpm.service", peer_ip: "10.0.0.9", service_port: "6379" }
+            exp_annotations:
+              summary: "php-fpm.service on web1:9200 sends/receives 3x more to 10.0.0.9:6379 than last week"
+              description: "Outbound traffic to this dependency is above 10 MB/s and 3x the same window one week ago."
+              diagnose: "http://web1:9200/api/diagnose"
