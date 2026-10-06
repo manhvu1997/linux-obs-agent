@@ -1127,22 +1127,31 @@ The MySQL tracer is an **always-on server-side** analyzer that attaches uprobes 
 
 ```
 uprobe: mysqld!dispatch_command(THD *thd, COM_DATA *com_data, enum command)
-    │  command == COM_QUERY (3)?  No → return 0 (zero overhead)
-    │  Yes:
-    │  start_ts = bpf_ktime_get_ns()
-    │  query_str = com_data[0..7]   (COM_QUERY_DATA.query_str at union offset 0)
-    │  bpf_probe_read_user_str(pending.query, 256, query_str)
-    │  mysql_pending[tid] = {start_ts, query, comm}
+    │  every command is measured (emit_all_queries: true, the default;
+    │  with false only COM_QUERY (3) and COM_STMT_EXECUTE (23) are tracked)
+    │  start_ts, on-CPU and run-queue baselines, comm
+    │  COM_QUERY / COM_STMT_PREPARE (22): query_str = com_data[0..7],
+    │      length = com_data[8..11]  (same layout for both commands)
+    │      bpf_probe_read_user_str(pending.query, 512, query_str)
+    │  delete ps_exec[tid]; mysql_pending[tid] = {…}
+    │
+uprobe: Prepared_statement::prepare / execute_loop   (optional, §20)
+    │  ps_text[Prepared_statement*] = text;  ps_exec[tid] = Prepared_statement*
     │
 uretprobe: mysqld!dispatch_command
     │  pending = mysql_pending[tid]
     │  latency_ns = now - pending.start_ts
-    │  delete mysql_pending[tid]
+    │  COM_STMT_EXECUTE: text = ps_text[ps_exec[tid]] when recovered
     │
-    ├── mysql_pid_stats[tgid]:   total_queries++, total_latency_ns += Δ, ...
+    ├── COM_QUERY and COM_STMT_EXECUTE only:
+    │     mysql_pid_stats[tgid]: total_queries++, total_latency_ns += Δ, ...
+    │     if latency_ns >= slow_query_threshold_ns:
+    │         push mysql_slow_event_t {…, query, command} → events RINGBUF
+    │         (→ recent_slow_queries; no text → the placeholder of §20)
     │
-    └── if latency_ns > slow_query_threshold_ns:
-            push mysql_slow_event_t → RINGBUF
+    ├── every command: push mysql_cmd_event_t → cmd_events RINGBUF (digests, §20)
+    │
+    └── delete ps_exec[tid], mysql_pending[tid]
 ```
 
 ### Configuration (`mysql:` section in config.yaml)
@@ -1657,17 +1666,21 @@ uretprobe dispatch_command (COM_STMT_EXECUTE): text = ps_text[ps_exec[tid]]; ps_
 ```
 
 - An execute with recovered text gets **the same digest** as the same statement sent as `COM_QUERY` (`command` stays `stmt_execute`). The prepare itself is a separate `stmt_prepare` digest, `prepare: <normalised text>`.
-- **Statements prepared before the agent attached** (pooled connections) are reported as `<COM_STMT_EXECUTE: prepared before agent start, text unavailable>` until the connection re-prepares or is recycled. A re-prepare after a metadata change does not refresh the text for the original statement; its original text is kept.
+- **Statements prepared before the agent attached** (pooled connections) are reported as `<COM_STMT_EXECUTE: prepared before agent start, text unavailable>`. The text appears only when the **client** sends `COM_STMT_PREPARE` again (a new or recycled connection, or the driver re-preparing). A server-side re-prepare (triggered by DDL / metadata change) does **not** refresh it: mysqld prepares a temporary copy and swaps its contents into the original statement, so the original `Prepared_statement*` keeps whatever text — or none — it already had.
+- `ps_text` holds **16 384** statements (LRU). With more live prepared statements than that across all sessions, the least recently prepared are evicted and their later executes show `prepared before agent start` too. (An entry evicted and re-filled concurrently can in rare cases pair an execute with the wrong text.)
+- `COM_STMT_FETCH` (server-side cursors) runs without `execute_loop`; its cost shows under `<COM_STMT_FETCH>` without text.
+- A prepared `CALL p(?)` whose procedure runs `EXECUTE s` re-enters `execute_loop`; the outermost statement wins, so the whole command is attributed to the `CALL`.
 - Needs `Prepared_statement::prepare` and `Prepared_statement::execute_loop` in mysqld's symbol table (`.symtab`, then `.dynsym`). Supported `prepare` layouts: MySQL **8.4** `prepare(THD*, const char*, size_t, Item_param**)` and **8.0** `prepare(const char*, size_t)`; the layout is chosen from the mangled name. Otherwise (stripped binary, unknown overload, attach error) the agent logs one warning, `PreparedTextTracking` is off and executes keep the placeholder `<COM_STMT_EXECUTE: prepared, text unavailable>`.
-- Prepared executes now also feed the legacy per-PID counts (`top_processes`) and `recent_slow_queries`, with the recovered text when available (also with `emit_all_queries: false`).
-- Other commands get readable placeholders from MySQL 8.x `enum_server_command`: `<COM_PING>`, `<COM_STMT_CLOSE>`, `<COM_RESET_CONNECTION>`, …; an unknown number stays `<COM command N>` (class `other`).
-- **System-schema folding** (`mysql.fold_system_schemas`, default `true`): every statement that qualifies an object with `information_schema.`, `performance_schema.`, `sys.` or `mysql.` (exporter and monitoring queries) is merged into one digest `<system schemas: information_schema, performance_schema, sys, mysql>` with no `sample_query`; its command class is unchanged. Only a schema *qualifier* counts — `select sys from t` or a column `t.mysql` is not folded. An unqualified query run with `USE mysql` is not folded either. Disable with `fold_system_schemas: false` or `MYSQL_FOLD_SYSTEM_SCHEMAS=false`.
+- Prepared executes now also feed the legacy per-PID counts (`top_processes`) and `recent_slow_queries`, with the recovered text when available (also with `emit_all_queries: false`). A slow execute without recovered text shows the same placeholder as its digest, never an empty `query`.
+- Other commands get readable placeholders from MySQL 8.x `enum_server_command`: `<COM_PING>`, `<COM_REFRESH>`, `<COM_STMT_CLOSE>`, `<COM_RESET_CONNECTION>`, …; an unknown number stays `<COM command N>` (class `other`).
+- **System-schema folding** (`mysql.fold_system_schemas`, default `true`): every statement that qualifies an object with `information_schema.`, `performance_schema.`, `sys.` or `mysql.` (exporter and monitoring queries) is merged into one digest `<system schemas: information_schema, performance_schema, sys, mysql>` with no `sample_query`; its command class is unchanged. Only a schema *qualifier* counts — `select sys from t` or a column `t.mysql` is not folded. An unqualified query run with `USE mysql` is not folded either. False positives: a user table or alias literally named `sys` or `mysql` used as a qualifier (`sys.col`) is folded too, and ORM-driven `information_schema` introspection is merged into the one sample-less row (its CPU is still counted there). Disable with `fold_system_schemas: false` or `MYSQL_FOLD_SYSTEM_SCHEMAS=false`.
 - **Runtime not verified** in the development environment (compile-checked only on arm64 Linux): verifier acceptance of the new programs, the 8.4 register layout and the recovered text on x86_64 with a real mysqld. Run the commands below first.
 
 Verification (x86_64 host with MySQL 8.4, as root):
 
 ```bash
-sudo ./obs-agent -config /etc/obs-agent/config.yaml -loglevel debug 2>&1 | grep -i "prepared"   # expect "prepared-statement text tracking enabled" + layout
+sudo ./obs-agent -config /etc/obs-agent/config.yaml -loglevel debug > /tmp/obs-agent.log 2>&1 &
+sleep 5; grep -i "prepared" /tmp/obs-agent.log   # expect "prepared-statement text tracking enabled" + layout
 sysbench oltp_point_select --mysql-user=… --mysql-password=… --tables=1 --table-size=100000 --db-ps-mode=auto --threads=8 --time=60 run &
 sleep 20; curl -s localhost:9200/api/diagnose | jq '.mysql_report.top_digests[] | {command, digest_text, calls, cpu_ms_total}' | head -40
 # expect command "stmt_execute" with digest_text "select c from sbtest1 where id = ?" and a "prepare: select c from sbtest1 where id = ?" row;
