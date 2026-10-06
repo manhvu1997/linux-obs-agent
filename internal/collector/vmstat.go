@@ -19,7 +19,6 @@ type VMStatCollector struct {
 	prev     map[string]uint64
 	prevTime time.Time
 	pageSize uint64
-	memTotal uint64
 }
 
 // vmstatCounters are the cumulative fields we turn into per-second rates.

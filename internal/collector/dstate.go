@@ -175,9 +175,7 @@ func (d *DStateCollector) sample() {
 			found = append(found, t)
 		}
 		if d.scanThreads {
-			for _, t := range d.inspectThreads(pid, e.Name(), now, seen) {
-				found = append(found, t)
-			}
+			found = append(found, d.inspectThreads(pid, e.Name(), now, seen)...)
 		}
 	}
 
