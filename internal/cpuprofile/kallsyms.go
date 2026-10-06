@@ -21,7 +21,7 @@ type ksym struct {
 
 type kallsymsResolver struct {
 	mu      sync.RWMutex
-	entries []ksym    // sorted by addr ascending
+	entries []ksym // sorted by addr ascending
 	loaded  time.Time
 }
 

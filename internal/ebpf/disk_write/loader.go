@@ -50,7 +50,7 @@ import (
 // verify that DiskWriteDiskWriteEvent has the same layout.
 type rawDiskWriteEvent struct {
 	Pid      uint32
-	Pad      uint32   // explicit padding — keeps Bytes at offset 8
+	Pad      uint32 // explicit padding — keeps Bytes at offset 8
 	Bytes    uint64
 	Comm     [16]int8
 	Filename [128]int8

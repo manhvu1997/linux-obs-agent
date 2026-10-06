@@ -177,15 +177,15 @@ func (a *Analyzer) poll() {
 		appType := classifyApp(r.Comm, cmdline)
 
 		offenders = append(offenders, model.WritebackOffender{
-			PID:            r.PID,
-			Comm:           r.Comm,
-			Cmdline:        cmdline,
-			CgroupPath:     ebpfwb.ReadCgroup(r.PID),
-			DirtyPages:     r.DirtyPages,
-			ReclaimCount:   r.ReclaimCount,
-			AvgReclaimMs:   avgReclaimMs,
-			MaxReclaimMs:   maxReclaimMs,
-			AppType:        appType,
+			PID:          r.PID,
+			Comm:         r.Comm,
+			Cmdline:      cmdline,
+			CgroupPath:   ebpfwb.ReadCgroup(r.PID),
+			DirtyPages:   r.DirtyPages,
+			ReclaimCount: r.ReclaimCount,
+			AvgReclaimMs: avgReclaimMs,
+			MaxReclaimMs: maxReclaimMs,
+			AppType:      appType,
 		})
 	}
 
@@ -195,9 +195,9 @@ func (a *Analyzer) poll() {
 		Type:      "writeback_analysis",
 		Timestamp: time.Now(),
 		System: model.WritebackSystemInfo{
-			MemPercent:     metrics.Memory.UsagePercent,
-			MaxReclaimMs:   float64(maxReclaimNs) / 1e6,
-			WbOperations:   wbCount,
+			MemPercent:   metrics.Memory.UsagePercent,
+			MaxReclaimMs: float64(maxReclaimNs) / 1e6,
+			WbOperations: wbCount,
 		},
 		TopOffenders: offenders,
 	}

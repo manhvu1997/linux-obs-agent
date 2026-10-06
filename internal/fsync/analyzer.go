@@ -229,4 +229,3 @@ func (a *Analyzer) drainSlowEvents(ctx context.Context) {
 		}
 	}
 }
-

@@ -35,8 +35,8 @@ type Analyzer struct {
 	latest atomic.Pointer[model.MongoAnalysis]
 
 	// recentMu protects recentSlowQueries.
-	recentMu           sync.Mutex
-	recentSlowQueries  []model.MongoSlowEvent
+	recentMu          sync.Mutex
+	recentSlowQueries []model.MongoSlowEvent
 }
 
 // NewAnalyzer creates an Analyzer.  Call Start to begin tracing.

@@ -56,14 +56,14 @@ func buildReport(l *cpu_profile.Loader, filterTGID uint32) *model.CPUProfileRepo
 
 	// ── 1. Aggregate by TGID ──────────────────────────────────────────────
 	type procData struct {
-		comm        string
-		tgid        uint32
-		threads     map[uint32]bool
-		userStacks  map[int32]uint64 // user_stack_id → sample count
-		kernStacks  map[int32]uint64 // kern_stack_id → sample count
-		total       uint64
-		userTotal   uint64
-		kernTotal   uint64
+		comm       string
+		tgid       uint32
+		threads    map[uint32]bool
+		userStacks map[int32]uint64 // user_stack_id → sample count
+		kernStacks map[int32]uint64 // kern_stack_id → sample count
+		total      uint64
+		userTotal  uint64
+		kernTotal  uint64
 	}
 
 	byProc := make(map[uint32]*procData)

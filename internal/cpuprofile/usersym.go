@@ -47,8 +47,8 @@ type pidCache struct {
 }
 
 var userCache struct {
-	mu    sync.RWMutex
-	pids  map[uint32]*pidCache
+	mu   sync.RWMutex
+	pids map[uint32]*pidCache
 }
 
 func init() {
