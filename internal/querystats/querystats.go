@@ -33,7 +33,7 @@ const (
 // Event is one executed statement.
 type Event struct {
 	PID         uint32
-	Command     string // "query" | "stmt_execute" | "other"
+	Command     string // "query" | "stmt_prepare" | "stmt_execute" | "other"
 	Digest      sqldigest.Digest
 	SampleQuery string
 	Truncated   bool

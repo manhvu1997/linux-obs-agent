@@ -26,6 +26,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
+	"github.com/manhvu1997/linux-obs-agent/internal/sqldigest"
 )
 
 // Analyzer owns the mysql_query eBPF loader and produces MySQLAnalysis snapshots.
@@ -135,15 +136,27 @@ func (a *Analyzer) drainCmdEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
-			a.agg.Add(a.toEvent(ev, time.Now()))
+			a.agg.Add(a.toEvent(ev, time.Now(), a.loader.PreparedTextTracking()))
 		}
 	}
 }
 
+// systemSchemaDigest is the single digest that system-schema statements fold
+// into when mysql.fold_system_schemas is on.
+var systemSchemaDigest = func() sqldigest.Digest {
+	const text = "<system schemas: information_schema, performance_schema, sys, mysql>"
+	return sqldigest.Digest{ID: sqldigest.HashID(text), Text: text, Normalized: true}
+}()
+
 // toEvent classifies one command. With mysql.sample_queries off the raw
-// statement text (which carries literals) is never stored.
-func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time) querystats.Event {
-	class, d, sample, trunc := cmdmap.Classify(ev.Command, ev.Query, ev.QueryLen)
+// statement text (which carries literals) is never stored. preparedTracking
+// is the loader's PreparedTextTracking(), a parameter so this stays testable
+// without a loaded eBPF module.
+func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time, preparedTracking bool) querystats.Event {
+	class, d, sample, trunc := cmdmap.Classify(ev.Command, ev.Query, ev.QueryLen, preparedTracking)
+	if a.cfg.FoldSystemSchemas && sqldigest.ReferencesSystemSchema(d.Text) {
+		d, sample, trunc = systemSchemaDigest, "", false
+	}
 	if !a.cfg.SampleQueries {
 		sample = ""
 	}

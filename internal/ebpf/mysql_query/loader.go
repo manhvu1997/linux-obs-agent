@@ -18,6 +18,14 @@
 // slow-query events. With emitAll == false only COM_QUERY is tracked and no
 // per-command events are emitted (legacy behaviour).
 //
+// Prepared statements: COM_STMT_EXECUTE carries only a statement id. Two
+// optional uprobes recover its SQL text — Prepared_statement::prepare stores
+// the text per Prepared_statement*, Prepared_statement::execute_loop links
+// the executing thread to it — so the execute is reported with the text sent
+// by the earlier COM_STMT_PREPARE. Both need the symbols in mysqld's symbol
+// table; otherwise PreparedTextTracking() is false and executes stay
+// anonymous.
+//
 // Result bytes come from optional kretprobes on tcp_sendmsg and
 // unix_stream_sendmsg; when either symbol is unavailable bytes_out stays 0.
 //
@@ -65,6 +73,7 @@ type Loader struct {
 	rd          *ringbuf.Reader
 	cmdRd       *ringbuf.Reader
 	userDropped atomic.Uint64
+	psTracking  atomic.Bool
 
 	// SlowEvents receives slow-query outlier events (latency > threshold).
 	// Buffered to 256 so the consume goroutine never blocks the ringbuf reader.
@@ -100,6 +109,76 @@ func decodeCmdEvent(b []byte) (CmdEvent, bool) {
 		Comm:  nullTermU8(b[56:72]),
 		Query: nullTermU8(b[72:cmdEventSize]),
 	}, true
+}
+
+// PreparedTextTracking reports whether the prepared-statement text uprobes
+// are attached, i.e. COM_STMT_EXECUTE events carry recovered SQL text unless
+// the statement was prepared before the agent attached.
+func (l *Loader) PreparedTextTracking() bool { return l.psTracking.Load() }
+
+// Mangled-name fragments of the prepared-statement hooks (Itanium ABI,
+// nested name Prepared_statement::<fn> followed by its parameter list).
+const (
+	psPrepareSubstr     = "18Prepared_statement7prepareE"
+	psExecuteLoopSubstr = "18Prepared_statement12execute_loopE"
+)
+
+// prepareArgLayout derives the register layout of Prepared_statement::prepare
+// from its mangled name:
+//
+//	MySQL 8.4: prepare(THD*, const char*, unsigned long, Item_param**) → "...7prepareEP3THDPKcm..." (query RDX, length RCX)
+//	MySQL 8.0: prepare(const char*, unsigned long)                      → "...7prepareEPKcm"        (query RSI, length RDX)
+//
+// Any other overload returns ok=false: reading the wrong registers would
+// record garbage as SQL text, so the hook is not attached.
+func prepareArgLayout(mangled string) (hasTHD, ok bool) {
+	i := strings.Index(mangled, psPrepareSubstr)
+	if i < 0 {
+		return false, false
+	}
+	params := mangled[i+len(psPrepareSubstr):]
+	switch {
+	case strings.HasPrefix(params, "P3THDPKcm"):
+		return true, true
+	case strings.HasPrefix(params, "PKcm"):
+		return false, true
+	}
+	return false, false
+}
+
+// preparedSymbols is the resolved hook pair for prepared-statement text.
+type preparedSymbols struct {
+	prepare, executeLoop string
+	hasTHD               bool
+}
+
+// pickPreparedSymbols chooses the hook symbols from ELF candidates. Compiler
+// split parts (".cold", ".isra.0", ...) are skipped: they are not the
+// function entry and do not receive the arguments in the ABI registers.
+func pickPreparedSymbols(prepares, executeLoops []string) (preparedSymbols, error) {
+	var ps preparedSymbols
+	for _, name := range prepares {
+		if strings.Contains(name, ".") {
+			continue
+		}
+		if hasTHD, ok := prepareArgLayout(name); ok {
+			ps.prepare, ps.hasTHD = name, hasTHD
+			break
+		}
+	}
+	if ps.prepare == "" {
+		return ps, fmt.Errorf("no Prepared_statement::prepare with a known argument layout (candidates %v)", prepares)
+	}
+	for _, name := range executeLoops {
+		if !strings.Contains(name, ".") {
+			ps.executeLoop = name
+			break
+		}
+	}
+	if ps.executeLoop == "" {
+		return ps, fmt.Errorf("no Prepared_statement::execute_loop symbol (candidates %v)", executeLoops)
+	}
+	return ps, nil
 }
 
 // Dropped returns command events lost in the kernel (ring buffer full) plus
@@ -167,6 +246,18 @@ func (l *Loader) Start(ctx context.Context) error {
 	if err := spec.Variables["emit_all_queries"].Set(emit); err != nil {
 		slog.Warn("mysql_query: could not set emit_all_queries", "err", err)
 	}
+	// Prepared-statement hooks are optional: resolve them now because the
+	// prepare() register layout is a load-time constant.
+	psSyms, psErr := resolvePreparedSymbols(l.mysqldPath)
+	if psErr == nil {
+		var hasTHD uint8
+		if psSyms.hasTHD {
+			hasTHD = 1
+		}
+		if err := spec.Variables["ps_prepare_has_thd"].Set(hasTHD); err != nil {
+			psErr = fmt.Errorf("setting ps_prepare_has_thd: %w", err)
+		}
+	}
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return fmt.Errorf("mysql_query: loading eBPF objects: %w", err)
 	}
@@ -222,6 +313,25 @@ func (l *Loader) Start(ctx context.Context) error {
 	}
 	l.links = append(l.links, urp)
 
+	// Prepared-statement text recovery. Optional: without it COM_STMT_EXECUTE
+	// is reported under a "text unavailable" placeholder.
+	if psErr == nil {
+		psErr = l.attachPrepared(exe, psSyms)
+	}
+	if psErr != nil {
+		slog.Warn("mysql_query: prepared-statement text tracking unavailable; "+
+			"COM_STMT_EXECUTE will be reported without SQL text",
+			"mysqld_path", l.mysqldPath, "err", psErr)
+	} else {
+		l.psTracking.Store(true)
+		layout := "8.0 (query=RSI, length=RDX)"
+		if psSyms.hasTHD {
+			layout = "8.4 (THD=RSI, query=RDX, length=RCX)"
+		}
+		slog.Info("mysql_query: prepared-statement text tracking enabled",
+			"prepare", psSyms.prepare, "execute_loop", psSyms.executeLoop, "layout", layout)
+	}
+
 	// Result bytes per command. Optional: without them bytes_out stays 0.
 	for _, fn := range []struct {
 		sym  string
@@ -256,6 +366,7 @@ func (l *Loader) Stop() {
 }
 
 func (l *Loader) cleanup() {
+	l.psTracking.Store(false)
 	for _, lnk := range l.links {
 		lnk.Close()
 	}
@@ -269,6 +380,31 @@ func (l *Loader) cleanup() {
 		l.cmdRd = nil
 	}
 	l.objs.Close()
+}
+
+// resolvePreparedSymbols finds the prepared-statement hook symbols in mysqld.
+func resolvePreparedSymbols(binaryPath string) (preparedSymbols, error) {
+	cands, err := findCPPSymbolCandidates(binaryPath, psPrepareSubstr, psExecuteLoopSubstr)
+	if err != nil {
+		return preparedSymbols{}, err
+	}
+	return pickPreparedSymbols(cands[psPrepareSubstr], cands[psExecuteLoopSubstr])
+}
+
+// attachPrepared attaches both prepared-statement uprobes, or neither: with
+// only one of them every execute would still lack its text.
+func (l *Loader) attachPrepared(exe *link.Executable, ps preparedSymbols) error {
+	prep, err := exe.Uprobe(ps.prepare, l.objs.UprobePsPrepare, nil)
+	if err != nil {
+		return fmt.Errorf("attaching uprobe %s: %w", ps.prepare, err)
+	}
+	run, err := exe.Uprobe(ps.executeLoop, l.objs.UprobePsExecuteLoop, nil)
+	if err != nil {
+		prep.Close()
+		return fmt.Errorf("attaching uprobe %s: %w", ps.executeLoop, err)
+	}
+	l.links = append(l.links, prep, run)
+	return nil
 }
 
 // kretprobeMaxActive raises the number of concurrent kretprobe instances.
@@ -519,4 +655,39 @@ func findCPPSymbol(binaryPath, substr string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no function symbol containing %q found in %s", substr, binaryPath)
+}
+
+// findCPPSymbolCandidates returns, per substring, every function symbol whose
+// raw (mangled) name contains it, from .symtab first then .dynsym, without
+// duplicates. One pass over the symbol tables serves all substrings: an
+// unstripped mysqld has hundreds of thousands of symbols.
+func findCPPSymbolCandidates(binaryPath string, substrs ...string) (map[string][]string, error) {
+	f, err := elf.Open(binaryPath)
+	if err != nil {
+		return nil, fmt.Errorf("elf.Open: %w", err)
+	}
+	defer f.Close()
+
+	out := make(map[string][]string, len(substrs))
+	seen := make(map[string]bool)
+	collect := func(syms []elf.Symbol) {
+		for _, s := range syms {
+			if elf.ST_TYPE(s.Info) != elf.STT_FUNC || seen[s.Name] {
+				continue
+			}
+			for _, sub := range substrs {
+				if strings.Contains(s.Name, sub) {
+					seen[s.Name] = true
+					out[sub] = append(out[sub], s.Name)
+				}
+			}
+		}
+	}
+	if syms, err := f.Symbols(); err == nil {
+		collect(syms)
+	}
+	if syms, err := f.DynamicSymbols(); err == nil {
+		collect(syms)
+	}
+	return out, nil
 }

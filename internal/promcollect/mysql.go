@@ -10,7 +10,7 @@ const digestTextMaxBytes = 120
 
 var (
 	myQueriesDesc = prometheus.NewDesc("obs_agent_mysql_queries_total",
-		"MySQL commands executed, by command class (query | stmt_execute | other).", []string{"command"}, nil)
+		"MySQL commands executed, by command class (query | stmt_prepare | stmt_execute | other).", []string{"command"}, nil)
 	myCPUDesc = prometheus.NewDesc("obs_agent_mysql_query_cpu_seconds_total",
 		"On-CPU seconds spent inside dispatch_command, by command class.", []string{"command"}, nil)
 	myRunqDesc = prometheus.NewDesc("obs_agent_mysql_query_runq_wait_seconds_total",
