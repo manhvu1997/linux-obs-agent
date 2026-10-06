@@ -60,6 +60,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
 )
 
 // Loader manages the mysql_query eBPF module lifecycle.
@@ -118,10 +119,17 @@ func (l *Loader) PreparedTextTracking() bool { return l.psTracking.Load() }
 
 // Mangled-name fragments of the prepared-statement hooks (Itanium ABI,
 // nested name Prepared_statement::<fn> followed by its parameter list).
+// They also occur inside local entities of those methods (a lambda's
+// operator() is "_ZZN18Prepared_statement7prepareE...E...clEv"), so a
+// candidate is accepted only when the fragment directly follows "_ZN", i.e.
+// the symbol IS the method; see hookPrefix.
 const (
 	psPrepareSubstr     = "18Prepared_statement7prepareE"
 	psExecuteLoopSubstr = "18Prepared_statement12execute_loopE"
 )
+
+// hookPrefix returns the exact symbol prefix of the method itself.
+func hookPrefix(substr string) string { return "_ZN" + substr }
 
 // prepareArgLayout derives the register layout of Prepared_statement::prepare
 // from its mangled name:
@@ -129,14 +137,14 @@ const (
 //	MySQL 8.4: prepare(THD*, const char*, unsigned long, Item_param**) → "...7prepareEP3THDPKcm..." (query RDX, length RCX)
 //	MySQL 8.0: prepare(const char*, unsigned long)                      → "...7prepareEPKcm"        (query RSI, length RDX)
 //
-// Any other overload returns ok=false: reading the wrong registers would
-// record garbage as SQL text, so the hook is not attached.
+// Any other overload, and any local entity nested in prepare ("_ZZN..."),
+// returns ok=false: reading the wrong registers would record garbage as SQL
+// text, so the hook is not attached.
 func prepareArgLayout(mangled string) (hasTHD, ok bool) {
-	i := strings.Index(mangled, psPrepareSubstr)
-	if i < 0 {
+	params, found := strings.CutPrefix(mangled, hookPrefix(psPrepareSubstr))
+	if !found {
 		return false, false
 	}
-	params := mangled[i+len(psPrepareSubstr):]
 	switch {
 	case strings.HasPrefix(params, "P3THDPKcm"):
 		return true, true
@@ -152,9 +160,11 @@ type preparedSymbols struct {
 	hasTHD               bool
 }
 
-// pickPreparedSymbols chooses the hook symbols from ELF candidates. Compiler
-// split parts (".cold", ".isra.0", ...) are skipped: they are not the
-// function entry and do not receive the arguments in the ABI registers.
+// pickPreparedSymbols chooses the hook symbols from ELF candidates. Only the
+// methods themselves qualify (hookPrefix): .symtab lists LOCAL symbols first,
+// so a nested lambda would otherwise win. Compiler split parts (".cold",
+// ".isra.0", ...) are skipped: they are not the function entry and do not
+// receive the arguments in the ABI registers.
 func pickPreparedSymbols(prepares, executeLoops []string) (preparedSymbols, error) {
 	var ps preparedSymbols
 	for _, name := range prepares {
@@ -170,7 +180,7 @@ func pickPreparedSymbols(prepares, executeLoops []string) (preparedSymbols, erro
 		return ps, fmt.Errorf("no Prepared_statement::prepare with a known argument layout (candidates %v)", prepares)
 	}
 	for _, name := range executeLoops {
-		if !strings.Contains(name, ".") {
+		if strings.HasPrefix(name, hookPrefix(psExecuteLoopSubstr)) && !strings.Contains(name, ".") {
 			ps.executeLoop = name
 			break
 		}
@@ -524,7 +534,9 @@ func (l *Loader) consume(ctx context.Context) {
 		}
 
 		comm := nullTermU8(raw.Comm[:])
-		query := nullTermU8(raw.Query[:])
+		// Never an anonymous blank row: an execute whose text was not
+		// recovered gets the same placeholder as its digest.
+		query := cmdmap.SlowQueryText(raw.Command, nullTermU8(raw.Query[:]), l.psTracking.Load())
 
 		select {
 		case l.SlowEvents <- model.EBPFEvent{

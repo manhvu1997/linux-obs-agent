@@ -125,7 +125,11 @@ struct mysql_slow_event_t {
     __u64 timestamp_ns;
     __u8  comm[TASK_COMM_LEN];
     __u8  query[QUERY_MAX];
+    __u32 command;      /* COM_QUERY or COM_STMT_EXECUTE: lets userspace
+                         * label an execute whose text was not recovered */
+    __u32 _pad;
 };
+_Static_assert(sizeof(struct mysql_slow_event_t) == 560, "slow event layout");
 struct mysql_slow_event_t *__mysql_slow_event_t_unused __attribute__((unused));
 
 /* One record per dispatch_command call. Layout is decoded by hand in
@@ -309,6 +313,9 @@ int uprobe_dispatch_command(struct pt_regs *ctx)
             p->query_len = len;
         }
     }
+    /* A new command starts: no Prepared_statement from an earlier one may
+     * linger and block (BPF_NOEXIST) this command's execute_loop. */
+    bpf_map_delete_elem(&ps_exec, &tid);
     /* Copies the scratch value (map-value pointer) into the per-TID entry. */
     bpf_map_update_elem(&mysql_pending, &tid, p, BPF_ANY);
     return 0;
@@ -376,7 +383,10 @@ int uprobe_ps_execute_loop(struct pt_regs *ctx)
     struct mysql_pending_t *p = bpf_map_lookup_elem(&mysql_pending, &tid);
     if (!p || p->command != COM_STMT_EXECUTE || !self)
         return 0;
-    bpf_map_update_elem(&ps_exec, &tid, &self, BPF_ANY);
+    /* Outermost wins: a prepared CALL whose procedure runs EXECUTE re-enters
+     * execute_loop in the same dispatch; the whole command belongs to the
+     * statement the client executed. */
+    bpf_map_update_elem(&ps_exec, &tid, &self, BPF_NOEXIST);
     return 0;
 }
 
@@ -477,6 +487,8 @@ int uretprobe_dispatch_command(struct pt_regs *ctx)
                 ev->tid = tid;
                 ev->latency_ns = latency_ns;
                 ev->timestamp_ns = now;
+                ev->command = p->command;
+                ev->_pad = 0;
                 __builtin_memcpy(ev->comm, p->comm, sizeof(ev->comm));
                 __builtin_memcpy(ev->query, __builtin_assume_aligned(text, 8), sizeof(ev->query));
                 bpf_ringbuf_submit(ev, 0);

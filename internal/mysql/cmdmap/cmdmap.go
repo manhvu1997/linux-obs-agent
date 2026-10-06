@@ -20,11 +20,18 @@ const (
 // commands that carry statement text (QUERY, STMT_PREPARE, STMT_EXECUTE).
 var commandNames = map[uint32]string{
 	0: "SLEEP", 1: "QUIT", 2: "INIT_DB", 4: "FIELD_LIST", 5: "CREATE_DB", 6: "DROP_DB",
-	9: "STATISTICS", 11: "CONNECT", 13: "DEBUG", 14: "PING", 15: "TIME", 16: "DELAYED_INSERT",
+	7: "REFRESH", 9: "STATISTICS", 11: "CONNECT", 13: "DEBUG", 14: "PING", 15: "TIME", 16: "DELAYED_INSERT",
 	17: "CHANGE_USER", 18: "BINLOG_DUMP", 19: "TABLE_DUMP", 20: "CONNECT_OUT", 21: "REGISTER_REPLICA",
 	24: "STMT_SEND_LONG_DATA", 25: "STMT_CLOSE", 26: "STMT_RESET", 27: "SET_OPTION", 28: "STMT_FETCH",
 	29: "DAEMON", 30: "BINLOG_DUMP_GTID", 31: "RESET_CONNECTION", 32: "CLONE",
+	33: "SUBSCRIBE_GROUP_REPLICATION_STREAM",
 }
+
+const (
+	execNoTextTracking = "<COM_STMT_EXECUTE: prepared before agent start, text unavailable>"
+	execNoText         = "<COM_STMT_EXECUTE: prepared, text unavailable>"
+	emptyQuery         = "<empty query>"
+)
 
 // Classify returns the command class ("query" | "stmt_prepare" |
 // "stmt_execute" | "other"), its digest, a UTF-8-safe sample of the raw
@@ -40,7 +47,7 @@ func Classify(command uint32, query string, queryLen uint32, preparedTracking bo
 	case ComQuery:
 		truncated = queryLen >= QueryMax
 		if strings.TrimSpace(query) == "" {
-			return "query", placeholder("<empty query>"), "", truncated
+			return "query", placeholder(emptyQuery), "", truncated
 		}
 		return "query", sqldigest.Normalize(query), strings.ToValidUTF8(query, "?"), truncated
 	case ComStmtPrepare:
@@ -53,10 +60,7 @@ func Classify(command uint32, query string, queryLen uint32, preparedTracking bo
 		return "stmt_prepare", d, strings.ToValidUTF8(query, "?"), queryLen >= QueryMax
 	case ComStmtExecute:
 		if strings.TrimSpace(query) == "" {
-			if preparedTracking {
-				return "stmt_execute", placeholder("<COM_STMT_EXECUTE: prepared before agent start, text unavailable>"), "", false
-			}
-			return "stmt_execute", placeholder("<COM_STMT_EXECUTE: prepared, text unavailable>"), "", false
+			return "stmt_execute", placeholder(execPlaceholder(preparedTracking)), "", false
 		}
 		return "stmt_execute", sqldigest.Normalize(query), strings.ToValidUTF8(query, "?"), queryLen >= QueryMax
 	default:
@@ -69,4 +73,25 @@ func Classify(command uint32, query string, queryLen uint32, preparedTracking bo
 
 func placeholder(text string) sqldigest.Digest {
 	return sqldigest.Digest{ID: sqldigest.HashID(text), Text: text, Normalized: true}
+}
+
+func execPlaceholder(preparedTracking bool) string {
+	if preparedTracking {
+		return execNoTextTracking
+	}
+	return execNoText
+}
+
+// SlowQueryText is the query shown for a slow-query event (only COM_QUERY
+// and COM_STMT_EXECUTE emit one): the captured text, or — when there is
+// none — the same placeholder Classify uses for that command's digest, so
+// recent_slow_queries never holds an anonymous blank row.
+func SlowQueryText(command uint32, query string, preparedTracking bool) string {
+	if strings.TrimSpace(query) != "" {
+		return query
+	}
+	if command == ComStmtExecute {
+		return execPlaceholder(preparedTracking)
+	}
+	return emptyQuery
 }

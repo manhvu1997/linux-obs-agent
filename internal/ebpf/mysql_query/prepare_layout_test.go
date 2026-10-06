@@ -16,6 +16,10 @@ func TestPrepareArgLayout(t *testing.T) {
 		{"unknown overload", "_ZN18Prepared_statement7prepareEv", false, false},
 		{"empty", "", false, false},
 		{"junk", "dispatch_command", false, false},
+		// Local entity nested in prepare (a lambda's operator()): same
+		// substring, wrong function.
+		{"nested lambda", "_ZZN18Prepared_statement7prepareEP3THDPKcmPP10Item_paramENKUlvE_clEv", false, false},
+		{"8.0 nested lambda", "_ZZN18Prepared_statement7prepareEPKcmENKUlvE_clEv", false, false},
 	}
 	for _, c := range cases {
 		hasTHD, ok := prepareArgLayout(c.mangled)
@@ -36,6 +40,17 @@ func TestPickPreparedSymbols(t *testing.T) {
 		[]string{exec84 + ".cold", exec84})
 	if err != nil || ps.prepare != prep84 || ps.executeLoop != exec84 || !ps.hasTHD {
 		t.Fatalf("got %+v, %v", ps, err)
+	}
+	// .symtab lists LOCAL symbols first: nested entities must never win.
+	ps, err = pickPreparedSymbols(
+		[]string{"_ZZN18Prepared_statement7prepareEP3THDPKcmPP10Item_paramENKUlvE_clEv", prep84},
+		[]string{"_ZZN18Prepared_statement12execute_loopEP3THDP6StringbENKUlvE_clEv", exec84})
+	if err != nil || ps.prepare != prep84 || ps.executeLoop != exec84 {
+		t.Fatalf("nested entities listed first: got %+v, %v", ps, err)
+	}
+	if _, err := pickPreparedSymbols([]string{prep84},
+		[]string{"_ZZN18Prepared_statement12execute_loopEP3THDP6StringbENKUlvE_clEv"}); err == nil {
+		t.Fatal("execute_loop with only a nested entity must be an error")
 	}
 	ps, err = pickPreparedSymbols([]string{"_ZN18Prepared_statement7prepareEPKcm"}, []string{exec84})
 	if err != nil || ps.hasTHD {

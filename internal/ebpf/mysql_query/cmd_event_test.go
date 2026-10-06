@@ -76,3 +76,11 @@ func TestDecodeCmdEventShort(t *testing.T) {
 		t.Fatal("decodeCmdEvent accepted nil")
 	}
 }
+
+// consume decodes slow events with binary.Read into the generated type; the
+// C struct carries the command after the query (560 bytes).
+func TestSlowEventSizeMatchesGenerated(t *testing.T) {
+	if got := binary.Size(MysqlQueryMysqlSlowEventT{}); got != 560 {
+		t.Fatalf("binary.Size(MysqlQueryMysqlSlowEventT) = %d, want 560", got)
+	}
+}

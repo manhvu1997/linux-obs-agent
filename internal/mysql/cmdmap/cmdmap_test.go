@@ -63,7 +63,8 @@ func TestClassifyPrepare(t *testing.T) {
 func TestClassifyOtherCommandNames(t *testing.T) {
 	cases := map[uint32]string{
 		0: "<COM_SLEEP>", 1: "<COM_QUIT>", 2: "<COM_INIT_DB>", 14: "<COM_PING>",
-		25: "<COM_STMT_CLOSE>", 31: "<COM_RESET_CONNECTION>", 32: "<COM_CLONE>",
+		7: "<COM_REFRESH>", 25: "<COM_STMT_CLOSE>", 31: "<COM_RESET_CONNECTION>", 32: "<COM_CLONE>",
+		33: "<COM_SUBSCRIBE_GROUP_REPLICATION_STREAM>",
 		99: "<COM command 99>",
 	}
 	for cmd, want := range cases {
@@ -87,6 +88,27 @@ func TestClassifySampleIsValidUTF8(t *testing.T) {
 		_, _, sample, _ := Classify(cmd, "SELECT 'ab\xe1\xbb", 13, true)
 		if strings.ContainsRune(sample, '�') || !strings.HasSuffix(sample, "?") {
 			t.Fatalf("command %d: sample = %q", cmd, sample)
+		}
+	}
+}
+
+func TestSlowQueryText(t *testing.T) {
+	cases := []struct {
+		command  uint32
+		query    string
+		tracking bool
+		want     string
+	}{
+		{ComQuery, "SELECT SLEEP(1)", true, "SELECT SLEEP(1)"},
+		{ComStmtExecute, "SELECT c FROM t WHERE id = ?", true, "SELECT c FROM t WHERE id = ?"},
+		{ComStmtExecute, "", true, "<COM_STMT_EXECUTE: prepared before agent start, text unavailable>"},
+		{ComStmtExecute, "", false, "<COM_STMT_EXECUTE: prepared, text unavailable>"},
+		{ComQuery, "", true, "<empty query>"},
+		{ComQuery, "  ", false, "<empty query>"},
+	}
+	for _, c := range cases {
+		if got := SlowQueryText(c.command, c.query, c.tracking); got != c.want {
+			t.Errorf("SlowQueryText(%d, %q, %v) = %q, want %q", c.command, c.query, c.tracking, got, c.want)
 		}
 	}
 }
