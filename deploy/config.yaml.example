@@ -356,6 +356,10 @@ mysql:
   # IDENTIFIED BY '...'). digest_text is literal-free. /api/diagnose is
   # unauthenticated: restrict network access to metrics_addr (:9200).
   sample_queries: true          # MYSQL_SAMPLE_QUERIES; false = never store/emit sample_query
+  # Fold every statement on information_schema / performance_schema / sys /
+  # mysql (exporter and monitoring queries) into one aggregate digest
+  # "<system schemas: ...>" without sample_query. false = one digest each.
+  fold_system_schemas: true     # MYSQL_FOLD_SYSTEM_SCHEMAS
   digest_window: 60s            # MYSQL_DIGEST_WINDOW
   top_digests: 20
   sticky_digests_max: 50        # digests exported to Prometheus

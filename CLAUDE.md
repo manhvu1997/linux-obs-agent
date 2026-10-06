@@ -1585,7 +1585,7 @@ wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
 | Unit | What it does |
 |---|---|
 | `ebpf/netflow` | Always-on. Counts TCP bytes and connections per {tgid, direction, peer, service port} in an LRU map. Owner is recorded at connect/accept (process context); bytes are charged to the current process at `tcp_sendmsg` / `tcp_cleanup_rbuf`. |
-| `ebpf/mysql_query` | Per `dispatch_command`: wall, on-CPU (`se.sum_exec_runtime` Δ), run-queue wait (`sched_info.run_delay` Δ), result bytes (`tcp_sendmsg` / `unix_stream_sendmsg` returns). One ring-buffer event per command. |
+| `ebpf/mysql_query` | Per `dispatch_command`: wall, on-CPU (`se.sum_exec_runtime` Δ), run-queue wait (`sched_info.run_delay` Δ), result bytes (`tcp_sendmsg` / `unix_stream_sendmsg` returns). One ring-buffer event per command. Optional uprobes on `Prepared_statement::prepare` / `execute_loop` recover the SQL text of `COM_STMT_EXECUTE`. |
 | `sqldigest` + `querystats` | Normalise SQL → digest; aggregate over a 60 s window; rank by **total** CPU; label `culprit` (≥ 20 % of mysqld query CPU) or `victim` (run-queue wait > 5 × CPU and slow). |
 | `process` | Groups processes into families by systemd unit (`nginx.service`), falling back to `.scope` / cgroup path. |
 | `netinv` | On demand only: listening ports and live connections (`src → dst`, client → server) from `/proc/net/tcp*` + `/proc/<pid>/fd`. |
@@ -1604,7 +1604,7 @@ curl -s localhost:9200/api/diagnose | jq '.process_report.top_families_cpu[] | {
 
 ### Configuration
 
-`process.report_top_n`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `culprit_cpu_share_percent`, `victim_runq_ratio`, `sample_queries`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`, `MYSQL_SAMPLE_QUERIES`.
+`process.report_top_n`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `culprit_cpu_share_percent`, `victim_runq_ratio`, `sample_queries`, `fold_system_schemas`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`, `MYSQL_SAMPLE_QUERIES`, `MYSQL_FOLD_SYSTEM_SCHEMAS`.
 
 ### Prometheus
 
@@ -1632,7 +1632,7 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 - Per-call CPU is ± one scheduler tick (1–4 ms); per-digest **totals** are accurate. `cpu_ms_avg` is unreliable below 1 ms.
 - Query text is captured up to 511 bytes (`truncated: true` beyond).
 - **Privacy:** `top_digests[].sample_query` is the raw text of the first execution of each digest, **literals included** — potentially secrets (e.g. `CREATE USER … IDENTIFIED BY '…'`). `digest_text` (and the `digest_info` metric) is literal-free. Set `mysql.sample_queries: false` (`MYSQL_SAMPLE_QUERIES=false`) to never store or emit it. `/api/diagnose` and `/metrics` are unauthenticated (with peer IPs and cmdlines): restrict network access to `:9200`.
-- `COM_STMT_EXECUTE` (server-side prepared statements) is measured under the placeholder digest `<COM_STMT_EXECUTE: prepared, text unavailable>`.
+- `COM_STMT_EXECUTE` (server-side prepared statements) carries the SQL text recovered from its `COM_STMT_PREPARE` — see *Prepared statements and command names* below for when it cannot be recovered.
 - Process-level network covers TCP only (no UDP, no unix sockets). Pre-existing idle connections are invisible to eBPF until they carry traffic; the `/proc` `connections` list still shows them.
 - `listening_ports` / `connections` come from `/proc/1/net/tcp{,6}` — pid 1's (the host's, with `hostPID: true`) network namespace — falling back to the agent's own namespace when that cannot be read. Processes in **other** network namespaces (containers with their own netns) have no ports/connections listed; their traffic is still counted by the netflow eBPF module.
 - Window rates (`bytes_*_per_sec`) cover only polled intervals: the first poll after start is a baseline, so rates are 0 until the second poll.
@@ -1644,12 +1644,44 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 - `COM_QUERY` length is read as a 4-byte `unsigned int` (MySQL 5.7/8.0). `run_delay` needs scheduler stats; on kernels where it reads 0 the report sets `cpu_accounting: run_delay_unavailable`.
 - **Not verified at runtime in the development environment** (compile-checked only, on arm64 Linux): verifier acceptance, attach behaviour and byte/connection counts on x86_64. Run the verification commands in the spec/plan before relying on the numbers.
 
+### Prepared statements and command names
+
+`COM_STMT_EXECUTE` (command 23) carries only a statement id; the SQL was sent earlier with `COM_STMT_PREPARE` (22). Two optional uprobes connect them:
+
+```
+COM_STMT_PREPARE → mysqld_stmt_prepare → Prepared_statement::prepare(…query, length…)
+    uprobe: ps_text[Prepared_statement*] = query text   (LRU_HASH, 16 384 entries)
+COM_STMT_EXECUTE → mysqld_stmt_execute → Prepared_statement::execute_loop(…)
+    uprobe: ps_exec[tid] = Prepared_statement*          (only inside a COM_STMT_EXECUTE dispatch_command)
+uretprobe dispatch_command (COM_STMT_EXECUTE): text = ps_text[ps_exec[tid]]; ps_exec[tid] deleted for every command
+```
+
+- An execute with recovered text gets **the same digest** as the same statement sent as `COM_QUERY` (`command` stays `stmt_execute`). The prepare itself is a separate `stmt_prepare` digest, `prepare: <normalised text>`.
+- **Statements prepared before the agent attached** (pooled connections) are reported as `<COM_STMT_EXECUTE: prepared before agent start, text unavailable>` until the connection re-prepares or is recycled. A re-prepare after a metadata change does not refresh the text for the original statement; its original text is kept.
+- Needs `Prepared_statement::prepare` and `Prepared_statement::execute_loop` in mysqld's symbol table (`.symtab`, then `.dynsym`). Supported `prepare` layouts: MySQL **8.4** `prepare(THD*, const char*, size_t, Item_param**)` and **8.0** `prepare(const char*, size_t)`; the layout is chosen from the mangled name. Otherwise (stripped binary, unknown overload, attach error) the agent logs one warning, `PreparedTextTracking` is off and executes keep the placeholder `<COM_STMT_EXECUTE: prepared, text unavailable>`.
+- Prepared executes now also feed the legacy per-PID counts (`top_processes`) and `recent_slow_queries`, with the recovered text when available (also with `emit_all_queries: false`).
+- Other commands get readable placeholders from MySQL 8.x `enum_server_command`: `<COM_PING>`, `<COM_STMT_CLOSE>`, `<COM_RESET_CONNECTION>`, …; an unknown number stays `<COM command N>` (class `other`).
+- **System-schema folding** (`mysql.fold_system_schemas`, default `true`): every statement that qualifies an object with `information_schema.`, `performance_schema.`, `sys.` or `mysql.` (exporter and monitoring queries) is merged into one digest `<system schemas: information_schema, performance_schema, sys, mysql>` with no `sample_query`; its command class is unchanged. Only a schema *qualifier* counts — `select sys from t` or a column `t.mysql` is not folded. An unqualified query run with `USE mysql` is not folded either. Disable with `fold_system_schemas: false` or `MYSQL_FOLD_SYSTEM_SCHEMAS=false`.
+- **Runtime not verified** in the development environment (compile-checked only on arm64 Linux): verifier acceptance of the new programs, the 8.4 register layout and the recovered text on x86_64 with a real mysqld. Run the commands below first.
+
+Verification (x86_64 host with MySQL 8.4, as root):
+
+```bash
+sudo ./obs-agent -config /etc/obs-agent/config.yaml -loglevel debug 2>&1 | grep -i "prepared"   # expect "prepared-statement text tracking enabled" + layout
+sysbench oltp_point_select --mysql-user=… --mysql-password=… --tables=1 --table-size=100000 --db-ps-mode=auto --threads=8 --time=60 run &
+sleep 20; curl -s localhost:9200/api/diagnose | jq '.mysql_report.top_digests[] | {command, digest_text, calls, cpu_ms_total}' | head -40
+# expect command "stmt_execute" with digest_text "select c from sbtest1 where id = ?" and a "prepare: select c from sbtest1 where id = ?" row;
+# connections opened BEFORE the agent started show "prepared before agent start".
+sudo bpftool map show name ps_text; sudo bpftool map show name ps_exec
+```
+
 ### Overhead
 
 | Component | CPU | Memory |
 |---|---|---|
 | netflow eBPF (~100k hook calls/s) | ~0.4 % | ~6 MB maps |
 | mysql per-command events (20k QPS) | ~0.3 % kernel + ~1 % userspace | 4 MB ringbuf + ~5 MB digests |
+| mysql prepared-statement text (`ps_text` 16 384 × 520 B, `ps_exec`) | one map update per prepare / execute | ~9 MB maps (preallocated LRU) |
 | family grouping (10 s scan) | ~0.02 % | < 1 MB |
 | netinv (per /api/diagnose) | 20–50 ms per call | transient |
 
