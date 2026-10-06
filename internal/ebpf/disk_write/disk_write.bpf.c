@@ -1,3 +1,6 @@
+//go:build ignore
+// Compiled by bpf2go, not the Go toolchain.
+
 // SPDX-License-Identifier: GPL-2.0
 //
 // disk_write.bpf.c – traces vfs_write() to capture per-process disk write
