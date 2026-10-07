@@ -1595,7 +1595,7 @@ wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
 |---|---|
 | `ebpf/netflow` | Always-on. Counts TCP bytes and connections per {tgid, direction, peer, service port} in an LRU map. Owner is recorded at connect/accept (process context); bytes are charged to the current process at `tcp_sendmsg` / `tcp_cleanup_rbuf`. |
 | `ebpf/mysql_query` | Per `dispatch_command`: wall, on-CPU (`se.sum_exec_runtime` Δ), run-queue wait (`sched_info.run_delay` Δ), result bytes (`tcp_sendmsg` / `unix_stream_sendmsg` returns). One ring-buffer event per command. Optional uprobes on `Prepared_statement::prepare` / `execute_loop` recover the SQL text of `COM_STMT_EXECUTE`. |
-| `sqldigest` + `querystats` | Normalise SQL → digest; aggregate over a 60 s window; rank by **total** CPU; label `culprit` (≥ 20 % of mysqld query CPU) or `victim` (run-queue wait > 5 × CPU and slow). |
+| `sqldigest` + `querystats` | Normalise SQL → digest; aggregate over a 60 s window; rank by **total** CPU; label `culprit` (≥ 20 % of mysqld query CPU **and** ≥ 5 % of one core over the window) or `victim` (run-queue wait > 5 × CPU and slow). |
 | `process` | Groups processes into families by systemd unit (`nginx.service`), falling back to `.scope` / cgroup path. |
 | `netinv` | On demand only: listening ports and live connections (`src → dst`, client → server) from `/proc/net/tcp*` + `/proc/<pid>/fd`. |
 
@@ -1603,17 +1603,18 @@ wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
 
 - `process_report.top_cpu[]` / `top_mem[]` — top 10 processes with `listening_ports`, `network` (inbound/outbound conns and bytes over the window, `top_peers`), `connections` (≤ 50, `connections_truncated`), `profile_url`.
 - `process_report.top_families_cpu[]` / `top_families_mem[]` — top 10 families with `process_count`, `root_pid`, `top_members`, summed `network`.
-- `mysql_report.top_digests[]` — top 20 by `cpu_ms_total` with `calls`, `cpu_ms_avg`, `runq_wait_ms_avg`, `wall_ms_avg`, `bytes_out_total`, `cpu_share_percent`, `role`. `top_digests_by_bytes_out[]` ranks by result size.
+- `mysql_report.top_digests[]` — top 20 by `cpu_ms_total` with `calls`, `cpu_ms_avg`, `runq_wait_ms_avg`, `wall_ms_avg`, `bytes_out_total`, `cpu_share_percent`, `cpu_percent_of_core`, `role`. `top_digests_by_bytes_out[]` ranks by result size.
+- `cpu_share_percent` is **relative**: the digest's share of the same mysqld's *query* CPU (inside `dispatch_command`), not of mysqld's or the node's CPU. On an idle server the exporter queries can reach 80–90 % of almost nothing. Read it with `cpu_percent_of_core` (`cpu_ms_total` / window, 100 = one core busy for the whole window) and the report-level `query_cpu_ms_total`. `role: culprit` needs both share ≥ `culprit_cpu_share_percent` and `cpu_percent_of_core` ≥ `culprit_min_cpu_percent` (default 5), so quiet-server background traffic is never called a culprit. Both are averaged over the full window, so they are understated during the agent's first window.
 - `mysql_report.cpu_accounting` = `run_delay_unavailable` when the kernel lacks scheduler stats; victims are then judged on `wall − cpu`.
 
 ```bash
-curl -s localhost:9200/api/diagnose | jq '.mysql_report.top_digests[] | {digest_text, role, cpu_share_percent, runq_wait_ms_avg}'
+curl -s localhost:9200/api/diagnose | jq '.mysql_report.top_digests[] | {digest_text, role, cpu_share_percent, cpu_percent_of_core, runq_wait_ms_avg}'
 curl -s localhost:9200/api/diagnose | jq '.process_report.top_families_cpu[] | {family, process_count, cpu_percent, net: .network.inbound}'
 ```
 
 ### Configuration
 
-`process.report_top_n`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `culprit_cpu_share_percent`, `victim_runq_ratio`, `sample_queries`, `fold_system_schemas`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`, `MYSQL_SAMPLE_QUERIES`, `MYSQL_FOLD_SYSTEM_SCHEMAS`.
+`process.report_top_n`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `culprit_cpu_share_percent`, `culprit_min_cpu_percent`, `victim_runq_ratio`, `sample_queries`, `fold_system_schemas`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`, `MYSQL_SAMPLE_QUERIES`, `MYSQL_FOLD_SYSTEM_SCHEMAS`.
 
 ### Prometheus
 

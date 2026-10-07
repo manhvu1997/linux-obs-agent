@@ -61,6 +61,7 @@ func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 			TopN:                   cfg.TopDigests,
 			TopNBytes:              10,
 			CulpritCPUSharePercent: cfg.CulpritCPUSharePercent,
+			CulpritMinCPUPercent:   cfg.CulpritMinCPUPercent,
 			VictimRunqRatio:        cfg.VictimRunqRatio,
 			SlowWallNs:             thresholdNs,
 			StickyMax:              cfg.StickyDigestsMax,
@@ -215,6 +216,7 @@ func (a *Analyzer) poll() {
 
 		WindowSeconds:        snap.WindowSeconds,
 		CPUAccounting:        snap.CPUAccounting,
+		QueryCPUMsTotal:      snap.QueryCPUMsTotal,
 		DroppedEvents:        a.loader.Dropped(),
 		Thresholds:           &snap.Thresholds,
 		TopDigests:           snap.TopByCPU,

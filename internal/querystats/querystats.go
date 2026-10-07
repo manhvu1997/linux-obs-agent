@@ -53,6 +53,7 @@ type Config struct {
 	TopN                   int           // 20
 	TopNBytes              int           // 10
 	CulpritCPUSharePercent float64       // 20
+	CulpritMinCPUPercent   float64       // 5: culprit also needs ≥ this % of one core over Window
 	VictimRunqRatio        float64       // 5
 	SlowWallNs             uint64        // victim needs wall_avg >= this
 	StickyMax              int           // 50
@@ -78,6 +79,9 @@ func (c Config) withDefaults() Config {
 	if c.CulpritCPUSharePercent <= 0 {
 		c.CulpritCPUSharePercent = 20
 	}
+	if c.CulpritMinCPUPercent <= 0 {
+		c.CulpritMinCPUPercent = 5
+	}
 	if c.VictimRunqRatio <= 0 {
 		c.VictimRunqRatio = 5
 	}
@@ -102,11 +106,14 @@ type ExportedDigest struct {
 type Snapshot struct {
 	WindowSeconds int
 	CPUAccounting string
-	Thresholds    model.QueryRoleThresholds
-	TopByCPU      []model.QueryDigestStats
-	TopByBytesOut []model.QueryDigestStats
-	Exported      []ExportedDigest
-	Commands      map[string]model.QueryCounters
+	// QueryCPUMsTotal is the on-CPU time of every command in the window, all
+	// PIDs: the absolute scale behind each digest's CPUSharePercent.
+	QueryCPUMsTotal float64
+	Thresholds      model.QueryRoleThresholds
+	TopByCPU        []model.QueryDigestStats
+	TopByBytesOut   []model.QueryDigestStats
+	Exported        []ExportedDigest
+	Commands        map[string]model.QueryCounters
 }
 
 type key struct {
@@ -291,8 +298,10 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		acct = AccountingNoRunDelay
 	}
 	cpuByPID := make(map[uint32]uint64)
+	var cpuAll uint64
 	for k, x := range merged {
 		cpuByPID[k.pid] += x.cpu
+		cpuAll += x.cpu
 	}
 	stats := make([]model.QueryDigestStats, 0, len(merged))
 	for k, x := range merged {
@@ -324,10 +333,12 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		cmds[k] = v
 	}
 	return Snapshot{
-		WindowSeconds: int(a.cfg.Window / time.Second),
-		CPUAccounting: acct,
+		WindowSeconds:   int(a.cfg.Window / time.Second),
+		CPUAccounting:   acct,
+		QueryCPUMsTotal: float64(cpuAll) / 1e6,
 		Thresholds: model.QueryRoleThresholds{
 			CulpritCPUSharePercent: a.cfg.CulpritCPUSharePercent,
+			CulpritMinCPUPercent:   a.cfg.CulpritMinCPUPercent,
 			VictimRunqRatio:        a.cfg.VictimRunqRatio,
 		},
 		TopByCPU:      byCPU,
@@ -404,13 +415,19 @@ func (a *Aggregator) toStats(k key, x *acc, pidCPU uint64, acct string) model.Qu
 	if pidCPU > 0 {
 		share = 100 * float64(x.cpu) / float64(pidCPU)
 	}
+	// Averaged over the full window, so it is understated (never overstated)
+	// while the agent has run for less than one window.
+	ofCore := 100 * float64(x.cpu) / float64(a.cfg.Window.Nanoseconds())
 	wait := runqAvg
 	if acct == AccountingNoRunDelay {
 		wait = wallAvg - cpuAvg
 	}
 	role := ""
 	switch {
-	case share >= a.cfg.CulpritCPUSharePercent:
+	// share alone is relative to the other queries: on an idle server the
+	// monitoring queries reach 80–90 % of almost nothing. A culprit must also
+	// burn a real fraction of a core.
+	case share >= a.cfg.CulpritCPUSharePercent && ofCore >= a.cfg.CulpritMinCPUPercent:
 		role = RoleCulprit
 	case wait > cpuAvg*a.cfg.VictimRunqRatio && wallAvg >= ms(a.cfg.SlowWallNs):
 		role = RoleVictim
@@ -426,8 +443,9 @@ func (a *Aggregator) toStats(k key, x *acc, pidCPU uint64, acct string) model.Qu
 		RunqWaitMsAvg: runqAvg,
 		WallMsAvg:     wallAvg, WallMsMax: ms(x.wallMax),
 		BytesInTotal: x.in, BytesOutTotal: x.out, BytesOutAvg: float64(x.out) / calls,
-		CPUSharePercent: share,
-		Role:            role,
+		CPUSharePercent:  share,
+		CPUPercentOfCore: ofCore,
+		Role:             role,
 	}
 }
 

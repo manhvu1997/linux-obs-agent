@@ -364,7 +364,11 @@ mysql:
   top_digests: 20
   sticky_digests_max: 50        # digests exported to Prometheus
   sticky_digest_ttl: 1h
+  # role "culprit" needs BOTH: share of mysqld query CPU >= culprit_cpu_share_percent
+  # AND >= culprit_min_cpu_percent of one core over digest_window (5 = 3 s / 60 s).
+  # The floor keeps exporter queries on an idle server from being called culprits.
   culprit_cpu_share_percent: 20
+  culprit_min_cpu_percent: 5
   victim_runq_ratio: 5
 
 # Always-on per-process TCP flow accounting (eBPF). Feeds

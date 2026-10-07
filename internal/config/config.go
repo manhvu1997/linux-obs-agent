@@ -415,6 +415,10 @@ type MySQLConfig struct {
 	StickyDigestTTL  time.Duration `yaml:"sticky_digest_ttl"`
 	// CulpritCPUSharePercent: digest share of mysqld query CPU that marks it "culprit".
 	CulpritCPUSharePercent float64 `yaml:"culprit_cpu_share_percent"`
+	// CulpritMinCPUPercent: a culprit must ALSO use at least this % of one core
+	// over digest_window (5 = 3 s of CPU per 60 s). Keeps monitoring queries on
+	// an idle server from being labelled culprit by share alone.
+	CulpritMinCPUPercent float64 `yaml:"culprit_min_cpu_percent"`
 	// VictimRunqRatio: run-queue wait > cpu × ratio (and wall ≥ slow threshold) marks "victim".
 	VictimRunqRatio float64 `yaml:"victim_runq_ratio"`
 }
@@ -553,6 +557,7 @@ func Defaults() *Config {
 			StickyDigestsMax:       50,
 			StickyDigestTTL:        time.Hour,
 			CulpritCPUSharePercent: 20,
+			CulpritMinCPUPercent:   5,
 			VictimRunqRatio:        5,
 		},
 		Netflow: NetflowConfig{
@@ -729,8 +734,8 @@ func (c *Config) validate() error {
 		if c.MySQL.TopDigests <= 0 || c.MySQL.StickyDigestsMax <= 0 || c.MySQL.StickyDigestTTL <= 0 {
 			return fmt.Errorf("mysql.top_digests, sticky_digests_max and sticky_digest_ttl must be > 0")
 		}
-		if c.MySQL.CulpritCPUSharePercent <= 0 || c.MySQL.VictimRunqRatio <= 0 {
-			return fmt.Errorf("mysql.culprit_cpu_share_percent and victim_runq_ratio must be > 0")
+		if c.MySQL.CulpritCPUSharePercent <= 0 || c.MySQL.CulpritMinCPUPercent <= 0 || c.MySQL.VictimRunqRatio <= 0 {
+			return fmt.Errorf("mysql.culprit_cpu_share_percent, culprit_min_cpu_percent and victim_runq_ratio must be > 0")
 		}
 	}
 	if c.Netflow.Enabled {

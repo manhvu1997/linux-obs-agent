@@ -274,3 +274,57 @@ func TestStickyCounterMonotonic(t *testing.T) {
 		t.Fatalf("calls = %d, want 2", after.Counters.Calls)
 	}
 }
+
+// Your idle prod case: monitoring queries are 86 % of ~0.2 s of query CPU per
+// minute. High share, negligible absolute cost → no culprit.
+func TestIdleServerDominantDigestIsNotCulprit(t *testing.T) {
+	a := New(cfg())
+	for i := 0; i < 56; i++ { // 56 × 3.3 ms ≈ 185 ms
+		a.Add(ev("SELECT * FROM information_schema.tables", t0, 3.3, 0, 3.7, 5000))
+	}
+	for i := 0; i < 10; i++ { // 10 × 2.9 ms ≈ 29 ms
+		a.Add(ev("SELECT * FROM jobs WHERE id = 1", t0, 2.9, 0, 3, 100))
+	}
+	s := a.Snapshot(t0.Add(time.Second))
+	top := s.TopByCPU[0]
+	if top.CPUSharePercent < 80 {
+		t.Fatalf("share = %.1f, want > 80 (setup)", top.CPUSharePercent)
+	}
+	if top.Role != "" {
+		t.Fatalf("role = %q, want none: %.2f %% of a core is below the floor", top.Role, top.CPUPercentOfCore)
+	}
+}
+
+func TestBusyServerDominantDigestIsCulprit(t *testing.T) {
+	a := New(cfg())
+	for i := 0; i < 60; i++ { // 60 × 500 ms = 30 s of CPU in 60 s = 50 % of a core
+		a.Add(ev("SELECT COUNT(*) FROM big GROUP BY x", t0, 500, 1, 510, 50))
+	}
+	a.Add(ev("SELECT * FROM jobs WHERE id = 1", t0, 5, 0, 5, 100))
+	s := a.Snapshot(t0.Add(time.Second))
+	if top := s.TopByCPU[0]; top.Role != RoleCulprit {
+		t.Fatalf("role = %q (share %.1f, of core %.1f), want culprit", top.Role, top.CPUSharePercent, top.CPUPercentOfCore)
+	}
+}
+
+func TestCPUPercentOfCoreAndQueryTotal(t *testing.T) {
+	a := New(cfg()) // 60 s window
+	for i := 0; i < 3; i++ {
+		a.Add(ev("SELECT 1 FROM a", t0, 1000, 0, 1000, 1)) // 3 s
+	}
+	a.Add(ev("SELECT 1 FROM b", t0, 600, 0, 600, 1)) // 0.6 s
+	s := a.Snapshot(t0.Add(time.Second))
+	if s.QueryCPUMsTotal != 3600 {
+		t.Fatalf("query_cpu_ms_total = %v, want 3600", s.QueryCPUMsTotal)
+	}
+	if got := s.TopByCPU[0].CPUPercentOfCore; got != 5 {
+		t.Fatalf("cpu_percent_of_core = %v, want 5 (3 s / 60 s)", got)
+	}
+	if got := s.Thresholds.CulpritMinCPUPercent; got != 5 {
+		t.Fatalf("thresholds.culprit_min_cpu_percent = %v, want default 5", got)
+	}
+	// Exactly at the 5 % floor with an 83 % share → culprit (>= on both).
+	if s.TopByCPU[0].Role != RoleCulprit {
+		t.Fatalf("role at floor = %q, want culprit", s.TopByCPU[0].Role)
+	}
+}

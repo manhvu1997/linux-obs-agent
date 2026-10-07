@@ -982,6 +982,7 @@ type MySQLAnalysis struct {
 	// Query digests (present when mysql.emit_all_queries is on).
 	WindowSeconds        int                  `json:"window_seconds,omitempty"`
 	CPUAccounting        string               `json:"cpu_accounting,omitempty"` // "ok" | "run_delay_unavailable"
+	QueryCPUMsTotal      float64              `json:"query_cpu_ms_total"`       // all commands, all PIDs, in the window
 	DroppedEvents        uint64               `json:"dropped_events"`
 	Thresholds           *QueryRoleThresholds `json:"thresholds,omitempty"`
 	TopDigests           []QueryDigestStats   `json:"top_digests,omitempty"` // by total CPU
@@ -1022,30 +1023,36 @@ type QueryCounters struct {
 // Ranking by CPUMsTotal separates the query that consumes the CPU (culprit)
 // from queries that are slow only because they waited for a CPU (victims).
 type QueryDigestStats struct {
-	PID             uint32  `json:"pid"`
-	DigestID        string  `json:"digest_id"`
-	Command         string  `json:"command"`
-	DigestText      string  `json:"digest_text"`
-	SampleQuery     string  `json:"sample_query,omitempty"`
-	Normalized      bool    `json:"normalized"`
-	Truncated       bool    `json:"truncated"`
-	Calls           uint64  `json:"calls"`
-	CPUMsTotal      float64 `json:"cpu_ms_total"`
-	CPUMsAvg        float64 `json:"cpu_ms_avg"`
-	CPUMsMax        float64 `json:"cpu_ms_max"`
-	RunqWaitMsAvg   float64 `json:"runq_wait_ms_avg"`
-	WallMsAvg       float64 `json:"wall_ms_avg"`
-	WallMsMax       float64 `json:"wall_ms_max"`
-	BytesInTotal    uint64  `json:"bytes_in_total"`
-	BytesOutTotal   uint64  `json:"bytes_out_total"`
-	BytesOutAvg     float64 `json:"bytes_out_avg"`
+	PID           uint32  `json:"pid"`
+	DigestID      string  `json:"digest_id"`
+	Command       string  `json:"command"`
+	DigestText    string  `json:"digest_text"`
+	SampleQuery   string  `json:"sample_query,omitempty"`
+	Normalized    bool    `json:"normalized"`
+	Truncated     bool    `json:"truncated"`
+	Calls         uint64  `json:"calls"`
+	CPUMsTotal    float64 `json:"cpu_ms_total"`
+	CPUMsAvg      float64 `json:"cpu_ms_avg"`
+	CPUMsMax      float64 `json:"cpu_ms_max"`
+	RunqWaitMsAvg float64 `json:"runq_wait_ms_avg"`
+	WallMsAvg     float64 `json:"wall_ms_avg"`
+	WallMsMax     float64 `json:"wall_ms_max"`
+	BytesInTotal  uint64  `json:"bytes_in_total"`
+	BytesOutTotal uint64  `json:"bytes_out_total"`
+	BytesOutAvg   float64 `json:"bytes_out_avg"`
+	// CPUSharePercent is this digest's share of the same mysqld's QUERY CPU
+	// in the window — relative, not a share of mysqld or node CPU.
 	CPUSharePercent float64 `json:"cpu_share_percent"`
-	Role            string  `json:"role"`
+	// CPUPercentOfCore is cpu_ms_total over the window as % of one core: the
+	// absolute scale (100 = one core fully busy for the whole window).
+	CPUPercentOfCore float64 `json:"cpu_percent_of_core"`
+	Role             string  `json:"role"`
 }
 
 // QueryRoleThresholds echoes the culprit/victim cut-offs into the report.
 type QueryRoleThresholds struct {
 	CulpritCPUSharePercent float64 `json:"culprit_cpu_share_percent"`
+	CulpritMinCPUPercent   float64 `json:"culprit_min_cpu_percent"`
 	VictimRunqRatio        float64 `json:"victim_runq_ratio"`
 }
 

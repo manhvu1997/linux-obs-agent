@@ -53,7 +53,7 @@ func TestMySQLDigestDefaults(t *testing.T) {
 	m := Defaults().MySQL
 	if m.Enabled || !m.EmitAllQueries || m.DigestWindow != 60*time.Second || m.TopDigests != 20 ||
 		m.StickyDigestsMax != 50 || m.StickyDigestTTL != time.Hour ||
-		m.CulpritCPUSharePercent != 20 || m.VictimRunqRatio != 5 {
+		m.CulpritCPUSharePercent != 20 || m.CulpritMinCPUPercent != 5 || m.VictimRunqRatio != 5 {
 		t.Fatalf("mysql defaults = %+v", m)
 	}
 	c := Defaults()

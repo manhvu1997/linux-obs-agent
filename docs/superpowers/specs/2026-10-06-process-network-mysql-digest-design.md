@@ -225,8 +225,13 @@ Never panics; on any internal failure returns whitespace-collapsed raw text with
 - Rolling window (`digest_window`, default 60 s) implemented as 12 × 5 s buckets.
 - Per digest: `calls, cpu_ns_total, cpu_ns_max, runq_ns_total, wall_ns_total, wall_ns_max, bytes_in_total, bytes_out_total, sample_query, truncated, command`.
 - Also lifetime monotonic counters per digest (for Prometheus) and per command class.
-- `cpu_share_percent = digest.cpu_total / Σ cpu_total (same pid) × 100`.
-- Role: `culprit` if `cpu_share_percent ≥ culprit_cpu_share_percent` (20);
+- `cpu_share_percent = digest.cpu_total / Σ cpu_total (same pid) × 100` — relative to the
+  pid's *query* CPU only, so on an idle server a monitoring digest can reach 80–90 % of
+  almost nothing.
+- `cpu_percent_of_core = digest.cpu_total / window × 100` (absolute scale); report-level
+  `query_cpu_ms_total = Σ cpu_total` (all pids).
+- Role: `culprit` if `cpu_share_percent ≥ culprit_cpu_share_percent` (20) **and**
+  `cpu_percent_of_core ≥ culprit_min_cpu_percent` (5, i.e. ≥ 3 s CPU per 60 s);
   `victim` if `runq_avg > cpu_avg × victim_runq_ratio` (5) **and** `wall_avg ≥ slow_query_threshold_ms`; else `""`.
   With `cpu_accounting = run_delay_unavailable`, `victim` uses `(wall_avg − cpu_avg)` in place of `runq_avg`.
 - `cpu_accounting` detection: after ≥ 1 000 commands where `wall − cpu > 10 ms` and Σ `runq_ns == 0` → `run_delay_unavailable`.
@@ -317,7 +322,8 @@ top_peers), top_members [{pid, comm, cpu_percent, mem_rss_bytes} ×5]`. No
 ### 5.2 `/api/diagnose` — `mysql_report` (extended)
 
 New fields (existing unchanged): `window_seconds`, `cpu_accounting`
-(`ok | run_delay_unavailable`), `dropped_events`, `thresholds {culprit_cpu_share_percent, victim_runq_ratio}`,
+(`ok | run_delay_unavailable`), `query_cpu_ms_total`, `dropped_events`,
+`thresholds {culprit_cpu_share_percent, culprit_min_cpu_percent, victim_runq_ratio}`,
 `top_digests` (top-20 by `cpu_ms_total`), `top_digests_by_bytes_out` (top-10).
 
 Digest entry:
@@ -334,6 +340,7 @@ Digest entry:
   "wall_ms_avg": 410, "wall_ms_max": 1300,
   "bytes_in_total": 14400, "bytes_out_total": 24000, "bytes_out_avg": 200,
   "cpu_share_percent": 71.4,
+  "cpu_percent_of_core": 80.0,
   "role": "culprit"
 }
 ```
@@ -470,6 +477,7 @@ mysql:                          # existing; new keys
   sticky_digests_max: 50
   sticky_digest_ttl: 1h
   culprit_cpu_share_percent: 20
+  culprit_min_cpu_percent: 5
   victim_runq_ratio: 5
 ```
 
