@@ -302,7 +302,8 @@ type WritebackConfig struct {
 
 // DiskScanConfig controls the directory-size scanner and growth detector.
 type DiskScanConfig struct {
-	// Enabled is the master switch for the disk scanner.
+	// Enabled is the master switch for the disk scanner and for disk_report in
+	// /api/diagnose.  Off by default.
 	Enabled bool `yaml:"enabled"`
 	// Dirs is the list of root directories to scan.
 	Dirs []string `yaml:"dirs"`
@@ -462,7 +463,7 @@ func Defaults() *Config {
 			MaxPeersPerProcess:       20,
 		},
 		DiskScan: DiskScanConfig{
-			Enabled:            true,
+			Enabled:            false, // opt-in: walks large trees; its only output is disk_report
 			Dirs:               []string{"/var", "/home", "/data", "/opt", "/root"},
 			MaxDepth:           3,
 			MaxWorkers:         5,

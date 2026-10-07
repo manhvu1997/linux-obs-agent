@@ -209,7 +209,10 @@ func main() {
 		promExp.RegisterDiagnosticSources(ebpfMgr, insp, httpExp)
 		promExp.RegisterRunQueueSources(&cfg.RunQueue, &cfg.OffCPU, &cfg.Profile)
 		promExp.RegisterIODiagConfig(&cfg.IODiag)
-		promExp.RegisterDiskScanner(diskScanner)
+		// disk_report appears in /api/diagnose only when disk_scan is enabled.
+		if cfg.DiskScan.Enabled {
+			promExp.RegisterDiskScanner(diskScanner)
+		}
 		promExp.RegisterFsyncAnalyzer(fsyncAnalyzer)
 		promExp.RegisterWritebackAnalyzer(writebackAnalyzer)
 		promExp.RegisterMongoAnalyzer(mongoAnalyzer)

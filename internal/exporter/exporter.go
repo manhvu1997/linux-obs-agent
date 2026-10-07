@@ -70,7 +70,15 @@ func (e *Exporter) Run(ctx context.Context) {
 
 // QueueEvent adds an eBPF event to both the pending export buffer and the
 // recent ring buffer used by /api/diagnose.
+//
+// cpu_profile samples are dropped: they arrive at sample_hz × NumCPU (~800/s
+// on 8 CPUs), would evict every other module's events from the 500-slot
+// recent buffer in under a second, and carry only raw stack addresses.  The
+// symbolized, aggregated view is DiagnoseReport.CPUProfileReport.
 func (e *Exporter) QueueEvent(ev model.EBPFEvent) {
+	if ev.Type == model.EventCPUProfile {
+		return
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if len(e.pending) >= e.cfg.BatchSize {

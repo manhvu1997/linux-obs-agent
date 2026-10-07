@@ -500,8 +500,8 @@ type DiagnoseReport struct {
 	RunQueueReport *RunQueueAnalysis `json:"runqueue_report,omitempty"`
 
 	// RecentEvents contains the last N eBPF events across all active modules.
+	// cpu_profile samples are excluded (see CPUProfileReport instead).
 	// Each event carries PID, Comm, and module-specific fields:
-	//   cpu_profile   – stack IDs, sample count
 	//   runq_latency  – latency_us (scheduler wait time)
 	//   io_latency    – latency_us, bytes, op (R/W), device
 	//   tcp_retransmit – src_ip:port, dst_ip:port, address family

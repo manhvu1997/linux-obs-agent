@@ -255,7 +255,7 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 			ev.DirtyRatioPct, humanBytes(ev.DirtyBytes), humanBytes(ev.WritebackBytes))
 		d.NextSteps = []string{
 			"Lower vm.dirty_ratio / vm.dirty_background_ratio so writeback starts earlier and in smaller batches.",
-			"Identify the writer: /api/diagnose .disk_report.top_writers and .fsync_report.",
+			"Identify the writer: /api/diagnose .top_processes[].write_bytes_per_sec and .fsync_report.",
 			"Consider whether the workload should be using O_DIRECT or batching its fsyncs.",
 		}
 
@@ -268,7 +268,7 @@ func Classify(m model.NodeMetrics, offcpuReport *model.OffCPUReport, t Threshold
 			orNA(ev.BusiestDevice), ev.DeviceUtilPct, ev.DeviceMBPerSec, ev.DeviceAvgWaitMs)
 		d.NextSteps = []string{
 			"Reduce I/O demand or provision faster/more storage.",
-			"Identify the heaviest writer via /api/diagnose .disk_report.top_writers.",
+			"Identify the heaviest writer via /api/diagnose .top_processes[].write_bytes_per_sec.",
 		}
 
 	// High iowait but nothing is actually stalled — the dragonfly/io_uring
