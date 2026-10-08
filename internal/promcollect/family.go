@@ -32,6 +32,9 @@ var (
 		"Open TCP connections per process family and direction, as tracked by eBPF.", []string{"family", "direction"}, nil)
 	famInDesc = prometheus.NewDesc("obs_agent_family_inbound_bytes_total",
 		"Inbound TCP bytes per process family and local service port.", []string{"family", "service_port", "flow"}, nil)
+	famInPeerDesc = prometheus.NewDesc("obs_agent_family_inbound_peer_bytes_total",
+		"Inbound TCP bytes per process family, client peer IP and local service port.",
+		[]string{"family", "peer_ip", "service_port", "flow"}, nil)
 	famOutDesc = prometheus.NewDesc("obs_agent_family_outbound_peer_bytes_total",
 		"Outbound TCP bytes per process family, remote peer IP and remote service port.",
 		[]string{"family", "peer_ip", "service_port", "flow"}, nil)
@@ -52,7 +55,7 @@ func NewFamilyCollector(families func() []model.FamilyStats, counters func() (ne
 }
 
 func (c *FamilyCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{famCPUDesc, famMemDesc, famProcsDesc, famNetBytesDesc, famOpenedDesc, famActiveDesc, famInDesc, famOutDesc} {
+	for _, d := range []*prometheus.Desc{famCPUDesc, famMemDesc, famProcsDesc, famNetBytesDesc, famOpenedDesc, famActiveDesc, famInDesc, famOutDesc, famInPeerDesc} {
 		ch <- d
 	}
 }
@@ -109,6 +112,11 @@ func (c *FamilyCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		emit(ch, famOutDesc, prometheus.CounterValue, float64(p.BytesRx), fam, p.PeerIP, port, "rx")
 		emit(ch, famOutDesc, prometheus.CounterValue, float64(p.BytesTx), fam, p.PeerIP, port, "tx")
+	}
+	for _, p := range nc.InboundPeers {
+		fam, port := SanitizeLabel(p.Family, 200), strconv.Itoa(int(p.ServicePort))
+		emit(ch, famInPeerDesc, prometheus.CounterValue, float64(p.BytesRx), fam, p.PeerIP, port, "rx")
+		emit(ch, famInPeerDesc, prometheus.CounterValue, float64(p.BytesTx), fam, p.PeerIP, port, "tx")
 	}
 }
 

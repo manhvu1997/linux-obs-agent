@@ -135,3 +135,21 @@ func TestFamilyInvalidUTF8Label(t *testing.T) {
 		}
 	}
 }
+
+func TestFamilyCollectorInboundPeers(t *testing.T) {
+	counters := func() (netflow.Counters, bool) {
+		return netflow.Counters{InboundPeers: []netflow.FamilyPeerCounter{
+			{Family: "mysql.service", PeerIP: "10.0.0.2", ServicePort: 3306, BytesRx: 100, BytesTx: 900},
+		}}, true
+	}
+	c := NewFamilyCollector(func() []model.FamilyStats { return nil }, counters, 50)
+	want := `
+# HELP obs_agent_family_inbound_peer_bytes_total Inbound TCP bytes per process family, client peer IP and local service port.
+# TYPE obs_agent_family_inbound_peer_bytes_total counter
+obs_agent_family_inbound_peer_bytes_total{family="mysql.service",flow="rx",peer_ip="10.0.0.2",service_port="3306"} 100
+obs_agent_family_inbound_peer_bytes_total{family="mysql.service",flow="tx",peer_ip="10.0.0.2",service_port="3306"} 900
+`
+	if err := testutil.CollectAndCompare(c, strings.NewReader(want), "obs_agent_family_inbound_peer_bytes_total"); err != nil {
+		t.Fatal(err)
+	}
+}

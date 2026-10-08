@@ -366,6 +366,10 @@ type NetflowConfig struct {
 	MaxFamilies int `yaml:"max_families"`
 	// MaxOutboundPeers caps the peer_ip label per node; overflow -> "other".
 	MaxOutboundPeers int `yaml:"max_outbound_peers"`
+	// MaxInboundPeers caps the peer_ip label of
+	// obs_agent_family_inbound_peer_bytes_total per node; overflow -> "other".
+	// 0 disables the series. Env NETFLOW_MAX_INBOUND_PEERS.
+	MaxInboundPeers int `yaml:"max_inbound_peers"`
 }
 
 // MySQLConfig controls the eBPF MySQL slow-query tracer.
@@ -568,6 +572,7 @@ func Defaults() *Config {
 			ListenRefreshInterval: 30 * time.Second,
 			MaxFamilies:           50,
 			MaxOutboundPeers:      100,
+			MaxInboundPeers:       100,
 		},
 	}
 }
@@ -670,6 +675,11 @@ func applyNetflowEnvOverrides(cfg *Config) {
 	if v := os.Getenv("NETFLOW_INCLUDE_LOOPBACK"); v != "" {
 		cfg.Netflow.IncludeLoopback = v == "true" || v == "1" || v == "yes"
 	}
+	if v := os.Getenv("NETFLOW_MAX_INBOUND_PEERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.Netflow.MaxInboundPeers = n
+		}
+	}
 }
 
 func applyRunQueueEnvOverrides(cfg *Config) {
@@ -744,6 +754,9 @@ func (c *Config) validate() error {
 		}
 		if c.Netflow.ListenRefreshInterval <= 0 || c.Netflow.MaxFamilies < 1 || c.Netflow.MaxOutboundPeers < 1 {
 			return fmt.Errorf("netflow.listen_refresh_interval, max_families and max_outbound_peers must be > 0")
+		}
+		if c.Netflow.MaxInboundPeers < 0 {
+			return fmt.Errorf("netflow.max_inbound_peers must be >= 0 (0 = off)")
 		}
 	}
 	if c.Collect.Interval < time.Second {

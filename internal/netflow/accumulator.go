@@ -18,10 +18,13 @@ const (
 
 // Config tunes the accumulator. Zero values take the documented defaults.
 type Config struct {
-	Window             time.Duration // 60s
-	MaxFamilies        int           // 50
-	MaxOutboundPeers   int           // 100
-	MaxPeersPerProcess int           // 20
+	Window           time.Duration // 60s
+	MaxFamilies      int           // 50
+	MaxOutboundPeers int           // 100
+	// MaxInboundPeers caps the peer_ip label of the inbound peer counters
+	// node-wide; overflow -> "other". 0 takes the default, < 0 disables them.
+	MaxInboundPeers    int // 100
+	MaxPeersPerProcess int // 20
 	// MaxServicePorts bounds the distinct service_port values of the
 	// outbound peer counters node-wide; later ports fold into port 0
 	// (exported as service_port="other"). Internal, not in YAML.
@@ -43,6 +46,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxOutboundPeers <= 0 {
 		c.MaxOutboundPeers = 100
+	}
+	if c.MaxInboundPeers == 0 {
+		c.MaxInboundPeers = 100
 	}
 	if c.MaxPeersPerProcess <= 0 {
 		c.MaxPeersPerProcess = 20
@@ -72,7 +78,7 @@ type FamilyPortCounter struct {
 	BytesRx, BytesTx uint64
 }
 
-// FamilyPeerCounter is one outbound (family, peer, service port) counter.
+// FamilyPeerCounter is one (family, peer, service port) counter; outbound: remote port, inbound: local port.
 // ServicePort 0 means "other": the node-wide service-port budget
 // (Config.MaxServicePorts) was exhausted and the port was folded.
 type FamilyPeerCounter struct {
@@ -83,9 +89,10 @@ type FamilyPeerCounter struct {
 
 // Counters is a point-in-time copy of the lifetime counters.
 type Counters struct {
-	Dir      []FamilyDirCounter
-	Inbound  []FamilyPortCounter
-	Outbound []FamilyPeerCounter
+	Dir          []FamilyDirCounter
+	Inbound      []FamilyPortCounter
+	Outbound     []FamilyPeerCounter
+	InboundPeers []FamilyPeerCounter
 }
 
 type famDirKey struct {
@@ -153,12 +160,14 @@ type Accumulator struct {
 	pidSeen   map[uint32]time.Time
 	pidFamily map[uint32]string
 
-	famDir     map[famDirKey]*dirCounter
-	famIn      map[famPortKey]*byteCounter
-	famOut     map[famPeerKey]*byteCounter
-	famLabels  labelBudget
-	peerLabels labelBudget
-	portLabels labelBudget // outbound service ports, node-wide
+	famDir       map[famDirKey]*dirCounter
+	famIn        map[famPortKey]*byteCounter
+	famOut       map[famPeerKey]*byteCounter
+	famInPeer    map[famPeerKey]*byteCounter
+	inPeerLabels labelBudget
+	famLabels    labelBudget
+	peerLabels   labelBudget
+	portLabels   labelBudget // outbound service ports, node-wide
 
 	// drain is the ClickHouse delta accumulator, nil until EnableDrain.
 	drain       map[FlowKey]*drainFlow
@@ -169,17 +178,19 @@ type Accumulator struct {
 func NewAccumulator(cfg Config) *Accumulator {
 	cfg = cfg.withDefaults()
 	return &Accumulator{
-		cfg:        cfg,
-		prev:       make(map[FlowKey]FlowValue),
-		active:     make(map[FlowKey]int64),
-		pidSeen:    make(map[uint32]time.Time),
-		pidFamily:  make(map[uint32]string),
-		famDir:     make(map[famDirKey]*dirCounter),
-		famIn:      make(map[famPortKey]*byteCounter),
-		famOut:     make(map[famPeerKey]*byteCounter),
-		famLabels:  labelBudget{max: cfg.MaxFamilies, seen: make(map[string]time.Time)},
-		peerLabels: labelBudget{max: cfg.MaxOutboundPeers, seen: make(map[string]time.Time)},
-		portLabels: labelBudget{max: cfg.MaxServicePorts, seen: make(map[string]time.Time)},
+		cfg:          cfg,
+		prev:         make(map[FlowKey]FlowValue),
+		active:       make(map[FlowKey]int64),
+		pidSeen:      make(map[uint32]time.Time),
+		pidFamily:    make(map[uint32]string),
+		famDir:       make(map[famDirKey]*dirCounter),
+		famIn:        make(map[famPortKey]*byteCounter),
+		famOut:       make(map[famPeerKey]*byteCounter),
+		famInPeer:    make(map[famPeerKey]*byteCounter),
+		inPeerLabels: labelBudget{max: max(cfg.MaxInboundPeers, 0), seen: make(map[string]time.Time)},
+		famLabels:    labelBudget{max: cfg.MaxFamilies, seen: make(map[string]time.Time)},
+		peerLabels:   labelBudget{max: cfg.MaxOutboundPeers, seen: make(map[string]time.Time)},
+		portLabels:   labelBudget{max: cfg.MaxServicePorts, seen: make(map[string]time.Time)},
 	}
 }
 
@@ -259,6 +270,16 @@ func (a *Accumulator) Ingest(now time.Time, cur map[FlowKey]FlowValue, pidFamily
 			}
 			bc.rx += d.BytesRx
 			bc.tx += d.BytesTx
+			if a.cfg.MaxInboundPeers > 0 {
+				pk := famPeerKey{fam, a.inPeerLabels.label(k.Peer.String(), now), k.ServicePort}
+				ic := a.famInPeer[pk]
+				if ic == nil {
+					ic = &byteCounter{}
+					a.famInPeer[pk] = ic
+				}
+				ic.rx += d.BytesRx
+				ic.tx += d.BytesTx
+			}
 		} else {
 			peer := a.peerLabels.label(k.Peer.String(), now)
 			port := k.ServicePort
@@ -329,11 +350,23 @@ func (a *Accumulator) Ingest(now time.Time, cur map[FlowKey]FlowValue, pidFamily
 				delete(a.famOut, k)
 			}
 		}
+		for k := range a.famInPeer {
+			if gone[k.fam] {
+				delete(a.famInPeer, k)
+			}
+		}
 	}
 	if gone := a.peerLabels.expire(now, a.cfg.LabelIdleTTL); len(gone) > 0 {
 		for k := range a.famOut {
 			if gone[k.peer] {
 				delete(a.famOut, k)
+			}
+		}
+	}
+	if gone := a.inPeerLabels.expire(now, a.cfg.LabelIdleTTL); len(gone) > 0 {
+		for k := range a.famInPeer {
+			if gone[k.peer] {
+				delete(a.famInPeer, k)
 			}
 		}
 	}
@@ -482,6 +515,9 @@ func (a *Accumulator) Counters() Counters {
 	for k, c := range a.famOut {
 		out.Outbound = append(out.Outbound, FamilyPeerCounter{Family: k.fam, PeerIP: k.peer, ServicePort: k.port, BytesRx: c.rx, BytesTx: c.tx})
 	}
+	for k, c := range a.famInPeer {
+		out.InboundPeers = append(out.InboundPeers, FamilyPeerCounter{Family: k.fam, PeerIP: k.peer, ServicePort: k.port, BytesRx: c.rx, BytesTx: c.tx})
+	}
 	sort.Slice(out.Dir, func(i, j int) bool {
 		if out.Dir[i].Family != out.Dir[j].Family {
 			return out.Dir[i].Family < out.Dir[j].Family
@@ -494,8 +530,14 @@ func (a *Accumulator) Counters() Counters {
 		}
 		return out.Inbound[i].ServicePort < out.Inbound[j].ServicePort
 	})
-	sort.Slice(out.Outbound, func(i, j int) bool {
-		x, y := out.Outbound[i], out.Outbound[j]
+	sortPeerCounters(out.Outbound)
+	sortPeerCounters(out.InboundPeers)
+	return out
+}
+
+func sortPeerCounters(s []FamilyPeerCounter) {
+	sort.Slice(s, func(i, j int) bool {
+		x, y := s[i], s[j]
 		if x.Family != y.Family {
 			return x.Family < y.Family
 		}
@@ -504,5 +546,4 @@ func (a *Accumulator) Counters() Counters {
 		}
 		return x.ServicePort < y.ServicePort
 	})
-	return out
 }
