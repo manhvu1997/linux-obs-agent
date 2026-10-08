@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 type DS struct {
@@ -135,6 +136,24 @@ func unit(u string) map[string]any {
 	return map[string]any{"defaults": map[string]any{"unit": u}, "overrides": []any{}}
 }
 
+// withColumnUnits adds a per-column unit override for each field name.
+func withColumnUnits(fc map[string]any, units map[string]string) map[string]any {
+	names := make([]string, 0, len(units))
+	for n := range units {
+		names = append(names, n)
+	}
+	sort.Strings(names) // deterministic JSON
+	ov := []any{}
+	for _, n := range names {
+		ov = append(ov, map[string]any{
+			"matcher":    map[string]any{"id": "byName", "options": n},
+			"properties": []any{map[string]any{"id": "unit", "value": units[n]}},
+		})
+	}
+	fc["overrides"] = ov
+	return fc
+}
+
 func prom(title, u string, exprs ...[2]string) Panel {
 	p := Panel{Type: "timeseries", Title: title, Datasource: promDS, FieldConfig: unit(u)}
 	for i, e := range exprs {
@@ -259,16 +278,29 @@ func analysis() Dashboard {
 
 	b := &builder{}
 	b.row("MySQL digests")
-	b.add(chTable("Top digests by CPU", `SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS calls,
+	topDigests := chTable("Top digests by CPU", `SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,
   sum(s.cpu_ns) / 1e9 AS cpuSec,
+  sum(s.cpu_ns) / 1e9 / greatest(dateDiff('second', $__fromTime, $__toTime), 1) AS cpuCores,
+  100 * sum(s.cpu_ns) / greatest(sum(sum(s.cpu_ns)) OVER (), 1) AS cpuSharePct,
   sum(s.cpu_ns) / greatest(sum(s.calls), 1) / 1e6 AS cpuMsAvg,
   sum(s.runq_ns) / greatest(sum(s.calls), 1) / 1e6 AS runqMsAvg,
   sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS wallMsAvg,
+  max(s.wall_max_ns) / 1e6 AS wallMsMax,
+  sum(s.bytes_out) / greatest(sum(s.calls), 1) AS bytesOutAvg,
   sum(s.bytes_out) AS bytesOut
 FROM obs.mysql_digest_stats AS s
 LEFT JOIN (SELECT digest_id, digest_text FROM obs.mysql_digest_text FINAL) AS t ON t.digest_id = s.digest_id
 WHERE $__timeFilter(s.window_end) AND s.`+hostF+`
-GROUP BY s.digest_id ORDER BY cpuSec DESC LIMIT 50`), 24)
+GROUP BY s.digest_id ORDER BY cpuSec DESC LIMIT 50`)
+	topDigests.FieldConfig = withColumnUnits(topDigests.FieldConfig, map[string]string{
+		"cpuSharePct": "percent", "cpuMsAvg": "ms", "runqMsAvg": "ms", "wallMsAvg": "ms", "wallMsMax": "ms",
+		"bytesOutAvg": "bytes", "bytesOut": "bytes", "cpuSec": "s",
+	})
+	topDigests.Description = "cpuCores: average cores busy over the selected time range (1 = one core; understated when data does not cover the whole range). " +
+		"cpuSharePct: share of all query CPU of the selected hosts. wall ≈ cpu: the query itself is expensive; runq ≫ cpu: it waited for CPU (victim); " +
+		"wall ≫ cpu + runq: it waited on locks or I/O. bytesOutAvg: result size per call. " +
+		"Whether a digest overloaded the node (needs node CPU and process families) is in mysql_report.overload_cause, see the Snapshots table."
+	b.add(topDigests, 24)
 	b.add(chTS("CPU of the top 10 digests (cores)", "short", `SELECT $__timeInterval(window_end) AS time, digest_id AS digest,
   sum(cpu_ns) / 1e9 / $__interval_s AS cores
 FROM obs.mysql_digest_stats
@@ -287,14 +319,14 @@ GROUP BY digest_id HAVING cpuSecNow > 1 ORDER BY ratio DESC LIMIT 30`), 12)
 
 	b.row("Digest drill-down (set the digest variable)")
 	digF := "digest_id = '${digest}'"
-	b.add(chTS("Calls and average latency", "short", `SELECT $__timeInterval(window_end) AS time, sum(calls) AS calls,
+	b.add(chTS("Calls and average latency", "short", `SELECT $__timeInterval(window_end) AS time, sum(calls) AS callCount,
   sum(cpu_ns) / greatest(sum(calls), 1) / 1e6 AS cpuMsAvg,
   sum(wall_ns) / greatest(sum(calls), 1) / 1e6 AS wallMsAvg,
   sum(runq_ns) / greatest(sum(calls), 1) / 1e6 AS runqMsAvg
 FROM obs.mysql_digest_stats
 WHERE $__timeFilter(window_end) AND `+hostF+` AND `+digF+`
 GROUP BY time ORDER BY time`), 12)
-	b.add(chTable("Per host", `SELECT host, sum(calls) AS calls, sum(cpu_ns) / 1e9 AS cpuSec,
+	b.add(chTable("Per host", `SELECT host, sum(calls) AS callCount, sum(cpu_ns) / 1e9 AS cpuSec,
   sum(wall_ns) / greatest(sum(calls), 1) / 1e6 AS wallMsAvg
 FROM obs.mysql_digest_stats
 WHERE $__timeFilter(window_end) AND `+hostF+` AND `+digF+`
@@ -350,7 +382,10 @@ WHERE $__timeFilter(window_end) AND `+hostF+` AND direction = 'inbound' AND serv
 GROUP BY host, client ORDER BY bytesOut DESC LIMIT 50`), 12)
 
 	b.row("Diagnose snapshots")
-	b.add(chTable("Snapshots (fetch one with the query in deploy/grafana/README.md)", `SELECT ts, host, reason, verdict, length(report) AS reportBytes
+	b.add(chTable("Snapshots (fetch one with the query in deploy/grafana/README.md)", `SELECT ts, host, reason, verdict,
+  JSONExtractString(report, 'mysql_report', 'overload_cause', 'verdict') AS overload,
+  JSONExtractString(report, 'mysql_report', 'overload_cause', 'digest_id') AS overloadDigest,
+  length(report) AS reportBytes
 FROM obs.diagnose_snapshots
 WHERE $__timeFilter(ts) AND `+hostF+`
 ORDER BY ts DESC LIMIT 100`), 24)

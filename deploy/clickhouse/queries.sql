@@ -2,7 +2,7 @@
 -- Replace the INTERVALs and host filters as needed.
 
 -- Top digests by CPU over the last 6 h, fleet-wide.
-SELECT s.digest_id, any(t.digest_text) AS text, sum(s.calls) AS calls,
+SELECT s.digest_id, any(t.digest_text) AS text, sum(s.calls) AS call_count,
        round(sum(s.cpu_ns) / 1e9, 1) AS cpu_s,
        round(sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6, 2) AS wall_ms_avg
 FROM obs.mysql_digest_stats AS s

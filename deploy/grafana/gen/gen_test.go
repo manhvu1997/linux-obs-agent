@@ -140,6 +140,12 @@ func sqlViolations(sql string, schema map[string]map[string]bool) []string {
 	aliases := map[string]bool{}
 	for _, m := range aliasRe.FindAllStringSubmatch(sql, -1) {
 		aliases[m[1]] = true
+		// A ClickHouse alias is visible in the whole SELECT and shadows the
+		// column: `sum(calls) AS calls, sum(cpu_ns) / sum(calls)` becomes
+		// sum(sum(calls)) and fails with ILLEGAL_AGGREGATION.
+		if cols[m[1]] {
+			v = append(v, "alias "+m[1]+" shadows a column")
+		}
 	}
 	sql = tableRe.ReplaceAllString(sql, " ")
 	sql = qualRe.ReplaceAllString(sql, " ")
@@ -187,9 +193,10 @@ func TestSQLCheckerRejectsBogusQueries(t *testing.T) {
 	ddl, _ := chsink.CreateDDL(chsink.DefaultSchemaOptions())
 	schema := parseSchema(ddl)
 	bad := []string{
-		"SELECT window_start FROM obs.mysql_slow_queries WHERE $__timeFilter(ts)", // column of another table
-		"SELECT digest_idd FROM obs.mysql_digest_stats",                           // typo
-		"SELECT host FROM obs.no_such_table",                                      // unknown table
+		"SELECT window_start FROM obs.mysql_slow_queries WHERE $__timeFilter(ts)",               // column of another table
+		"SELECT digest_idd FROM obs.mysql_digest_stats",                                         // typo
+		"SELECT host FROM obs.no_such_table",                                                    // unknown table
+		"SELECT sum(calls) AS calls, sum(cpu_ns) / sum(calls) AS c FROM obs.mysql_digest_stats", // alias shadows column
 	}
 	for _, q := range bad {
 		if len(sqlViolations(q, schema)) == 0 {

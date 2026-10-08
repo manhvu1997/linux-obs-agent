@@ -241,6 +241,7 @@ func (a *Analyzer) poll() {
 		Thresholds:           &snap.Thresholds,
 		TopDigests:           snap.TopByCPU,
 		TopDigestsByBytesOut: snap.TopByBytesOut,
+		VictimDigests:        snap.VictimDigests,
 	}
 
 	a.latest.Store(analysis)

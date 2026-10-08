@@ -222,7 +222,7 @@ func main() {
 		promExp.RegisterFsyncAnalyzer(fsyncAnalyzer)
 		promExp.RegisterWritebackAnalyzer(writebackAnalyzer)
 		promExp.RegisterMongoAnalyzer(mongoAnalyzer)
-		promExp.RegisterMySQLAnalyzer(mysqlAnalyzer)
+		promExp.RegisterMySQLAnalyzer(mysqlAnalyzer, &cfg.MySQL)
 		promExp.RegisterProcessReportSources(&cfg.Process, netAcc, netSource, inboundAcct, inv)
 		netCounters := func() (netflow.Counters, bool) {
 			if netAcc == nil {

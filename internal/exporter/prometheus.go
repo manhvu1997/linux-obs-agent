@@ -31,6 +31,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
 	"github.com/manhvu1997/linux-obs-agent/internal/netflow"
 	"github.com/manhvu1997/linux-obs-agent/internal/netinv"
+	"github.com/manhvu1997/linux-obs-agent/internal/overload"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/procreport"
 	"github.com/manhvu1997/linux-obs-agent/internal/runq"
@@ -52,6 +53,7 @@ type PrometheusExporter struct {
 	writebackAnalyzer *writeback.Analyzer
 	mongoAnalyzer     *mongo.Analyzer
 	mysqlAnalyzer     *mysql.Analyzer
+	mysqlCfg          *config.MySQLConfig
 
 	// process_report sources – set via RegisterProcessReportSources.
 	procCfg     *config.ProcessConfig
@@ -205,10 +207,12 @@ func (p *PrometheusExporter) RegisterMongoAnalyzer(a *mongo.Analyzer) {
 }
 
 // RegisterMySQLAnalyzer wires the MySQL slow-query analyzer so /api/diagnose
-// includes the latest MySQLAnalysis snapshot.
+// includes the latest MySQLAnalysis snapshot; cfg supplies the
+// overload_cause thresholds.
 // Only populated when MySQL tracing is enabled (MYSQL_TRACING_ENABLED=true).
-func (p *PrometheusExporter) RegisterMySQLAnalyzer(a *mysql.Analyzer) {
+func (p *PrometheusExporter) RegisterMySQLAnalyzer(a *mysql.Analyzer, cfg *config.MySQLConfig) {
 	p.mysqlAnalyzer = a
+	p.mysqlCfg = cfg
 }
 
 // RegisterProcessReportSources wires process_report. acc is nil when
@@ -411,10 +415,35 @@ func (p *PrometheusExporter) BuildDiagnoseReport(n, topPIDsN int) model.Diagnose
 	// MySQL slow-query analysis: latest snapshot from the server-side uprobe tracer.
 	// Only non-nil when MySQL tracing is enabled and queries have been observed.
 	if p.mysqlAnalyzer != nil {
-		report.MySQLReport = p.mysqlAnalyzer.Latest()
+		report.MySQLReport = p.withOverloadCause(p.mysqlAnalyzer.Latest(), report.Metrics)
 	}
 
 	return report
+}
+
+// withOverloadCause returns a copy of a with OverloadCause assessed against
+// this call's node metrics and process families. The analyzer's cached
+// snapshot is shared across calls and must never be mutated.
+func (p *PrometheusExporter) withOverloadCause(a *model.MySQLAnalysis, m model.NodeMetrics) *model.MySQLAnalysis {
+	if a == nil {
+		return nil
+	}
+	in := overload.Inputs{Metrics: m, MySQL: a}
+	if p.insp != nil {
+		in.Families = p.insp.AllFamilies()
+		in.PIDFamilies = p.insp.PIDFamilies()
+	}
+	var th overload.Thresholds
+	if p.mysqlCfg != nil {
+		th = overload.Thresholds{
+			NodeCPUPercent:    p.mysqlCfg.OverloadNodeCPUPercent,
+			NodeLoad:          p.mysqlCfg.OverloadNodeLoad,
+			MinNodeCPUPercent: p.mysqlCfg.OverloadMinNodeCPUPercent,
+		}
+	}
+	cp := *a
+	cp.OverloadCause = overload.Assess(in, th, time.Now())
+	return &cp
 }
 
 // TriggerState is the cheap input to the ClickHouse snapshot trigger: the

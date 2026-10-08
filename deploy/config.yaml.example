@@ -374,6 +374,14 @@ mysql:
   culprit_cpu_share_percent: 20
   culprit_min_cpu_percent: 5
   victim_runq_ratio: 5
+  # mysql_report.overload_cause: "culprit" only means a digest dominates MySQL's
+  # query CPU. verdict query_overload additionally needs the node saturated
+  # (cpu% >= overload_node_cpu_percent OR load1/NumCPU >= overload_node_load),
+  # mysqld's family the top CPU family, and the culprit using
+  # >= overload_min_node_cpu_percent of the WHOLE node (cpu_percent_of_node).
+  overload_node_cpu_percent: 85
+  overload_node_load: 1.5
+  overload_min_node_cpu_percent: 20
   # Per-digest series in Prometheus. full = sticky set with cpu/calls/bytes_out/runq
   # (today's behaviour); minimal = top prometheus_minimal_top_n by CPU with cpu+calls
   # plus digest_id="other" (use on fleets); off = per-command metrics only.

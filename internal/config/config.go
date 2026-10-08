@@ -459,6 +459,13 @@ type MySQLConfig struct {
 	CulpritMinCPUPercent float64 `yaml:"culprit_min_cpu_percent"`
 	// VictimRunqRatio: run-queue wait > cpu × ratio (and wall ≥ slow threshold) marks "victim".
 	VictimRunqRatio float64 `yaml:"victim_runq_ratio"`
+	// mysql_report.overload_cause: a digest overloads the node only when the
+	// node is saturated (cpu% >= OverloadNodeCPUPercent OR load1/NumCPU >=
+	// OverloadNodeLoad), mysqld is the top CPU family, and the digest is a
+	// culprit using >= OverloadMinNodeCPUPercent of the whole node's CPU.
+	OverloadNodeCPUPercent    float64 `yaml:"overload_node_cpu_percent"`
+	OverloadNodeLoad          float64 `yaml:"overload_node_load"`
+	OverloadMinNodeCPUPercent float64 `yaml:"overload_min_node_cpu_percent"`
 }
 
 // Defaults returns a Config with sensible production defaults.
@@ -599,6 +606,10 @@ func Defaults() *Config {
 			CulpritCPUSharePercent: 20,
 			CulpritMinCPUPercent:   5,
 			VictimRunqRatio:        5,
+
+			OverloadNodeCPUPercent:    85,
+			OverloadNodeLoad:          1.5,
+			OverloadMinNodeCPUPercent: 20,
 		},
 		Netflow: NetflowConfig{
 			Enabled:               true,
@@ -791,6 +802,9 @@ func (c *Config) validate() error {
 		}
 		if c.MySQL.CulpritCPUSharePercent <= 0 || c.MySQL.CulpritMinCPUPercent <= 0 || c.MySQL.VictimRunqRatio <= 0 {
 			return fmt.Errorf("mysql.culprit_cpu_share_percent, culprit_min_cpu_percent and victim_runq_ratio must be > 0")
+		}
+		if c.MySQL.OverloadNodeCPUPercent <= 0 || c.MySQL.OverloadNodeLoad <= 0 || c.MySQL.OverloadMinNodeCPUPercent <= 0 {
+			return fmt.Errorf("mysql.overload_node_cpu_percent, overload_node_load and overload_min_node_cpu_percent must be > 0")
 		}
 	}
 	if c.Netflow.Enabled {

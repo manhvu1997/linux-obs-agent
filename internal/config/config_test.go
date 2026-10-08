@@ -105,3 +105,16 @@ func TestProcessReportListSizes(t *testing.T) {
 		t.Fatal("negative report_top_families_mem accepted")
 	}
 }
+
+func TestMySQLOverloadThresholds(t *testing.T) {
+	m := Defaults().MySQL
+	if m.OverloadNodeCPUPercent != 85 || m.OverloadNodeLoad != 1.5 || m.OverloadMinNodeCPUPercent != 20 {
+		t.Fatalf("overload defaults = %v / %v / %v", m.OverloadNodeCPUPercent, m.OverloadNodeLoad, m.OverloadMinNodeCPUPercent)
+	}
+	c := Defaults()
+	c.MySQL.Enabled = true
+	c.MySQL.OverloadMinNodeCPUPercent = 0
+	if err := c.validate(); err == nil {
+		t.Fatal("overload_min_node_cpu_percent 0 accepted with mysql enabled")
+	}
+}

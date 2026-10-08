@@ -328,3 +328,32 @@ func TestCPUPercentOfCoreAndQueryTotal(t *testing.T) {
 		t.Fatalf("role at floor = %q, want culprit", s.TopByCPU[0].Role)
 	}
 }
+
+func TestCPUPercentOfNode(t *testing.T) {
+	c := cfg()
+	c.NumCPU = 4
+	a := New(c) // 60 s window
+	for i := 0; i < 6; i++ {
+		a.Add(ev("SELECT 1 FROM a", t0, 10_000, 0, 10_000, 1)) // 60 s = one core
+	}
+	s := a.Snapshot(t0.Add(time.Second))
+	d := s.TopByCPU[0]
+	if d.CPUPercentOfCore != 100 || d.CPUPercentOfNode != 25 {
+		t.Fatalf("of core %v / of node %v, want 100 / 25 on 4 CPUs", d.CPUPercentOfCore, d.CPUPercentOfNode)
+	}
+}
+
+func TestVictimDigestsCountedBeyondTopN(t *testing.T) {
+	c := cfg()
+	c.TopN = 1
+	a := New(c)
+	for i := 0; i < 100; i++ {
+		a.Add(ev("SELECT COUNT(*) FROM big", t0, 400, 5, 410, 20))
+		a.Add(ev("SELECT * FROM users WHERE id = 1", t0, 0.003, 38, 41, 1200))
+		a.Add(ev("SELECT * FROM jobs WHERE id = 1", t0, 0.003, 38, 41, 1200))
+	}
+	s := a.Snapshot(t0.Add(time.Second))
+	if len(s.TopByCPU) != 1 || s.VictimDigests != 2 {
+		t.Fatalf("top %d, victims %d; want 1 listed and 2 victims counted", len(s.TopByCPU), s.VictimDigests)
+	}
+}

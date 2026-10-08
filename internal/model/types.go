@@ -995,6 +995,14 @@ type MySQLAnalysis struct {
 	Thresholds           *QueryRoleThresholds `json:"thresholds,omitempty"`
 	TopDigests           []QueryDigestStats   `json:"top_digests,omitempty"` // by total CPU
 	TopDigestsByBytesOut []QueryDigestStats   `json:"top_digests_by_bytes_out,omitempty"`
+	// VictimDigests counts digests with role "victim" across all digests in
+	// the window, not only those listed in top_digests.
+	VictimDigests int `json:"victim_digests"`
+
+	// OverloadCause answers "is one query pattern overloading this node?".
+	// Built per GET /api/diagnose from the node metrics and process families
+	// of that call; never set on the analyzer's cached snapshot.
+	OverloadCause *QueryOverload `json:"overload_cause,omitempty"`
 }
 
 // ─── DB Inspector (sidecar) ───────────────────────────────────────────────────
@@ -1054,6 +1062,9 @@ type QueryDigestStats struct {
 	// CPUPercentOfCore is cpu_ms_total over the window as % of one core: the
 	// absolute scale (100 = one core fully busy for the whole window).
 	CPUPercentOfCore float64 `json:"cpu_percent_of_core"`
+	// CPUPercentOfNode is CPUPercentOfCore / NumCPU: the share of the whole
+	// node's CPU capacity (100 = every core busy for the whole window).
+	CPUPercentOfNode float64 `json:"cpu_percent_of_node"`
 	Role             string  `json:"role"`
 }
 

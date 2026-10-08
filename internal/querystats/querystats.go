@@ -8,6 +8,7 @@
 package querystats
 
 import (
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -58,6 +59,7 @@ type Config struct {
 	SlowWallNs             uint64        // victim needs wall_avg >= this
 	StickyMax              int           // 50
 	StickyTTL              time.Duration // 1h
+	NumCPU                 int           // runtime.NumCPU(): scale of CPUPercentOfNode
 }
 
 func (c Config) withDefaults() Config {
@@ -91,6 +93,9 @@ func (c Config) withDefaults() Config {
 	if c.StickyTTL <= 0 {
 		c.StickyTTL = time.Hour
 	}
+	if c.NumCPU <= 0 {
+		c.NumCPU = runtime.NumCPU()
+	}
 	return c
 }
 
@@ -113,10 +118,13 @@ type Snapshot struct {
 	// PIDs: the absolute scale behind each digest's CPUSharePercent.
 	QueryCPUMsTotal float64
 	Thresholds      model.QueryRoleThresholds
-	TopByCPU        []model.QueryDigestStats
-	TopByBytesOut   []model.QueryDigestStats
-	Exported        []ExportedDigest
-	Commands        map[string]model.QueryCounters
+	// VictimDigests counts victim digests over ALL digests in the window:
+	// victims burn little CPU, so most never reach TopByCPU.
+	VictimDigests int
+	TopByCPU      []model.QueryDigestStats
+	TopByBytesOut []model.QueryDigestStats
+	Exported      []ExportedDigest
+	Commands      map[string]model.QueryCounters
 }
 
 type key struct {
@@ -314,8 +322,13 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		cpuAll += x.cpu
 	}
 	stats := make([]model.QueryDigestStats, 0, len(merged))
+	victims := 0
 	for k, x := range merged {
-		stats = append(stats, a.toStats(k, x, cpuByPID[k.pid], acct))
+		s := a.toStats(k, x, cpuByPID[k.pid], acct)
+		if s.Role == RoleVictim {
+			victims++
+		}
+		stats = append(stats, s)
 	}
 	byCPU := topBy(stats, a.cfg.TopN, func(s model.QueryDigestStats) float64 { return s.CPUMsTotal })
 	bytesOut := func(s model.QueryDigestStats) float64 { return float64(s.BytesOutTotal) }
@@ -355,6 +368,7 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 			CulpritMinCPUPercent:   a.cfg.CulpritMinCPUPercent,
 			VictimRunqRatio:        a.cfg.VictimRunqRatio,
 		},
+		VictimDigests: victims,
 		TopByCPU:      byCPU,
 		TopByBytesOut: byOut,
 		Exported:      exported,
@@ -459,6 +473,7 @@ func (a *Aggregator) toStats(k key, x *acc, pidCPU uint64, acct string) model.Qu
 		BytesInTotal: x.in, BytesOutTotal: x.out, BytesOutAvg: float64(x.out) / calls,
 		CPUSharePercent:  share,
 		CPUPercentOfCore: ofCore,
+		CPUPercentOfNode: ofCore / float64(a.cfg.NumCPU),
 		Role:             role,
 	}
 }
