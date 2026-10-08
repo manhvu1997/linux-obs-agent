@@ -11,6 +11,7 @@
 #   make lint             – run golangci-lint
 #   make image            – build obs-agent Docker image
 #   make image-inspector  – build db-inspector Docker image
+#   make test-clickhouse  – ClickHouse round-trip integration test (needs Docker)
 # ──────────────────────────────────────────────────────────────────────────────
 
 BINARY          := obs-agent
@@ -36,7 +37,7 @@ GOOS          := linux
 IMAGE_REPO    ?= ghcr.io/youorg/obs-agent
 IMAGE_TAG     ?= latest
 
-.PHONY: all generate build build-inspector clean lint image image-inspector vmlinux deps
+.PHONY: all generate build build-inspector clean lint image image-inspector vmlinux deps test-clickhouse
 
 # ─── Default ──────────────────────────────────────────────────────────────────
 
@@ -138,3 +139,12 @@ install: build
 	sudo install -m 0644 deploy/obs-agent.service /etc/systemd/system/obs-agent.service
 	sudo systemctl daemon-reload
 	@echo ">>> Installed. Run: sudo systemctl enable --now obs-agent"
+
+# ─── ClickHouse integration test (needs Docker) ──────────────────────────────
+
+test-clickhouse:
+	docker rm -f obs-ch-test >/dev/null 2>&1 || true
+	docker run -d --name obs-ch-test -p 18123:8123 -e CLICKHOUSE_SKIP_USER_SETUP=1 clickhouse/clickhouse-server:24.8 >/dev/null
+	for i in $$(seq 1 30); do curl -sf http://localhost:18123/ping >/dev/null && break; sleep 1; done; \
+	CLICKHOUSE_TEST_URL=http://localhost:18123 $(GO) test -tags integration -run Integration -v ./internal/chsink/; \
+	rc=$$?; docker rm -f obs-ch-test >/dev/null; exit $$rc
