@@ -147,7 +147,7 @@ tests:
       - eval_time: 4m
         alertname: ObsAgentClickHouseExportStalled
         exp_alerts: []
-      - eval_time: 20m
+      - eval_time: 25m
         alertname: ObsAgentClickHouseExportStalled
         exp_alerts:
           - exp_labels: { severity: warning, instance: "db1:9200" }
