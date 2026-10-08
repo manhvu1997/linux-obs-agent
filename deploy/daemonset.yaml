@@ -131,6 +131,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # ClickHouse export (CLAUDE.md §22). Create the tables first with
+            # `obs-agent clickhouse-schema`; the user needs only INSERT.
+            - name: CLICKHOUSE_ENABLED
+              value: "false"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse.observability:8123"
+            - name: CLICKHOUSE_USERNAME
+              valueFrom:
+                secretKeyRef: { name: obs-agent-clickhouse, key: username, optional: true }
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: obs-agent-clickhouse, key: password, optional: true }
 
           volumeMounts:
             - name: config
@@ -220,3 +232,9 @@ spec:
     - port: metrics
       interval: 15s
       path: /metrics
+
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata: { name: obs-agent-clickhouse, namespace: obs-system }
+# stringData: { username: obs_agent, password: "<password>" }

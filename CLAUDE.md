@@ -28,6 +28,7 @@
 19. [Correlated I/O Diagnosis — connecting the chain](#19-correlated-io-diagnosis--connecting-the-chain)
 20. [Process Families, Network Flows & Query Digests](#20-process-families-network-flows--query-digests)
 21. [Review output](#21-review-output)
+22. [ClickHouse Export](#22-clickhouse-export)
 
 ---
 
@@ -201,6 +202,15 @@ linux-obs-agent/
 │   ├── process/
 │   │   └── inspector.go             ← /proc/[pid] scanner, top-N CPU/RSS, K8s metadata
 │   │
+│   ├── chsink/                      ← optional ClickHouse export (§22)
+│   │   ├── schema.go                ← DDL generator + `clickhouse-schema` subcommand
+│   │   ├── client.go                ← HTTP INSERT client, ok/retry/reject classification
+│   │   ├── rows.go                  ← row types, builders, JSONEachRow encoding
+│   │   ├── sink.go                  ← flush loop, bounded buffer, self-metrics
+│   │   └── snapshot.go              ← diagnose snapshot triggers + privacy stripping
+│   │
+│   ├── drain/buffer.go              ← per-interval accumulator shared by the producers' drains
+│   │
 │   └── exporter/
 │       ├── exporter.go              ← HTTP batch+gzip exporter with retry
 │       └── prometheus.go            ← :9200/metrics, GET /api/diagnose, GET /api/profile
@@ -212,7 +222,11 @@ linux-obs-agent/
 │   ├── config.yaml.example          ← annotated config reference
 │   ├── daemonset.yaml               ← Kubernetes DaemonSet + ServiceMonitor
 │   ├── db-inspector.yaml            ← Kubernetes sidecar ConfigMap + Deployment + Service
-│   └── db-inspector-config.yaml.example ← annotated db-inspector config reference
+│   ├── db-inspector-config.yaml.example ← annotated db-inspector config reference
+│   ├── clickhouse/
+│   │   ├── schema.sql               ← default output of `obs-agent clickhouse-schema`
+│   │   └── queries.sql              ← ad-hoc queries for the obs tables
+│   └── grafana/                     ← gen/ (generator), two dashboard JSONs, README.md
 │
 ├── Makefile                         ← generate / build / build-inspector / install / image
 └── go.mod
@@ -1054,6 +1068,9 @@ All metrics are prefixed with `obs_agent_`.
 | `ebpf_events_total{module="fsync"}` | Counter | Fsync outlier events (latency > threshold) |
 | `family_*` (cpu_percent, mem_rss_bytes, processes, net_*, inbound/outbound bytes) | Gauge/Counter | Per process family; never per PID. See §20 |
 | `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes, digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. See §20 |
+| `family_inbound_peer_bytes_total{family,peer_ip,service_port,flow}` | Counter | Inbound client bytes; top `netflow.max_inbound_peers` IPs node-wide, overflow `other`. See §20 |
+| `mysql_digest_coverage_ratio` | Gauge | Share (0–1) of window query CPU explained by the exported digest series. See §20 |
+| `clickhouse_{rows_sent_total,rows_dropped_total,buffer_bytes,last_success_timestamp_seconds,snapshots_total,host_info}` | Counter/Gauge | ClickHouse sink health; registered only when `clickhouse.enabled`. See §22 |
 
 ---
 
@@ -1074,6 +1091,7 @@ All metrics are prefixed with `obs_agent_`.
 | **eBPF netflow (always-on, ~100k hook calls/s)** — estimated, not measured | **~0.4%** | **~6 MB (maps)** |
 | **MySQL per-command events (20k QPS)** — estimated, not measured | **~0.3% kernel + ~1% userspace** | **4 MB ringbuf + ~5 MB digests** |
 | **Family grouping (10s scan)** — estimated, not measured | **~0.02%** | **< 1 MB** |
+| **ClickHouse export (drains + 60 s flush, 20k QPS)** — estimated, not measured | **~0.1–0.2 % (digest drain) + a few ms/min encoding** | **≤ 32 MB buffer + per-interval drain maps** |
 | netinv (per /api/diagnose) — estimated, not measured | 20–50 ms per call | transient |
 | **Total (all eBPF active + fsync + netflow + MySQL events)** — estimated, not measured | **~2.3%** | **~70 MB** |
 | **Total (no trigger-eBPF; fsync + netflow + MySQL events)** — estimated, not measured | **~1.9%** | **~35 MB** |
@@ -1618,7 +1636,7 @@ curl -s localhost:9200/api/diagnose | jq '.process_report.top_families_cpu[] | {
 
 ### Prometheus
 
-Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound peers, 200 outbound service ports (node-wide), 50 sticky digests; overflow → `"other"`. A label value that is not valid UTF-8 after sanitising is logged and its series skipped, never a failed scrape.
+Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound peers, 100 inbound peers, 200 outbound service ports (node-wide), 50 sticky digests; overflow → `"other"`. A label value that is not valid UTF-8 after sanitising is logged and its series skipped, never a failed scrape.
 
 | Metric | Labels |
 |---|---|
@@ -1627,11 +1645,25 @@ Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound p
 | `obs_agent_family_net_connections_opened_total`, `_active` | `family, direction` |
 | `obs_agent_family_inbound_bytes_total` | `family, service_port, flow` |
 | `obs_agent_family_outbound_peer_bytes_total` | `family, peer_ip, service_port, flow` |
+| `obs_agent_family_inbound_peer_bytes_total` | `family, peer_ip, service_port, flow` |
 | `obs_agent_mysql_queries_total`, `_query_cpu_seconds_total`, `_query_runq_wait_seconds_total`, `_query_wall_seconds_total` | `command` |
 | `obs_agent_mysql_query_bytes_total` | `command, flow` |
 | `obs_agent_mysql_digest_{cpu_seconds,calls,bytes_out,runq_wait_seconds}_total` | `digest_id` |
 | `obs_agent_mysql_digest_info` (=1) | `digest_id, digest_text` |
+| `obs_agent_mysql_digest_coverage_ratio` | — |
 | `obs_agent_mysql_events_dropped_total` | — |
+
+**Inbound peers**: `…_inbound_peer_bytes_total` is the client side (`service_port` is the local listening port). `netflow.max_inbound_peers` (default 100, `NETFLOW_MAX_INBOUND_PEERS`) caps distinct `peer_ip` values node-wide; further peers fold into `peer_ip="other"`; `0` disables the series. Idle labels expire like the outbound ones.
+
+**Digest modes** (`mysql.prometheus_digests`, env `MYSQL_PROMETHEUS_DIGESTS`):
+
+| Mode | Per-digest series |
+|---|---|
+| `full` (default) | Sticky set (`sticky_digests_max`), all four counters + `digest_info` — unchanged behaviour |
+| `minimal` | Top `prometheus_minimal_top_n` (20) digests by lifetime CPU: only `…digest_cpu_seconds_total` and `…digest_calls_total` + `digest_info`, plus one `digest_id="other"` series per counter (all digests not exported; may reset when a digest enters the exported set — use `rate()`) |
+| `off` | None, no `digest_info`; per-command metrics, `events_dropped_total` and the coverage ratio remain |
+
+`obs_agent_mysql_digest_coverage_ratio` = window CPU of the digests exported in the current mode ÷ the window's total query CPU (0 in `off`, 1 when there is no query CPU). For fleets set `minimal` (or `off`) and use ClickHouse (§22) for the long tail — series grow as servers × digests × series-per-digest.
 
 Join digest text in Grafana: `topk(10, rate(obs_agent_mysql_digest_cpu_seconds_total[5m])) * on(instance, digest_id) group_left(digest_text) obs_agent_mysql_digest_info`.
 
@@ -1705,3 +1737,102 @@ All figures in this table are **estimated, not measured**.
 
 ## 21. Review output
 This code can be use codex to review output of this code each change, so please review carefully after write code
+
+---
+
+## 22. ClickHouse Export
+
+### Why
+
+Prometheus cost is series count: servers × digests × ~5 (500 servers × 1 000 digests ≈ 2.5 M series). Prometheus therefore keeps the low-cardinality, alertable signals (§20 modes cap the digests); **ClickHouse keeps the long tail** — every MySQL digest, slow query, network peer (inbound and outbound) and process family — as delta rows that are exact under `sum()`, plus full `/api/diagnose` snapshots for after-the-fact forensics. Off by default: with `clickhouse.enabled: false` no drain is enabled, no goroutine starts and nothing is allocated. Transport is plain HTTP (`net/http`), no ClickHouse driver, no CGO.
+
+```
+querystats / netflow / mysql slow / process families ──Drain*()──►  chsink.Sink (flush_interval)
+                                                                       │ rows → JSONEachRow+gzip → bounded buffer
+chsink.Snapshotter (check_interval) ── BuildDiagnoseReport ───────────┤
+                                                                       ▼
+                                         POST {url}/?query=INSERT INTO db.table FORMAT JSONEachRow
+                                              &async_insert=1&wait_for_async_insert=1
+```
+
+Each producer's `Drain*` swaps its accumulator out in O(1) under its lock; rows are built outside the lock. A window is "everything since the previous drain", so rows never overlap.
+
+### Tables
+
+All in database `clickhouse.database` (default `obs`), `MergeTree` partitioned by day with `ttl_only_drop_parts = 1`, every row carries `host`, all times UTC. Interval tables carry `window_start`/`window_end`; values are **deltas** for that interval, so `sum()` over any range is exact (`family_stats` holds avg/max gauges instead).
+
+| Table | One row per |
+|---|---|
+| `mysql_digest_stats` | host, pid, digest, interval — calls, cpu/runq/wall/wall_max ns, bytes in/out |
+| `mysql_digest_text` | digest (`ReplacingMergeTree`, no TTL) — `digest_text`, `sample_query` (NULL unless both privacy flags below) |
+| `mysql_slow_queries` | slow query — latency, `digest_id` computed from the event text, `query` |
+| `netflow_peer_stats` | host, family, pid, direction, peer (`IPv6`; IPv4 as `::ffff:a.b.c.d`), service port, interval — bytes rx/tx, conns opened/closed |
+| `family_stats` | host, family, interval — `cpu_percent_avg/max`, `rss_bytes_max`, `processes_max` |
+| `diagnose_snapshots` | captured snapshot — `reason`, `verdict`, `report` (exact `/api/diagnose` JSON, ZSTD) |
+
+The `host` column is `agent.node_name`, else `os.Hostname()`. (The `hostname` field inside the diagnose JSON is always `os.Hostname()`.) `obs_agent_clickhouse_host_info{host}` exposes the value so Prometheus `instance` can be joined to it.
+
+### Schema & retention
+
+The agent **never runs DDL**; its user needs only `INSERT`.
+
+```bash
+obs-agent clickhouse-schema [-database obs] [-retention 30d] [-snapshot-retention 14d] [-alter]
+obs-agent clickhouse-schema -retention 30d | clickhouse-client --multiquery   # create
+obs-agent clickhouse-schema -alter -retention 60d | clickhouse-client --multiquery   # change TTL in place
+```
+
+Without `-alter` it prints `CREATE DATABASE/TABLE IF NOT EXISTS` plus a commented `CREATE USER … GRANT INSERT`; with `-alter`, `ALTER TABLE … MODIFY TTL`. Retention accepts whole days only (`Nd`, ≥ 1). `deploy/clickhouse/schema.sql` is the default output (a test keeps them equal). Defaults: 30 d, snapshots 14 d.
+
+### Delivery
+
+- Every `flush_interval` (default 60 s, min 10 s): drain → rows → one gzip JSONEachRow batch per non-empty table → bounded buffer → send up to `max_batches_per_flush`, oldest first.
+- **Retry** (batch kept; one Warn on healthy→failing, one Info on recovery): network error, timeout, HTTP 429, 5xx, or a body containing `TOO_MANY_SIMULTANEOUS_QUERIES`. **Reject** (batch dropped, `rows_dropped_total{reason="rejected"}`, Error log with the first 512 bytes of the body, rate-limited): any other 4xx (auth, unknown table, schema mismatch).
+- Buffer over `max_buffer_bytes` (32 MB): `diagnose_snapshots` batches are evicted first, then the oldest (`reason="buffer_full"`). A single batch larger than the limit is dropped up front. Over `max_digest_keys` / `max_flow_keys` per interval, new keys fold into an overflow key (`<other>` digest per pid; peer `::`, port 0) so totals stay correct (`reason="drain_cap"` counts folded keys); slow queries beyond `max_slow_queries_per_flush` are dropped and counted.
+- Digest text is sent once per digest (bounded seen-set of 50 000, cleared when full — `ReplacingMergeTree` absorbs resends). If the batch that carried a text is dropped (eviction, reject, shutdown), the text is re-sent with the next stats for that digest.
+- Startup `Ping()` failure only warns. Shutdown does one final drain and send bounded by `clickhouse.timeout` (the rest counted `reason="shutdown"`), but the agent's exit waits at most 5 s.
+- The agent never blocks, panics or exits because of ClickHouse. Alerts: `ObsAgentClickHouseExportStalled`, `ObsAgentClickHouseDropping` (`deploy/prometheus/obs-agent-alerts.yaml`).
+
+### Snapshots
+
+Every `snapshots.check_interval` (30 s) the Snapshotter looks for a **reason**: an eBPF module is active (`module:<id>[,<id>…]`), or the I/O verdict (`iodiag.Classify` on the latest metrics) is not `healthy`, `inconclusive` or `iowait_accounting_artifact` (`io_verdict:<verdict>`; both → `module:…;io_verdict:…`). It then builds the same report as `GET /api/diagnose` (`exporter.BuildDiagnoseReport`, so it needs `agent.metrics_addr`). At most one snapshot per `snapshots.min_interval` (5 m) per host; a reason different from the last captured one bypasses the limit once. A panic while building is recovered and the snapshot skipped. `obs_agent_clickhouse_snapshots_total{reason_kind=module|io_verdict|both}`.
+
+### Privacy
+
+- Raw SQL with literals leaves the host **only when `clickhouse.include_sample_queries` AND `mysql.sample_queries` are both true**. Otherwise `mysql_slow_queries.query` carries the literal-free digest text, `mysql_digest_text.sample_query` is NULL, and snapshots strip every `sample_query` and replace each slow-query text with its digest text (on a copy — the live `/api/diagnose` report is untouched).
+- Snapshots (and `/api/diagnose`) still contain **process cmdlines (which may hold secrets such as `--password=`) and peer IPs**; these leave the host whenever `clickhouse.enabled` is true. Restrict who can read the ClickHouse database as you would `:9200`.
+- The password is never logged (`ClickHouseConfig` redacts it); prefer `password_file` or the Secret-backed env vars in `deploy/daemonset.yaml`.
+
+### Dashboards
+
+`deploy/grafana/obs-agent-overview.json` (Prometheus) and `obs-agent-analysis.json` (ClickHouse, official `grafana-clickhouse-datasource`, read-only user). Both use data-source variables and are **generated**: edit `deploy/grafana/gen/main.go`, then `go run ./deploy/grafana/gen`. Setup and import steps: `deploy/grafana/README.md`. The Overview → Analysis link carries `host`, `family` and the time range. Ad-hoc SQL: `deploy/clickhouse/queries.sql`.
+
+### Configuration
+
+`clickhouse:` in `deploy/config.yaml.example` (url, database, username, password / password_file, timeout, tls_insecure_skip_verify, flush_interval, max_buffer_bytes, max_batches_per_flush, max_digest_keys, max_flow_keys, max_slow_queries_per_flush, include_sample_queries, `snapshots.{enabled,check_interval,min_interval}`), plus `mysql.prometheus_digests`, `mysql.prometheus_minimal_top_n`, `netflow.max_inbound_peers`. Environment overrides: `CLICKHOUSE_ENABLED`, `CLICKHOUSE_URL`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_USERNAME`, `CLICKHOUSE_PASSWORD`, `MYSQL_PROMETHEUS_DIGESTS`, `NETFLOW_MAX_INBOUND_PEERS`. Validation runs only when enabled: http(s) `url`; `database` matches `^[A-Za-z_][A-Za-z0-9_]*$`; `flush_interval` ≥ 10 s; 0 < `timeout` < `flush_interval`; `snapshots.min_interval` ≥ `check_interval`; all `max_*` > 0; `password_file` readable (content trimmed). Always validated: `prometheus_digests` ∈ {full, minimal, off}, `prometheus_minimal_top_n` ≥ 1, `max_inbound_peers` ≥ 0.
+
+### Test
+
+```bash
+make test-clickhouse        # Docker: clickhouse-server, applies schema.sql, one sink cycle + snapshot, queries back sum()s
+promtool test rules deploy/prometheus/obs-agent-alerts_test.yaml
+go test ./internal/chsink/ ./internal/querystats/ ./internal/netflow/ ./internal/process/ ./internal/promcollect/ ./internal/config/ ./internal/drain/ ./deploy/grafana/gen/
+
+# Smoke test against a real ClickHouse (agent running with clickhouse.enabled: true):
+curl -s localhost:9200/metrics | grep obs_agent_clickhouse
+clickhouse-client -q "SELECT table, count() FROM system.parts WHERE database='obs' AND active GROUP BY table"
+clickhouse-client -q "SELECT digest_id, sum(calls), sum(cpu_ns)/1e9 FROM obs.mysql_digest_stats WHERE window_end > now() - INTERVAL 10 MINUTE GROUP BY digest_id ORDER BY 3 DESC LIMIT 10"
+```
+
+**Verification status.** Unit tests for chsink, querystats, netflow, process, promcollect, config, drain and the dashboard generator run anywhere with Go 1.26. `internal/mysql`, `internal/exporter` and `cmd/agent` import generated eBPF code and need `make generate` on Linux. `make test-clickhouse` (Docker) and `promtool test rules` have **not been run** in the development environment, and nothing was checked against a real ClickHouse cluster or a real mysqld. Overhead figures (§14) are **estimated, not measured**.
+
+### Limits
+
+- Rows are at `flush_interval` grain; sub-minute analysis uses Prometheus.
+- Netflow window jitter up to one `netflow.poll_interval` (5 s): the accumulator sees deltas only per poll.
+- Family stats fold the family scans that complete inside the window; a window with no scan yields no rows.
+- Digests beyond `max_digest_keys` per interval fold into `<other>` per pid; peers beyond `max_flow_keys` into `::`/0; slow queries beyond `max_slow_queries_per_flush` are dropped (counted).
+- `MySQLSlowEvent` has no CPU / run-queue / bytes, so `mysql_slow_queries` lacks those columns; use `mysql_digest_stats`.
+- `mysql_slow_queries.digest_id` is computed from the event text: statements folded by `fold_system_schemas`, and prepared executes without recovered text, may not join to `mysql_digest_stats`.
+- Dashboards: per-cell data links, a Snapshots link column, PSI panels and a load ÷ CPUs panel are **not implemented** — no PSI or NumCPU metric is exported to Prometheus. Snapshots are read with the SQL in `deploy/grafana/README.md`.
+- MongoDB digests, Kafka/collector transports and agent-managed schema migrations are not covered.
