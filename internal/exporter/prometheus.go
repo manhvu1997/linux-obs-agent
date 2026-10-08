@@ -284,10 +284,17 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Parse optional query params.
-	n := queryInt(r, "n", 100)
-	topPIDsN := queryInt(r, "top_pids", 20)
+	report := p.BuildDiagnoseReport(queryInt(r, "n", 100), queryInt(r, "top_pids", 20))
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(report); err != nil {
+		slog.Warn("diagnose: encode error", "err", err)
+	}
+}
 
+// BuildDiagnoseReport assembles the /api/diagnose report. n bounds recent
+// eBPF events, topPIDsN the CPU hotspot and disk-writer lists. Shared by the
+// HTTP handler and the ClickHouse snapshotter so both are byte-identical.
+func (p *PrometheusExporter) BuildDiagnoseReport(n, topPIDsN int) model.DiagnoseReport {
 	report := model.DiagnoseReport{
 		Timestamp: time.Now(),
 		Hostname:  p.hostname,
@@ -407,10 +414,22 @@ func (p *PrometheusExporter) handleDiagnose(w http.ResponseWriter, r *http.Reque
 		report.MySQLReport = p.mysqlAnalyzer.Latest()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(report); err != nil {
-		slog.Warn("diagnose: encode error", "err", err)
+	return report
+}
+
+// TriggerState is the cheap input to the ClickHouse snapshot trigger: the
+// active eBPF modules and the I/O verdict for the latest metrics (computed
+// without an off-CPU report, so no symbolization).
+func (p *PrometheusExporter) TriggerState() (active []string, verdict string) {
+	if p.mgr != nil {
+		for _, id := range p.mgr.ActiveModules() {
+			active = append(active, string(id))
+		}
 	}
+	if d := iodiag.Classify(p.coll.Latest(), nil, p.iodiagThresholds()); d != nil {
+		verdict = string(d.Verdict)
+	}
+	return active, verdict
 }
 
 // handleProfile is called by GET /api/profile.
