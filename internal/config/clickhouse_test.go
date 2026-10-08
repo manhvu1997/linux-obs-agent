@@ -110,3 +110,14 @@ func TestValidClickHouseIdentifier(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveIncludeSamples(t *testing.T) {
+	for _, tc := range []struct{ ch, my, want bool }{
+		{false, false, false}, {true, false, false}, {false, true, false}, {true, true, true},
+	} {
+		c := ClickHouseConfig{IncludeSampleQueries: tc.ch}
+		if got := c.EffectiveIncludeSamples(tc.my); got != tc.want {
+			t.Errorf("ch=%v mysql=%v: got %v want %v", tc.ch, tc.my, got, tc.want)
+		}
+	}
+}

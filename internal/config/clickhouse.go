@@ -35,8 +35,9 @@ type ClickHouseConfig struct {
 	MaxDigestKeys          int `yaml:"max_digest_keys"`
 	MaxFlowKeys            int `yaml:"max_flow_keys"`
 	MaxSlowQueriesPerFlush int `yaml:"max_slow_queries_per_flush"`
-	// IncludeSampleQueries sends raw SQL (with literals) off-host. Also
-	// requires mysql.sample_queries.
+	// IncludeSampleQueries sends raw SQL (with literals) off-host. The
+	// effective rule is the AND of this and mysql.sample_queries; see
+	// EffectiveIncludeSamples.
 	IncludeSampleQueries bool                     `yaml:"include_sample_queries"`
 	Snapshots            ClickHouseSnapshotConfig `yaml:"snapshots"`
 }
@@ -75,6 +76,12 @@ var identRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // ValidClickHouseIdentifier reports whether s is safe to interpolate as a
 // ClickHouse database or table name.
 func ValidClickHouseIdentifier(s string) bool { return identRe.MatchString(s) }
+
+// EffectiveIncludeSamples reports whether raw SQL may leave the host: only
+// when both clickhouse.include_sample_queries and mysql.sample_queries are on.
+func (c ClickHouseConfig) EffectiveIncludeSamples(mysqlSampleQueries bool) bool {
+	return c.IncludeSampleQueries && mysqlSampleQueries
+}
 
 // String redacts the password so the config can be logged.
 func (c ClickHouseConfig) String() string {

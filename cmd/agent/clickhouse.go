@@ -53,7 +53,13 @@ func startClickHouse(ctx context.Context, cfg *config.Config, promExp *exporter.
 		src.Slow = my.DrainSlowQueries
 	}
 
-	sink := chsink.NewSink(ch, host, client, src, time.Now())
+	// The sink and snapshotter must see the effective flag: raw SQL leaves the
+	// host only when both clickhouse.include_sample_queries and
+	// mysql.sample_queries are true.
+	eff := *ch
+	eff.IncludeSampleQueries = ch.EffectiveIncludeSamples(cfg.MySQL.SampleQueries)
+
+	sink := chsink.NewSink(&eff, host, client, src, time.Now())
 	go func() {
 		defer close(done)
 		sink.Run(ctx)
@@ -64,7 +70,7 @@ func startClickHouse(ctx context.Context, cfg *config.Config, promExp *exporter.
 		promExp.RegisterCollectors(sink.Collectors()...)
 		if ch.Snapshots.Enabled {
 			build := func() model.DiagnoseReport { return promExp.BuildDiagnoseReport(100, 20) }
-			go chsink.NewSnapshotter(ch, host, sink, promExp.TriggerState, build).Run(ctx)
+			go chsink.NewSnapshotter(&eff, host, sink, promExp.TriggerState, build).Run(ctx)
 		}
 	case ch.Snapshots.Enabled:
 		slog.Warn("clickhouse: snapshots need agent.metrics_addr (the /api/diagnose builder); snapshots disabled")
