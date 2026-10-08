@@ -238,3 +238,75 @@ func TestHostInfoMetric(t *testing.T) {
 		t.Fatalf("host_info = %v", v)
 	}
 }
+
+func TestOversizedKeepsOlderBatches(t *testing.T) {
+	cfg := testCfg()
+	cfg.MaxBufferBytes = 100
+	s := NewSink(cfg, "h", &fakeIns{}, Sources{}, tStart)
+	s.enqueue(batch{table: TableFamilyStats, rows: 1, body: make([]byte, 30)})
+	s.enqueue(batch{table: TablePeerStats, rows: 1, body: make([]byte, 30)})
+	s.enqueue(batch{table: TableDigestStats, rows: 4, body: make([]byte, 101)})
+	if len(s.buf) != 2 || s.bufBytes != 60 {
+		t.Fatalf("older batches lost: %d batches, %d bytes", len(s.buf), s.bufBytes)
+	}
+	if v := testutil.ToFloat64(s.m.dropped.WithLabelValues(TableDigestStats, "buffer_full")); v != 4 {
+		t.Fatalf("oversized drop = %v, want 4", v)
+	}
+}
+
+func textCount(ins *fakeIns, t *testing.T) int {
+	n := 0
+	for _, x := range ins.sent {
+		if x.table == TableDigestText {
+			n += len(decodeRowsForTest(t, x.body))
+		}
+	}
+	return n
+}
+
+func TestEvictedDigestTextIsResent(t *testing.T) {
+	cfg := testCfg()
+	ins := &fakeIns{}
+	s := NewSink(cfg, "h", ins, Sources{Digests: digestSource("a")}, tStart)
+	cfg.MaxBufferBytes = 1 // every batch is dropped as buffer_full
+	s.Flush(context.Background(), tStart.Add(time.Minute))
+	if textCount(ins, t) != 0 {
+		t.Fatal("nothing should have been sent")
+	}
+	cfg.MaxBufferBytes = 1 << 20
+	s.Flush(context.Background(), tStart.Add(2*time.Minute))
+	if n := textCount(ins, t); n != 1 {
+		t.Fatalf("text rows after eviction = %d, want 1 (resent)", n)
+	}
+}
+
+func TestRejectedDigestTextIsResent(t *testing.T) {
+	ins := &fakeIns{outcomes: []Outcome{OutcomeOK, OutcomeReject}} // stats ok, text rejected
+	s := NewSink(testCfg(), "h", ins, Sources{Digests: digestSource("a")}, tStart)
+	s.Flush(context.Background(), tStart.Add(time.Minute))
+	s.Flush(context.Background(), tStart.Add(2*time.Minute))
+	if n := textCount(ins, t); n != 1 {
+		t.Fatalf("text rows after reject = %d, want 1 (resent)", n)
+	}
+}
+
+func TestDeliveredDigestTextNotResent(t *testing.T) {
+	ins := &fakeIns{}
+	s := NewSink(testCfg(), "h", ins, Sources{Digests: digestSource("a")}, tStart)
+	s.Flush(context.Background(), tStart.Add(time.Minute))
+	s.Flush(context.Background(), tStart.Add(2*time.Minute))
+	if n := textCount(ins, t); n != 1 {
+		t.Fatalf("text rows = %d, want 1", n)
+	}
+}
+
+func TestShutdownForgetsDigestText(t *testing.T) {
+	ins := &fakeIns{outcomes: []Outcome{OutcomeRetry}}
+	s := NewSink(testCfg(), "h", ins, Sources{Digests: digestSource("a")}, tStart)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.Run(ctx)
+	if !s.seen.addNew("a") {
+		t.Fatal("id still marked seen after its text was dropped at shutdown")
+	}
+}

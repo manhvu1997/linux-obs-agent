@@ -149,3 +149,13 @@ func TestDigestRowsColumns(t *testing.T) {
 		}
 	}
 }
+
+func TestIDSetForget(t *testing.T) {
+	s := newIDSet(10)
+	s.addNew("a")
+	s.addNew("b")
+	s.forget([]string{"a", "zz"})
+	if !s.addNew("a") || s.addNew("b") {
+		t.Fatal("forget must remove only the named ids")
+	}
+}

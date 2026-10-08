@@ -204,6 +204,13 @@ func (s *idSet) addNew(id string) bool {
 	return true
 }
 
+// forget removes ids so their text is sent again on next sight.
+func (s *idSet) forget(ids []string) {
+	for _, id := range ids {
+		delete(s.m, id)
+	}
+}
+
 // encodeRows renders rows as gzip-compressed JSONEachRow (one object per line).
 func encodeRows[T any](rows []T) ([]byte, error) {
 	var buf bytes.Buffer

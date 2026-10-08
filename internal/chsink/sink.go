@@ -37,6 +37,7 @@ type batch struct {
 	table string
 	rows  int
 	body  []byte
+	ids   []string // digest ids marked seen by a TableDigestText batch
 }
 
 type metrics struct {
@@ -124,6 +125,7 @@ func (s *Sink) shutdown() {
 	defer s.mu.Unlock()
 	for _, b := range s.buf {
 		s.m.dropped.WithLabelValues(b.table, "shutdown").Add(float64(b.rows))
+		s.seen.forget(b.ids)
 	}
 	s.buf, s.bufBytes = nil, 0
 	s.m.bufferBytes.Set(0)
@@ -149,7 +151,11 @@ func (s *Sink) Flush(ctx context.Context, now time.Time) {
 		s.mu.Lock()
 		texts := textRows(d, s.seen, s.cfg.IncludeSampleQueries, now)
 		s.mu.Unlock()
-		enqueueRows(s, TableDigestText, texts)
+		ids := make([]string, len(texts))
+		for i, r := range texts {
+			ids[i] = r.DigestID
+		}
+		enqueueRowsIDs(s, TableDigestText, texts, ids)
 	}
 	if s.src.Slow != nil {
 		ev, dropped := s.src.Slow()
@@ -168,6 +174,12 @@ func (s *Sink) Flush(ctx context.Context, now time.Time) {
 }
 
 func enqueueRows[T any](s *Sink, table string, rows []T) {
+	enqueueRowsIDs(s, table, rows, nil)
+}
+
+// enqueueRowsIDs is enqueueRows for digest-text batches, remembering which
+// ids were marked seen so they can be forgotten if the batch is dropped.
+func enqueueRowsIDs[T any](s *Sink, table string, rows []T, ids []string) {
 	if len(rows) == 0 {
 		return
 	}
@@ -175,9 +187,10 @@ func enqueueRows[T any](s *Sink, table string, rows []T) {
 	if err != nil {
 		slog.Error("clickhouse: encoding rows failed; dropped", "table", table, "err", err)
 		s.m.dropped.WithLabelValues(table, "rejected").Add(float64(len(rows)))
+		s.forgetIDs(ids)
 		return
 	}
-	s.enqueue(batch{table: table, rows: len(rows), body: body})
+	s.enqueue(batch{table: table, rows: len(rows), body: body, ids: ids})
 }
 
 // enqueue appends b and evicts until under MaxBufferBytes: diagnose
@@ -185,6 +198,11 @@ func enqueueRows[T any](s *Sink, table string, rows []T) {
 func (s *Sink) enqueue(b batch) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(b.body) > s.cfg.MaxBufferBytes { // can never fit: keep older batches
+		s.m.dropped.WithLabelValues(b.table, "buffer_full").Add(float64(b.rows))
+		s.seen.forget(b.ids)
+		return
+	}
 	s.nextID++
 	b.id = s.nextID
 	s.buf = append(s.buf, b)
@@ -201,6 +219,7 @@ func (s *Sink) enqueue(b batch) {
 		s.buf = append(s.buf[:i], s.buf[i+1:]...)
 		s.bufBytes -= len(ev.body)
 		s.m.dropped.WithLabelValues(ev.table, "buffer_full").Add(float64(ev.rows))
+		s.seen.forget(ev.ids)
 	}
 	s.m.bufferBytes.Set(float64(s.bufBytes))
 }
@@ -233,6 +252,7 @@ func (s *Sink) send(ctx context.Context) {
 				s.lastReject[b.table] = time.Now()
 			}
 			s.m.dropped.WithLabelValues(b.table, "rejected").Add(float64(b.rows))
+			s.forgetIDs(b.ids)
 		case OutcomeOK:
 			if s.failing {
 				slog.Info("clickhouse: export recovered")
@@ -258,4 +278,13 @@ func (s *Sink) remove(id uint64) {
 		}
 	}
 	s.m.bufferBytes.Set(float64(s.bufBytes))
+}
+
+func (s *Sink) forgetIDs(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	s.mu.Lock()
+	s.seen.forget(ids)
+	s.mu.Unlock()
 }
