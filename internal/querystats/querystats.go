@@ -179,6 +179,10 @@ type Aggregator struct {
 	sticky   map[string]time.Time
 	waited   uint64 // events with wall − cpu > waitedGapNs
 	runqSum  uint64
+	// drain is the ClickHouse delta accumulator, nil until EnableDrain.
+	drain       map[key]*acc
+	drainMax    int
+	drainFolded uint64
 }
 
 func New(cfg Config) *Aggregator {
@@ -225,6 +229,9 @@ func (a *Aggregator) Add(e Event) {
 		}
 	}
 	x.add(e)
+	if a.drain != nil {
+		a.addDrain(e)
+	}
 
 	a.addLife(k.id, x.text, e)
 	c := a.commands[e.Command]
