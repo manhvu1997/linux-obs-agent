@@ -1,8 +1,12 @@
 package promcollect
 
 import (
+	"math"
+	"sort"
+
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 )
 
@@ -30,23 +34,31 @@ var (
 	myDigestInfoDesc = prometheus.NewDesc("obs_agent_mysql_digest_info",
 		"Normalised SQL text of a digest (value is always 1); join with * on(digest_id) group_left(digest_text).",
 		[]string{"digest_id", "digest_text"}, nil)
+	myCoverageDesc = prometheus.NewDesc("obs_agent_mysql_digest_coverage_ratio",
+		"Share (0-1) of the window's query CPU explained by the per-digest series exported in the current mode.", nil, nil)
 	myDroppedDesc = prometheus.NewDesc("obs_agent_mysql_events_dropped_total",
 		"Per-statement events lost (ring buffer full or consumer behind); digest totals undercount when this rises.", nil, nil)
 )
 
-// MySQLCollector exports MySQL command and sticky-digest counters.
+// MySQLCollector exports MySQL command counters and per-digest counters in
+// one of three modes (mysql.prometheus_digests).
 type MySQLCollector struct {
-	snap    func() *querystats.Snapshot
-	dropped func() uint64
+	snap        func() *querystats.Snapshot
+	dropped     func() uint64
+	mode        string
+	minimalTopN int
 }
 
-func NewMySQLCollector(snap func() *querystats.Snapshot, dropped func() uint64) *MySQLCollector {
-	return &MySQLCollector{snap: snap, dropped: dropped}
+func NewMySQLCollector(snap func() *querystats.Snapshot, dropped func() uint64, mode string, minimalTopN int) *MySQLCollector {
+	if minimalTopN < 1 {
+		minimalTopN = 20
+	}
+	return &MySQLCollector{snap: snap, dropped: dropped, mode: mode, minimalTopN: minimalTopN}
 }
 
 func (c *MySQLCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{myQueriesDesc, myCPUDesc, myRunqDesc, myWallDesc, myBytesDesc,
-		myDigestCPUDesc, myDigestCallsDesc, myDigestOutDesc, myDigestRunqDesc, myDigestInfoDesc, myDroppedDesc} {
+		myDigestCPUDesc, myDigestCallsDesc, myDigestOutDesc, myDigestRunqDesc, myDigestInfoDesc, myCoverageDesc, myDroppedDesc} {
 		ch <- d
 	}
 }
@@ -65,12 +77,74 @@ func (c *MySQLCollector) Collect(ch chan<- prometheus.Metric) {
 		emit(ch, myBytesDesc, prometheus.CounterValue, float64(q.BytesIn), cmd, "in")
 		emit(ch, myBytesDesc, prometheus.CounterValue, float64(q.BytesOut), cmd, "out")
 	}
-	for _, d := range s.Exported {
-		emit(ch, myDigestCPUDesc, prometheus.CounterValue, sec(d.Counters.CPUNs), d.ID)
-		emit(ch, myDigestCallsDesc, prometheus.CounterValue, float64(d.Counters.Calls), d.ID)
-		emit(ch, myDigestOutDesc, prometheus.CounterValue, float64(d.Counters.BytesOut), d.ID)
-		emit(ch, myDigestRunqDesc, prometheus.CounterValue, sec(d.Counters.RunqNs), d.ID)
-		emit(ch, myDigestInfoDesc, prometheus.GaugeValue, 1, d.ID, SanitizeLabel(d.Text, digestTextMaxBytes))
+	var exported []querystats.ExportedDigest
+	switch c.mode {
+	case config.DigestsOff:
+	case config.DigestsMinimal:
+		exported = topExported(s.Exported, c.minimalTopN)
+		var cpu, calls, allCPU, allCalls uint64
+		for _, d := range exported {
+			emit(ch, myDigestCPUDesc, prometheus.CounterValue, sec(d.Counters.CPUNs), d.ID)
+			emit(ch, myDigestCallsDesc, prometheus.CounterValue, float64(d.Counters.Calls), d.ID)
+			emit(ch, myDigestInfoDesc, prometheus.GaugeValue, 1, d.ID, SanitizeLabel(d.Text, digestTextMaxBytes))
+			cpu += d.Counters.CPUNs
+			calls += d.Counters.Calls
+		}
+		for _, q := range s.Commands {
+			allCPU += q.CPUNs
+			allCalls += q.Calls
+		}
+		// "other" = everything not exported. It can drop when a digest
+		// joins the exported set: a counter reset that rate() tolerates.
+		emit(ch, myDigestCPUDesc, prometheus.CounterValue, sec(subFloor(allCPU, cpu)), "other")
+		emit(ch, myDigestCallsDesc, prometheus.CounterValue, float64(subFloor(allCalls, calls)), "other")
+	default: // config.DigestsFull
+		exported = s.Exported
+		for _, d := range exported {
+			emit(ch, myDigestCPUDesc, prometheus.CounterValue, sec(d.Counters.CPUNs), d.ID)
+			emit(ch, myDigestCallsDesc, prometheus.CounterValue, float64(d.Counters.Calls), d.ID)
+			emit(ch, myDigestOutDesc, prometheus.CounterValue, float64(d.Counters.BytesOut), d.ID)
+			emit(ch, myDigestRunqDesc, prometheus.CounterValue, sec(d.Counters.RunqNs), d.ID)
+			emit(ch, myDigestInfoDesc, prometheus.GaugeValue, 1, d.ID, SanitizeLabel(d.Text, digestTextMaxBytes))
+		}
 	}
+	emit(ch, myCoverageDesc, prometheus.GaugeValue, coverage(c.mode, exported, s.QueryCPUMsTotal))
 	emit(ch, myDroppedDesc, prometheus.CounterValue, float64(c.dropped()))
+}
+
+func topExported(in []querystats.ExportedDigest, n int) []querystats.ExportedDigest {
+	out := append([]querystats.ExportedDigest(nil), in...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Counters.CPUNs != out[j].Counters.CPUNs {
+			return out[i].Counters.CPUNs > out[j].Counters.CPUNs
+		}
+		return out[i].ID < out[j].ID
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+func subFloor(a, b uint64) uint64 {
+	if a < b {
+		return 0
+	}
+	return a - b
+}
+
+// coverage: window CPU of the exported digests over all query CPU in the
+// window. Always 0 in off mode; 1 on an idle server (nothing to explain).
+func coverage(mode string, exp []querystats.ExportedDigest, totalMs float64) float64 {
+	if mode == config.DigestsOff {
+		return 0
+	}
+	if totalMs <= 0 {
+		return 1
+	}
+	var ns uint64
+	for _, d := range exp {
+		ns += d.WindowCPUNs
+	}
+	return math.Min(1, float64(ns)/1e6/totalMs)
 }

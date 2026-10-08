@@ -100,6 +100,9 @@ type ExportedDigest struct {
 	ID       string
 	Text     string
 	Counters model.QueryCounters
+	// WindowCPUNs is this digest's on-CPU time inside the report window,
+	// summed across PIDs (for the Prometheus coverage ratio).
+	WindowCPUNs uint64
 }
 
 // Snapshot is the read-only result of one Snapshot call.
@@ -327,10 +330,14 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 	}
 	a.expire(now)
 
+	winCPU := make(map[string]uint64, len(merged))
+	for k, x := range merged {
+		winCPU[k.id] += x.cpu
+	}
 	exported := make([]ExportedDigest, 0, len(a.sticky))
 	for id := range a.sticky {
 		if l, ok := a.life[id]; ok {
-			exported = append(exported, ExportedDigest{ID: id, Text: l.text, Counters: l.c})
+			exported = append(exported, ExportedDigest{ID: id, Text: l.text, Counters: l.c, WindowCPUNs: winCPU[id]})
 		}
 	}
 	sort.Slice(exported, func(i, j int) bool { return exported[i].ID < exported[j].ID })

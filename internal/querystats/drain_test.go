@@ -118,3 +118,17 @@ func TestDrainConcurrent(t *testing.T) {
 		t.Fatalf("drained %d calls, want %d", drained, writers*perWriter)
 	}
 }
+
+func TestSnapshotExportedWindowCPU(t *testing.T) {
+	a := New(Config{})
+	now := time.Unix(1_800_000_000, 0)
+	e := dEv(1, "d1", 4000)
+	e.At = now
+	a.Add(e)
+	e.PID = 2
+	a.Add(e) // same digest on a second mysqld: window CPU sums across pids
+	s := a.Snapshot(now)
+	if len(s.Exported) != 1 || s.Exported[0].WindowCPUNs != 8000 {
+		t.Fatalf("exported = %+v, want WindowCPUNs 8000", s.Exported)
+	}
+}
