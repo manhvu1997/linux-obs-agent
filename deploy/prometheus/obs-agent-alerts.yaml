@@ -108,3 +108,23 @@ groups:
           summary: "{{ $labels.family }} on {{ $labels.instance }} opens more than 500 {{ $labels.direction }} connections/s"
           description: "Sustained connection churn usually means a missing or broken connection pool."
           diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+  - name: obs-agent-clickhouse
+    rules:
+      - alert: ObsAgentClickHouseExportStalled
+        expr: time() - obs_agent_clickhouse_last_success_timestamp_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "obs-agent on {{ $labels.instance }} has not written to ClickHouse for 15 min"
+          description: "Rows are buffered up to clickhouse.max_buffer_bytes, then the oldest are dropped. Check ClickHouse reachability/credentials and obs_agent_clickhouse_rows_dropped_total."
+
+      - alert: ObsAgentClickHouseDropping
+        expr: sum by (instance, table, reason) (rate(obs_agent_clickhouse_rows_dropped_total{reason!="drain_cap"}[10m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "obs-agent on {{ $labels.instance }} is dropping {{ $labels.table }} rows ({{ $labels.reason }})"
+          description: "rejected = schema/auth mismatch (apply deploy/clickhouse/schema.sql, check grants); buffer_full = ClickHouse down longer than the buffer holds."

@@ -138,3 +138,34 @@ tests:
               summary: "php-fpm.service on web1:9200 sends/receives 3x more to 10.0.0.9:6379 than last week"
               description: "Outbound traffic to this dependency is above 10 MB/s and 3x the same window one week ago."
               diagnose: "http://web1:9200/api/diagnose"
+
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_clickhouse_last_success_timestamp_seconds{instance="db1:9200"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ObsAgentClickHouseExportStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObsAgentClickHouseExportStalled
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "db1:9200" }
+            exp_annotations:
+              summary: "obs-agent on db1:9200 has not written to ClickHouse for 15 min"
+              description: "Rows are buffered up to clickhouse.max_buffer_bytes, then the oldest are dropped. Check ClickHouse reachability/credentials and obs_agent_clickhouse_rows_dropped_total."
+
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_clickhouse_rows_dropped_total{instance="db1:9200",table="family_stats",reason="rejected"}'
+        values: '0+10x40'
+      - series: 'obs_agent_clickhouse_rows_dropped_total{instance="db1:9200",table="mysql_digest_stats",reason="drain_cap"}'
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ObsAgentClickHouseDropping
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "db1:9200", table: family_stats, reason: rejected }
+            exp_annotations:
+              summary: "obs-agent on db1:9200 is dropping family_stats rows (rejected)"
+              description: "rejected = schema/auth mismatch (apply deploy/clickhouse/schema.sql, check grants); buffer_full = ClickHouse down longer than the buffer holds."
