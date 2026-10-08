@@ -17,8 +17,8 @@ Both are generated: edit `deploy/grafana/gen/main.go`, then run `go run ./deploy
 
 ## Linking
 
-The Overview's "MySQL & Network Analysis" link carries the selected hosts and families and the time
-range. Prometheus `instance` (`host:9200`) differs from the ClickHouse `host` column (hostname);
+The Overview's "MySQL & Network Analysis" link carries `var-host`, `var-family` and the time
+range ("All" arrives as `$__all`, which the Analysis variables accept). Prometheus `instance` (`host:9200`) differs from the ClickHouse `host` column (hostname);
 the link uses `obs_agent_clickhouse_host_info{host}` to translate, so it only works for agents with
 `clickhouse.enabled: true`.
 

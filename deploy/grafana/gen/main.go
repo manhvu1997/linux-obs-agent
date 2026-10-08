@@ -173,12 +173,12 @@ func overview() Dashboard {
 			Definition: "label_values(obs_agent_cpu_usage_percent, instance)", Multi: true, IncludeAll: true, Refresh: 2},
 		{Name: "family", Type: "query", Datasource: &promDS, Query: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`,
 			Definition: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`, Multi: true, IncludeAll: true, Refresh: 2},
-		{Name: "chhost", Label: "ClickHouse host", Type: "query", Datasource: &promDS,
+		{Name: "host", Label: "ClickHouse host", Type: "query", Datasource: &promDS,
 			Query: `label_values(obs_agent_clickhouse_host_info{` + inst + `}, host)`, Definition: `label_values(obs_agent_clickhouse_host_info{` + inst + `}, host)`,
 			Multi: true, IncludeAll: true, Refresh: 2, Hide: 2},
 	}
 	d.Links = []map[string]any{{"title": "MySQL & Network Analysis (ClickHouse)", "type": "link", "targetBlank": true,
-		"url": "/d/obs-agent-analysis/obs-agent-analysis?${chhost:queryparam}&${family:queryparam}&$__url_time_range"}}
+		"url": "/d/obs-agent-analysis/obs-agent-analysis?${host:queryparam}&${family:queryparam}&$__url_time_range"}}
 
 	b := &builder{}
 	b.row("Node")
@@ -218,9 +218,9 @@ func overview() Dashboard {
 	b.row("MySQL")
 	b.add(prom("Queries per second by command", "ops",
 		[2]string{`sum by (instance, command) (rate(obs_agent_mysql_queries_total{` + inst + `}[$__rate_interval]))`, "{{instance}} {{command}}"}), 12)
-	b.add(prom("Query CPU and run-queue wait (cores)", "short",
-		[2]string{`sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{` + inst + `}[$__rate_interval]))`, "{{instance}} on-CPU"},
-		[2]string{`sum by (instance) (rate(obs_agent_mysql_query_runq_wait_seconds_total{` + inst + `}[$__rate_interval]))`, "{{instance}} waiting for CPU"}), 12)
+	b.add(prom("Query CPU and run-queue wait by command (cores)", "short",
+		[2]string{`sum by (instance, command) (rate(obs_agent_mysql_query_cpu_seconds_total{` + inst + `}[$__rate_interval]))`, "{{instance}} {{command}} on-CPU"},
+		[2]string{`sum by (instance, command) (rate(obs_agent_mysql_query_runq_wait_seconds_total{` + inst + `}[$__rate_interval]))`, "{{instance}} {{command}} waiting for CPU"}), 12)
 	b.add(promTable("Top digests by CPU (cores, last 5m)",
 		`topk(10, rate(obs_agent_mysql_digest_cpu_seconds_total{`+inst+`}[5m]) * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{`+inst+`})`), 12)
 	b.add(prom("Digest coverage and dropped events", "short",

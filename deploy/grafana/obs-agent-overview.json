@@ -47,7 +47,7 @@
         "refresh": 2
       },
       {
-        "name": "chhost",
+        "name": "host",
         "label": "ClickHouse host",
         "type": "query",
         "datasource": {
@@ -68,7 +68,7 @@
       "targetBlank": true,
       "title": "MySQL & Network Analysis (ClickHouse)",
       "type": "link",
-      "url": "/d/obs-agent-analysis/obs-agent-analysis?${chhost:queryparam}&${family:queryparam}&$__url_time_range"
+      "url": "/d/obs-agent-analysis/obs-agent-analysis?${host:queryparam}&${family:queryparam}&$__url_time_range"
     }
   ],
   "panels": [
@@ -644,7 +644,7 @@
     {
       "id": 19,
       "type": "timeseries",
-      "title": "Query CPU and run-queue wait (cores)",
+      "title": "Query CPU and run-queue wait by command (cores)",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -662,8 +662,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}} on-CPU"
+          "expr": "sum by (instance, command) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{command}} on-CPU"
         },
         {
           "refId": "B",
@@ -671,8 +671,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (instance) (rate(obs_agent_mysql_query_runq_wait_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}} waiting for CPU"
+          "expr": "sum by (instance, command) (rate(obs_agent_mysql_query_runq_wait_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{command}} waiting for CPU"
         }
       ],
       "fieldConfig": {
