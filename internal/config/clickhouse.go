@@ -89,7 +89,28 @@ func (c ClickHouseConfig) String() string {
 	if c.Password != "" {
 		c.Password = "REDACTED"
 	}
+	c.URL = redactURL(c.URL)
 	return fmt.Sprintf("%+v", plain(c))
+}
+
+// redactURL hides credentials embedded in a URL so it can be logged.
+func redactURL(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		if u.User != nil {
+			return u.Redacted()
+		}
+		if !strings.Contains(raw, "@") {
+			return raw
+		}
+	}
+	if i := strings.Index(raw, "://"); i >= 0 {
+		rest := raw[i+3:]
+		if j := strings.LastIndex(rest, "@"); j >= 0 {
+			return raw[:i+3] + "REDACTED" + rest[j:]
+		}
+		return raw
+	}
+	return "REDACTED_URL"
 }
 
 // applyClickHouseEnvOverrides:
@@ -126,7 +147,7 @@ func (c *ClickHouseConfig) finish() error {
 	}
 	u, err := url.Parse(c.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("clickhouse.url must be an http(s) URL with a host, got %q", c.URL)
+		return fmt.Errorf("clickhouse.url must be an http(s) URL with a host, got %q", redactURL(c.URL))
 	}
 	if !ValidClickHouseIdentifier(c.Database) {
 		return fmt.Errorf("clickhouse.database must match %s, got %q", identRe, c.Database)

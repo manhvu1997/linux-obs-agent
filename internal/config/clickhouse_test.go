@@ -121,3 +121,23 @@ func TestEffectiveIncludeSamples(t *testing.T) {
 		}
 	}
 }
+
+func TestStringRedactsURLCredentials(t *testing.T) {
+	c := ClickHouseConfig{URL: "http://u:hunter2@ch:8123", Password: "pw123"}
+	s := c.String()
+	if strings.Contains(s, "hunter2") || strings.Contains(s, "pw123") {
+		t.Fatalf("String leaks credentials: %s", s)
+	}
+}
+
+func TestFinishURLErrorHasNoSecret(t *testing.T) {
+	for _, u := range []string{"ftp://u:secret@host", "http://u:secret@ho st:1/%zz", "u:secret@host"} {
+		c := defaultClickHouse()
+		c.Enabled = true
+		c.URL = u
+		err := c.finish()
+		if err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("url %q: err = %v", u, err)
+		}
+	}
+}
