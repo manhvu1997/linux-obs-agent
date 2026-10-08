@@ -129,13 +129,40 @@ type ProcessConfig struct {
 	// IncludeIO: read per-process IO (requires CAP_SYS_PTRACE on some kernels).
 	IncludeIO bool `yaml:"include_io"`
 	// ReportTopN: processes and families per list in process_report.
+	// Default for the four per-list sizes below when they are 0.
 	ReportTopN int `yaml:"report_top_n"`
+	// ReportTopCPU / ReportTopMem: entries in process_report.top_cpu /
+	// top_mem; 0 = ReportTopN.
+	ReportTopCPU int `yaml:"report_top_cpu"`
+	ReportTopMem int `yaml:"report_top_mem"`
+	// ReportTopFamiliesCPU / ReportTopFamiliesMem: entries in
+	// process_report.top_families_cpu / top_families_mem; 0 = ReportTopN.
+	ReportTopFamiliesCPU int `yaml:"report_top_families_cpu"`
+	ReportTopFamiliesMem int `yaml:"report_top_families_mem"`
 	// FamilyBy: "systemd_unit" (default) or "cgroup" (full cgroup path).
 	FamilyBy string `yaml:"family_by"`
 	// MaxConnectionsPerProcess caps the live connection list per process.
 	MaxConnectionsPerProcess int `yaml:"max_connections_per_process"`
 	// MaxPeersPerProcess caps network.top_peers per process / family.
 	MaxPeersPerProcess int `yaml:"max_peers_per_process"`
+}
+
+// orReportTopN returns n, or ReportTopN when n is 0 (unset).
+func (p ProcessConfig) orReportTopN(n int) int {
+	if n > 0 {
+		return n
+	}
+	return p.ReportTopN
+}
+
+// EffectiveReportTopCPU etc. resolve the per-list process_report sizes.
+func (p ProcessConfig) EffectiveReportTopCPU() int { return p.orReportTopN(p.ReportTopCPU) }
+func (p ProcessConfig) EffectiveReportTopMem() int { return p.orReportTopN(p.ReportTopMem) }
+func (p ProcessConfig) EffectiveReportTopFamiliesCPU() int {
+	return p.orReportTopN(p.ReportTopFamiliesCPU)
+}
+func (p ProcessConfig) EffectiveReportTopFamiliesMem() int {
+	return p.orReportTopN(p.ReportTopFamiliesMem)
 }
 
 // RunQueueConfig controls the two-level run-queue analysis.
@@ -788,6 +815,10 @@ func (c *Config) validate() error {
 	}
 	if c.Process.ReportTopN <= 0 {
 		return fmt.Errorf("process.report_top_n must be > 0")
+	}
+	if c.Process.ReportTopCPU < 0 || c.Process.ReportTopMem < 0 ||
+		c.Process.ReportTopFamiliesCPU < 0 || c.Process.ReportTopFamiliesMem < 0 {
+		return fmt.Errorf("process.report_top_{cpu,mem,families_cpu,families_mem} must be >= 0 (0 = report_top_n)")
 	}
 	if c.Process.FamilyBy != "systemd_unit" && c.Process.FamilyBy != "cgroup" {
 		return fmt.Errorf("process.family_by must be systemd_unit or cgroup")

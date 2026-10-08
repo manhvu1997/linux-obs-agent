@@ -219,7 +219,11 @@ process:
   # Include per-process IO stats (may need CAP_SYS_PTRACE).
   include_io: true
   # process_report (GET /api/diagnose)
-  report_top_n: 10              # processes and families per list
+  report_top_n: 10              # default size of each list below
+  report_top_cpu: 0             # process_report.top_cpu entries (0 = report_top_n)
+  report_top_mem: 0             # process_report.top_mem entries (0 = report_top_n)
+  report_top_families_cpu: 0    # process_report.top_families_cpu entries (0 = report_top_n)
+  report_top_families_mem: 0    # process_report.top_families_mem entries (0 = report_top_n)
   family_by: systemd_unit       # systemd_unit | cgroup — how forked workers are grouped
   max_connections_per_process: 50
   max_peers_per_process: 20

@@ -87,3 +87,21 @@ func TestMySQLFoldSystemSchemas(t *testing.T) {
 		t.Fatal("MYSQL_FOLD_SYSTEM_SCHEMAS=false not applied")
 	}
 }
+
+func TestProcessReportListSizes(t *testing.T) {
+	p := Defaults().Process
+	if p.EffectiveReportTopCPU() != 10 || p.EffectiveReportTopMem() != 10 ||
+		p.EffectiveReportTopFamiliesCPU() != 10 || p.EffectiveReportTopFamiliesMem() != 10 {
+		t.Fatalf("unset list sizes must fall back to report_top_n: %+v", p)
+	}
+	p.ReportTopCPU, p.ReportTopMem, p.ReportTopFamiliesCPU, p.ReportTopFamiliesMem = 5, 15, 3, 25
+	if p.EffectiveReportTopCPU() != 5 || p.EffectiveReportTopMem() != 15 ||
+		p.EffectiveReportTopFamiliesCPU() != 3 || p.EffectiveReportTopFamiliesMem() != 25 {
+		t.Fatalf("explicit list sizes not honoured: %+v", p)
+	}
+	c := Defaults()
+	c.Process.ReportTopFamiliesMem = -1
+	if err := c.validate(); err == nil {
+		t.Fatal("negative report_top_families_mem accepted")
+	}
+}

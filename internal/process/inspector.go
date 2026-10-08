@@ -99,8 +99,8 @@ func (i *Inspector) TopMem() []model.ProcessStats {
 	return out
 }
 
-// ReportTopCPU / ReportTopMem return process.report_top_n processes for
-// process_report (independent of the legacy top_n list).
+// ReportTopCPU / ReportTopMem return process.report_top_cpu / report_top_mem
+// (default report_top_n) processes for process_report (independent of the legacy top_n list).
 func (i *Inspector) ReportTopCPU() []model.ProcessStats {
 	return i.copyProcs(func() []model.ProcessStats { return i.reportCPU })
 }
@@ -108,17 +108,18 @@ func (i *Inspector) ReportTopMem() []model.ProcessStats {
 	return i.copyProcs(func() []model.ProcessStats { return i.reportMem })
 }
 
-// TopFamiliesCPU / TopFamiliesMem return the top report_top_n families.
+// TopFamiliesCPU / TopFamiliesMem return the top report_top_families_cpu /
+// report_top_families_mem (default report_top_n) families.
 func (i *Inspector) TopFamiliesCPU() []model.FamilyStats {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return head(i.famCPU, i.cfg.ReportTopN)
+	return head(i.famCPU, i.cfg.EffectiveReportTopFamiliesCPU())
 }
 
 func (i *Inspector) TopFamiliesMem() []model.FamilyStats {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return head(i.famMem, i.cfg.ReportTopN)
+	return head(i.famMem, i.cfg.EffectiveReportTopFamiliesMem())
 }
 
 // AllFamilies returns every family sorted by CPU desc (for Prometheus).
@@ -206,8 +207,8 @@ func (i *Inspector) scan() {
 	i.mu.Lock()
 	i.topCPU = head(byCPU, i.cfg.TopN)
 	i.topMem = head(byMem, i.cfg.TopN)
-	i.reportCPU = head(byCPU, i.cfg.ReportTopN)
-	i.reportMem = head(byMem, i.cfg.ReportTopN)
+	i.reportCPU = head(byCPU, i.cfg.EffectiveReportTopCPU())
+	i.reportMem = head(byMem, i.cfg.EffectiveReportTopMem())
 	i.famCPU = famCPU
 	i.famMem = famMem
 	i.pidFamily = pidFamily
