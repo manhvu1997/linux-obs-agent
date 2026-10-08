@@ -159,6 +159,11 @@ type Accumulator struct {
 	famLabels  labelBudget
 	peerLabels labelBudget
 	portLabels labelBudget // outbound service ports, node-wide
+
+	// drain is the ClickHouse delta accumulator, nil until EnableDrain.
+	drain       map[FlowKey]*drainFlow
+	drainMax    int
+	drainFolded uint64
 }
 
 func NewAccumulator(cfg Config) *Accumulator {
@@ -230,6 +235,9 @@ func (a *Accumulator) Ingest(now time.Time, cur map[FlowKey]FlowValue, pidFamily
 	a.samples = a.samples[cut:]
 
 	for k, d := range deltas {
+		if a.drain != nil {
+			a.addDrain(k, d)
+		}
 		a.active[k] += int64(d.Opened) - int64(d.Closed)
 		if a.active[k] < 0 { // closes of connections opened before we started
 			a.active[k] = 0
