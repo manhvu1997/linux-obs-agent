@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/manhvu1997/linux-obs-agent/internal/chsink"
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	"github.com/manhvu1997/linux-obs-agent/internal/diskscanner"
@@ -49,6 +50,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "clickhouse-schema" {
+		os.Exit(chsink.RunSchemaCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	cfgPath := flag.String("config", "/etc/obs-agent/config.yaml", "path to YAML config file")
 	logLevel := flag.String("loglevel", "", "override log level (debug|info|warn|error)")
 	flag.Parse()
@@ -80,6 +84,7 @@ func main() {
 		"mongo_tracing_enabled", cfg.Mongo.Enabled,
 		"mysql_tracing_enabled", cfg.MySQL.Enabled,
 		"netflow_enabled", cfg.Netflow.Enabled,
+		"clickhouse_enabled", cfg.ClickHouse.Enabled,
 	)
 
 	// Root context wired to OS signals (SIGTERM / SIGINT for systemd).
@@ -118,6 +123,7 @@ func main() {
 			MaxFamilies:        cfg.Netflow.MaxFamilies,
 			MaxOutboundPeers:   cfg.Netflow.MaxOutboundPeers,
 			MaxPeersPerProcess: cfg.Process.MaxPeersPerProcess,
+			MaxInboundPeers:    inboundPeerBudget(cfg.Netflow.MaxInboundPeers),
 		})
 		go netflow.NewAnalyzer(ld, inv, insp, netAcc, cfg.Netflow.PollInterval, cfg.Netflow.ListenRefreshInterval).Run(ctx)
 		netSource, inboundAcct = "ebpf", ld.InboundAccounting()
@@ -226,13 +232,20 @@ func main() {
 		}
 		promExp.RegisterCollectors(promcollect.NewFamilyCollector(insp.AllFamilies, netCounters, cfg.Netflow.MaxFamilies))
 		if cfg.MySQL.Enabled {
-			promExp.RegisterCollectors(promcollect.NewMySQLCollector(mysqlAnalyzer.DigestSnapshot, mysqlAnalyzer.Dropped))
+			promExp.RegisterCollectors(promcollect.NewMySQLCollector(mysqlAnalyzer.DigestSnapshot, mysqlAnalyzer.Dropped,
+				cfg.MySQL.PrometheusDigests, cfg.MySQL.PrometheusMinimalTopN))
 		}
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)
 			}
 		}()
+	}
+
+	// ── ClickHouse export (optional) ────────────────────────────────────────
+	var chDone <-chan struct{}
+	if cfg.ClickHouse.Enabled {
+		chDone = startClickHouse(ctx, cfg, promExp, mysqlAnalyzer, netAcc, insp)
 	}
 
 	// ── eBPF event fan-out loop ─────────────────────────────────────────────
@@ -290,7 +303,13 @@ func main() {
 	for _, id := range ebpfMgr.ActiveModules() {
 		ebpfMgr.Deactivate(id)
 	}
-	_ = shutdownCtx
+	if cfg.ClickHouse.Enabled {
+		select {
+		case <-chDone:
+		case <-shutdownCtx.Done():
+			slog.Warn("clickhouse: final flush did not finish before shutdown timeout")
+		}
+	}
 	slog.Info("obs-agent: stopped")
 }
 
@@ -310,4 +329,13 @@ func setupLogger(level string) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: l,
 	})))
+}
+
+// inboundPeerBudget maps the config's "0 = off" onto netflow's "< 0 = off"
+// (netflow treats 0 as "use the default").
+func inboundPeerBudget(n int) int {
+	if n == 0 {
+		return -1
+	}
+	return n
 }
