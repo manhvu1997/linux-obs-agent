@@ -29,11 +29,15 @@ func startClickHouse(ctx context.Context, cfg *config.Config, promExp *exporter.
 		close(done)
 		return done
 	}
-	pingCtx, cancel := context.WithTimeout(ctx, ch.Timeout)
-	if err := client.Ping(pingCtx); err != nil {
-		slog.Warn("clickhouse: ping failed; rows are buffered and retried", "err", err)
-	}
-	cancel()
+	// Informational only (the sink buffers and retries); never block startup
+	// on an unreachable server.
+	go func() {
+		pingCtx, cancel := context.WithTimeout(ctx, ch.Timeout)
+		defer cancel()
+		if err := client.Ping(pingCtx); err != nil {
+			slog.Warn("clickhouse: ping failed; rows are buffered and retried", "err", err)
+		}
+	}()
 
 	host := cfg.Agent.NodeName
 	if host == "" {
