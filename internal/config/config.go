@@ -13,22 +13,23 @@ import (
 
 // Config is the root configuration object.
 type Config struct {
-	Agent     AgentConfig     `yaml:"agent"`
-	Collect   CollectConfig   `yaml:"collect"`
-	EBPF      EBPFConfig      `yaml:"ebpf"`
-	Trigger   TriggerConfig   `yaml:"trigger"`
-	Exporter  ExporterConfig  `yaml:"exporter"`
-	Process   ProcessConfig   `yaml:"process"`
-	DiskScan  DiskScanConfig  `yaml:"disk_scan"`
-	RunQueue  RunQueueConfig  `yaml:"runq"`
-	OffCPU    OffCPUConfig    `yaml:"offcpu"`
-	IODiag    IODiagConfig    `yaml:"io_diag"`
-	Profile   ProfileConfig   `yaml:"profile"`
-	Fsync     FsyncConfig     `yaml:"fsync"`
-	Writeback WritebackConfig `yaml:"writeback"`
-	Mongo     MongoConfig     `yaml:"mongo"`
-	MySQL     MySQLConfig     `yaml:"mysql"`
-	Netflow   NetflowConfig   `yaml:"netflow"`
+	Agent      AgentConfig      `yaml:"agent"`
+	Collect    CollectConfig    `yaml:"collect"`
+	EBPF       EBPFConfig       `yaml:"ebpf"`
+	Trigger    TriggerConfig    `yaml:"trigger"`
+	Exporter   ExporterConfig   `yaml:"exporter"`
+	Process    ProcessConfig    `yaml:"process"`
+	DiskScan   DiskScanConfig   `yaml:"disk_scan"`
+	RunQueue   RunQueueConfig   `yaml:"runq"`
+	OffCPU     OffCPUConfig     `yaml:"offcpu"`
+	IODiag     IODiagConfig     `yaml:"io_diag"`
+	Profile    ProfileConfig    `yaml:"profile"`
+	ClickHouse ClickHouseConfig `yaml:"clickhouse"`
+	Fsync      FsyncConfig      `yaml:"fsync"`
+	Writeback  WritebackConfig  `yaml:"writeback"`
+	Mongo      MongoConfig      `yaml:"mongo"`
+	MySQL      MySQLConfig      `yaml:"mysql"`
+	Netflow    NetflowConfig    `yaml:"netflow"`
 }
 
 type AgentConfig struct {
@@ -379,6 +380,12 @@ type NetflowConfig struct {
 //
 // Feature flag: set MYSQL_TRACING_ENABLED=true or mysql.enabled: true.
 type MySQLConfig struct {
+	// PrometheusDigests: full (sticky set, 4 counters + info), minimal
+	// (top PrometheusMinimalTopN by CPU, cpu+calls, plus "other") or off.
+	// Env MYSQL_PROMETHEUS_DIGESTS. ClickHouse holds the full detail.
+	PrometheusDigests     string `yaml:"prometheus_digests"`
+	PrometheusMinimalTopN int    `yaml:"prometheus_minimal_top_n"`
+
 	// Enabled is the master switch for the MySQL tracer.
 	// Default false – zero overhead when disabled.
 	Enabled bool `yaml:"enabled"`
@@ -545,13 +552,15 @@ func Defaults() *Config {
 			MaxRecentQueries:     100,
 		},
 		MySQL: MySQLConfig{
-			Enabled:              false, // off by default; zero overhead when disabled
-			MysqldPath:           "/usr/sbin/mysqld",
-			SlowQueryThresholdMs: 100, // 100 ms
-			PollInterval:         5 * time.Second,
-			TopN:                 20,
-			StaleSeconds:         60,
-			MaxRecentQueries:     100,
+			PrometheusDigests:     DigestsFull,
+			PrometheusMinimalTopN: 20,
+			Enabled:               false, // off by default; zero overhead when disabled
+			MysqldPath:            "/usr/sbin/mysqld",
+			SlowQueryThresholdMs:  100, // 100 ms
+			PollInterval:          5 * time.Second,
+			TopN:                  20,
+			StaleSeconds:          60,
+			MaxRecentQueries:      100,
 
 			EmitAllQueries:         true,
 			SampleQueries:          true,
@@ -574,6 +583,7 @@ func Defaults() *Config {
 			MaxOutboundPeers:      100,
 			MaxInboundPeers:       100,
 		},
+		ClickHouse: defaultClickHouse(),
 	}
 }
 
@@ -584,6 +594,10 @@ func Load(path string) (*Config, error) {
 		applyMongoEnvOverrides(cfg)
 		applyMySQLEnvOverrides(cfg)
 		applyNetflowEnvOverrides(cfg)
+		applyClickHouseEnvOverrides(cfg)
+		if err := cfg.validateExport(); err != nil {
+			return nil, fmt.Errorf("invalid config: %w", err)
+		}
 		return cfg, nil
 	}
 
@@ -600,6 +614,7 @@ func Load(path string) (*Config, error) {
 	applyRunQueueEnvOverrides(cfg)
 	applyOffCPUEnvOverrides(cfg)
 	applyProfileEnvOverrides(cfg)
+	applyClickHouseEnvOverrides(cfg)
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -637,6 +652,9 @@ func applyMongoEnvOverrides(cfg *Config) {
 //	MYSQL_SLOW_QUERY_THRESHOLD_MS=N         – slow threshold in milliseconds
 //	MYSQL_MYSQLD_PATH=/path/to/mysqld       – path to mysqld binary
 func applyMySQLEnvOverrides(cfg *Config) {
+	if v := os.Getenv("MYSQL_PROMETHEUS_DIGESTS"); v != "" {
+		cfg.MySQL.PrometheusDigests = v
+	}
 	if v := os.Getenv("MYSQL_TRACING_ENABLED"); v != "" {
 		cfg.MySQL.Enabled = v == "true" || v == "1" || v == "yes"
 	}
@@ -795,6 +813,9 @@ func (c *Config) validate() error {
 		if c.Profile.DefaultDuration <= 0 || c.Profile.DefaultDuration > c.Profile.MaxDuration {
 			return fmt.Errorf("profile.default_duration must be in (0, profile.max_duration]")
 		}
+	}
+	if err := c.validateExport(); err != nil {
+		return err
 	}
 	return nil
 }
