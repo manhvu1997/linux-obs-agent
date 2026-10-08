@@ -22,6 +22,7 @@ import (
 
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
+	"github.com/manhvu1997/linux-obs-agent/internal/drain"
 	mysqlq "github.com/manhvu1997/linux-obs-agent/internal/ebpf/mysql_query"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
@@ -45,6 +46,10 @@ type Analyzer struct {
 	// recentMu protects recentSlowQueries.
 	recentMu          sync.Mutex
 	recentSlowQueries []model.MySQLSlowEvent
+
+	// slowDrain feeds the ClickHouse mysql_slow_queries table; disabled
+	// (zero value) unless the ClickHouse export is on.
+	slowDrain drain.Buffer[model.MySQLSlowEvent]
 }
 
 // NewAnalyzer creates an Analyzer.  Call Start to begin tracing.
@@ -234,11 +239,6 @@ func (a *Analyzer) poll() {
 // drainSlowEvents consumes the ringbuf slow-event channel, appends to the
 // recent ring (capped at MaxRecentQueries), and logs at Warn level.
 func (a *Analyzer) drainSlowEvents(ctx context.Context) {
-	maxRecent := a.cfg.MaxRecentQueries
-	if maxRecent <= 0 {
-		maxRecent = 100
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -259,14 +259,36 @@ func (a *Analyzer) drainSlowEvents(ctx context.Context) {
 				"query", slow.Query,
 			)
 
-			a.recentMu.Lock()
-			a.recentSlowQueries = append(a.recentSlowQueries, slow)
-			// Keep only the most recent maxRecent entries.
-			if len(a.recentSlowQueries) > maxRecent {
-				excess := len(a.recentSlowQueries) - maxRecent
-				a.recentSlowQueries = a.recentSlowQueries[excess:]
-			}
-			a.recentMu.Unlock()
+			a.recordSlow(slow)
 		}
 	}
+}
+
+// EnableSlowDrain makes every slow event also available to DrainSlowQueries,
+// at most max per drain interval.
+func (a *Analyzer) EnableSlowDrain(max int) { a.slowDrain.Enable(max) }
+
+// DrainSlowQueries returns the slow events since the previous call and how
+// many were discarded over the per-interval cap.
+func (a *Analyzer) DrainSlowQueries() ([]model.MySQLSlowEvent, uint64) { return a.slowDrain.Drain() }
+
+// EnableDigestDrain / DrainDigests expose the digest aggregator's drain.
+func (a *Analyzer) EnableDigestDrain(maxKeys int) { a.agg.EnableDrain(maxKeys) }
+func (a *Analyzer) DrainDigests() ([]querystats.DigestDelta, uint64) {
+	return a.agg.DrainDigests()
+}
+
+// recordSlow appends one slow event to the recent ring and the drain.
+func (a *Analyzer) recordSlow(slow model.MySQLSlowEvent) {
+	maxRecent := a.cfg.MaxRecentQueries
+	if maxRecent <= 0 {
+		maxRecent = 100
+	}
+	a.recentMu.Lock()
+	a.recentSlowQueries = append(a.recentSlowQueries, slow)
+	if len(a.recentSlowQueries) > maxRecent {
+		a.recentSlowQueries = a.recentSlowQueries[len(a.recentSlowQueries)-maxRecent:]
+	}
+	a.recentMu.Unlock()
+	a.slowDrain.Add(slow)
 }
