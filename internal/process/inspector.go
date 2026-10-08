@@ -50,6 +50,11 @@ type Inspector struct {
 	pidFamily map[uint32]string
 	prev      map[uint32]prevSample
 	memTotal  uint64
+
+	// famDrain folds every scan's families for the ClickHouse family_stats
+	// table; nil until EnableFamilyDrain. Own lock: scan holds mu briefly.
+	drainMu  sync.Mutex
+	famDrain map[string]*famAcc
 }
 
 func NewInspector(cfg *config.ProcessConfig) *Inspector {
@@ -207,6 +212,7 @@ func (i *Inspector) scan() {
 	i.famMem = famMem
 	i.pidFamily = pidFamily
 	i.mu.Unlock()
+	i.observeFamilies(fams)
 }
 
 func sortedProcs(all []model.ProcessStats, less func(a, b model.ProcessStats) bool) []model.ProcessStats {
