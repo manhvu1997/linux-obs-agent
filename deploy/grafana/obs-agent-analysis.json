@@ -1,0 +1,693 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_CLICKHOUSE",
+      "label": "ClickHouse",
+      "type": "datasource",
+      "pluginId": "grafana-clickhouse-datasource"
+    }
+  ],
+  "uid": "obs-agent-analysis",
+  "title": "obs-agent MySQL & Network Analysis",
+  "tags": [
+    "obs-agent",
+    "clickhouse"
+  ],
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "",
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${DS_CLICKHOUSE}"
+        },
+        "query": "SELECT DISTINCT host FROM obs.family_stats WHERE $__timeFilter(window_end) ORDER BY host",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      },
+      {
+        "name": "family",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${DS_CLICKHOUSE}"
+        },
+        "query": "SELECT DISTINCT family FROM obs.family_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) ORDER BY family",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      },
+      {
+        "name": "digest",
+        "label": "Digest id (drill-down)",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "value": ""
+        }
+      }
+    ]
+  },
+  "links": [
+    {
+      "targetBlank": true,
+      "title": "obs-agent Overview (Prometheus)",
+      "type": "link",
+      "url": "/d/obs-agent-overview/obs-agent-overview?$__url_time_range"
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "MySQL digests",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Top digests by CPU",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS calls,\n  sum(s.cpu_ns) / 1e9 AS cpuSec,\n  sum(s.cpu_ns) / greatest(sum(s.calls), 1) / 1e6 AS cpuMsAvg,\n  sum(s.runq_ns) / greatest(sum(s.calls), 1) / 1e6 AS runqMsAvg,\n  sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS wallMsAvg,\n  sum(s.bytes_out) AS bytesOut\nFROM obs.mysql_digest_stats AS s\nLEFT JOIN (SELECT digest_id, digest_text FROM obs.mysql_digest_text FINAL) AS t ON t.digest_id = s.digest_id\nWHERE $__timeFilter(s.window_end) AND s.host IN (${host:singlequote})\nGROUP BY s.digest_id ORDER BY cpuSec DESC LIMIT 50",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "CPU of the top 10 digests (cores)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(window_end) AS time, digest_id AS digest,\n  sum(cpu_ns) / 1e9 / $__interval_s AS cores\nFROM obs.mysql_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n  AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n                    GROUP BY digest_id ORDER BY sum(cpu_ns) DESC LIMIT 10)\nGROUP BY time, digest ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "CPU regression vs 7 days earlier",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT digest_id AS digest,\n  sumIf(cpu_ns, $__timeFilter(window_end)) / 1e9 AS cpuSecNow,\n  sumIf(cpu_ns, window_end >= $__fromTime - INTERVAL 7 DAY AND window_end < $__toTime - INTERVAL 7 DAY) / 1e9 AS cpuSecWeekAgo,\n  cpuSecNow / greatest(cpuSecWeekAgo, 0.001) AS ratio\nFROM obs.mysql_digest_stats\nWHERE (window_end >= $__fromTime - INTERVAL 7 DAY) AND host IN (${host:singlequote})\n  AND ($__timeFilter(window_end) OR window_end < $__toTime - INTERVAL 7 DAY)\nGROUP BY digest_id HAVING cpuSecNow > 1 ORDER BY ratio DESC LIMIT 30",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Digest drill-down (set the digest variable)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Calls and average latency",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(window_end) AS time, sum(calls) AS calls,\n  sum(cpu_ns) / greatest(sum(calls), 1) / 1e6 AS cpuMsAvg,\n  sum(wall_ns) / greatest(sum(calls), 1) / 1e6 AS wallMsAvg,\n  sum(runq_ns) / greatest(sum(calls), 1) / 1e6 AS runqMsAvg\nFROM obs.mysql_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND digest_id = '${digest}'\nGROUP BY time ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Per host",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT host, sum(calls) AS calls, sum(cpu_ns) / 1e9 AS cpuSec,\n  sum(wall_ns) / greatest(sum(calls), 1) / 1e6 AS wallMsAvg\nFROM obs.mysql_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND digest_id = '${digest}'\nGROUP BY host ORDER BY cpuSec DESC",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Slow queries",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Latest slow queries (digest filter optional)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT ts, host, pid, latency_ms AS latencyMs, digest_id AS digest, query\nFROM obs.mysql_slow_queries\nWHERE $__timeFilter(ts) AND host IN (${host:singlequote}) AND ('${digest}' = '' OR digest_id = '${digest}')\nORDER BY ts DESC LIMIT 200",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Slow queries per interval",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, host, count() AS slow\nFROM obs.mysql_slow_queries\nWHERE $__timeFilter(ts) AND host IN (${host:singlequote})\nGROUP BY time, host ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "Process families",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Family CPU (avg)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(window_end) AS time, family, avg(cpu_percent_avg) AS cpu\nFROM obs.family_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, family ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Family RSS (max)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(window_end) AS time, family, max(rss_bytes_max) AS rss\nFROM obs.family_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, family ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Top families",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT host, family, avg(cpu_percent_avg) AS cpuAvg, max(cpu_percent_max) AS cpuMax,\n  max(rss_bytes_max) AS rssMax, max(processes_max) AS processes\nFROM obs.family_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY host, family ORDER BY cpuAvg DESC LIMIT 50",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "Network",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "table",
+      "title": "Top inbound clients",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT replaceRegexpOne(toString(peer_ip), '^::ffff:', '') AS peer, service_port AS port, family,\n  sum(bytes_rx + bytes_tx) AS bytes, sum(conns_opened) AS conns\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote}) AND direction = 'inbound'\nGROUP BY peer, port, family ORDER BY bytes DESC LIMIT 50",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "type": "table",
+      "title": "Top outbound peers",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT replaceRegexpOne(toString(peer_ip), '^::ffff:', '') AS peer, service_port AS port, family,\n  sum(bytes_rx + bytes_tx) AS bytes, sum(conns_opened) AS conns\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote}) AND direction = 'outbound'\nGROUP BY peer, port, family ORDER BY bytes DESC LIMIT 50",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "TCP bytes by direction",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 69
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(window_end) AS time, direction,\n  sum(bytes_rx + bytes_tx) AS bytes\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, direction ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "table",
+      "title": "Who talks to MySQL (inbound :3306)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 69
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT host, replaceRegexpOne(toString(peer_ip), '^::ffff:', '') AS client, sum(bytes_rx) AS bytesIn,\n  sum(bytes_tx) AS bytesOut, sum(conns_opened) AS conns\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND direction = 'inbound' AND service_port = 3306\nGROUP BY host, client ORDER BY bytesOut DESC LIMIT 50",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Diagnose snapshots",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 77
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "type": "table",
+      "title": "Snapshots (fetch one with the query in deploy/grafana/README.md)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "format": 1,
+          "rawSql": "SELECT ts, host, reason, verdict, length(report) AS reportBytes\nFROM obs.diagnose_snapshots\nWHERE $__timeFilter(ts) AND host IN (${host:singlequote})\nORDER BY ts DESC LIMIT 100",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
