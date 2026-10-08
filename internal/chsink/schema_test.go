@@ -2,6 +2,7 @@ package chsink
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"os"
 	"strings"
@@ -103,5 +104,16 @@ func TestRunSchemaCommand(t *testing.T) {
 	errb.Reset()
 	if code := RunSchemaCommand([]string{"-database", "bad-name"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "database") {
 		t.Fatalf("bad database: exit %d stderr %q", code, errb.String())
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+func TestRunSchemaCommandStdoutWriteError(t *testing.T) {
+	var errb bytes.Buffer
+	if code := RunSchemaCommand(nil, failWriter{}, &errb); code != 1 || !strings.Contains(errb.String(), "broken pipe") {
+		t.Fatalf("exit %d, stderr %q; want 1 and the write error", code, errb.String())
 	}
 }

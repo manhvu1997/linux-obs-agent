@@ -102,7 +102,7 @@ func AlterTTLDDL(o SchemaOptions) (string, error) {
 }
 
 // RunSchemaCommand implements `obs-agent clickhouse-schema`. Exit codes:
-// 0 ok, 2 bad arguments.
+// 0 ok, 1 output write failed, 2 bad arguments.
 func RunSchemaCommand(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("clickhouse-schema", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -117,11 +117,11 @@ func RunSchemaCommand(args []string, stdout, stderr io.Writer) int {
 	o := SchemaOptions{Database: *db}
 	var err error
 	if o.RetentionDays, err = ParseRetentionDays(*ret); err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
 	if o.SnapshotRetentionDays, err = ParseRetentionDays(*snap); err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
 	gen := CreateDDL
@@ -130,10 +130,13 @@ func RunSchemaCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	out, err := gen(o)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	fmt.Fprint(stdout, out)
+	if _, err := fmt.Fprint(stdout, out); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
 	return 0
 }
 
