@@ -49,7 +49,7 @@ type Analyzer struct {
 
 	// slowDrain feeds the ClickHouse mysql_slow_queries table; disabled
 	// (zero value) unless the ClickHouse export is on.
-	slowDrain drain.Buffer[model.MySQLSlowEvent]
+	slowDrain drain.Buffer[model.SlowQuery]
 }
 
 // NewAnalyzer creates an Analyzer.  Call Start to begin tracing.
@@ -154,14 +154,29 @@ var systemSchemaDigest = func() sqldigest.Digest {
 	return sqldigest.Digest{ID: sqldigest.HashID(text), Text: text, Normalized: true}
 }()
 
+// foldSystem applies the mysql.fold_system_schemas rule to a digest; shared by
+// toEvent and recordSlow so both paths agree on the id.
+func (a *Analyzer) foldSystem(d sqldigest.Digest) (sqldigest.Digest, bool) {
+	if a.cfg.FoldSystemSchemas && sqldigest.ReferencesSystemSchema(d.Text) {
+		return systemSchemaDigest, true
+	}
+	return d, false
+}
+
+// slowDigestID is the digest id the command path gives the same text.
+func (a *Analyzer) slowDigestID(text string) string {
+	d, _ := a.foldSystem(cmdmap.SlowDigest(text))
+	return d.ID
+}
+
 // toEvent classifies one command. With mysql.sample_queries off the raw
 // statement text (which carries literals) is never stored. preparedTracking
 // is the loader's PreparedTextTracking(), a parameter so this stays testable
 // without a loaded eBPF module.
 func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time, preparedTracking bool) querystats.Event {
 	class, d, sample, trunc := cmdmap.Classify(ev.Command, ev.Query, ev.QueryLen, preparedTracking)
-	if a.cfg.FoldSystemSchemas && sqldigest.ReferencesSystemSchema(d.Text) {
-		d, sample, trunc = systemSchemaDigest, "", false
+	if folded, ok := a.foldSystem(d); ok {
+		d, sample, trunc = folded, "", false
 	}
 	if !a.cfg.SampleQueries {
 		sample = ""
@@ -270,7 +285,7 @@ func (a *Analyzer) EnableSlowDrain(max int) { a.slowDrain.Enable(max) }
 
 // DrainSlowQueries returns the slow events since the previous call and how
 // many were discarded over the per-interval cap.
-func (a *Analyzer) DrainSlowQueries() ([]model.MySQLSlowEvent, uint64) { return a.slowDrain.Drain() }
+func (a *Analyzer) DrainSlowQueries() ([]model.SlowQuery, uint64) { return a.slowDrain.Drain() }
 
 // EnableDigestDrain / DrainDigests expose the digest aggregator's drain.
 func (a *Analyzer) EnableDigestDrain(maxKeys int) { a.agg.EnableDrain(maxKeys) }
@@ -290,5 +305,5 @@ func (a *Analyzer) recordSlow(slow model.MySQLSlowEvent) {
 		a.recentSlowQueries = a.recentSlowQueries[len(a.recentSlowQueries)-maxRecent:]
 	}
 	a.recentMu.Unlock()
-	a.slowDrain.Add(slow)
+	a.slowDrain.Add(model.SlowQuery{Event: slow, DigestID: a.slowDigestID(slow.Query)})
 }

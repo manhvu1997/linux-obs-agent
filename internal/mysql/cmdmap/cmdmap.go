@@ -71,6 +71,16 @@ func Classify(command uint32, query string, queryLen uint32, preparedTracking bo
 	}
 }
 
+// SlowDigest returns the digest the command path (Classify) assigns to the
+// text of a slow event as produced by SlowQueryText: placeholder texts
+// ("<...>") hash as placeholders, everything else is normalised.
+func SlowDigest(text string) sqldigest.Digest {
+	if strings.HasPrefix(text, "<") && strings.HasSuffix(text, ">") {
+		return placeholder(text)
+	}
+	return sqldigest.Normalize(text)
+}
+
 func placeholder(text string) sqldigest.Digest {
 	return sqldigest.Digest{ID: sqldigest.HashID(text), Text: text, Normalized: true}
 }

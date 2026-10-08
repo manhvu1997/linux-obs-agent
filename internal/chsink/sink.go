@@ -22,7 +22,7 @@ const digestTextMemory = 50_000
 type Sources struct {
 	Digests  func() ([]querystats.DigestDelta, uint64)
 	Flows    func() ([]netflow.FlowDelta, uint64)
-	Slow     func() ([]model.MySQLSlowEvent, uint64)
+	Slow     func() ([]model.SlowQuery, uint64)
 	Families func() []process.FamilyWindow
 	Comm     func(pid uint32) string
 }

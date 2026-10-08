@@ -89,9 +89,10 @@ func TestIDSetClearsWhenFull(t *testing.T) {
 }
 
 func TestSlowRowsPrivacy(t *testing.T) {
-	ev := []model.MySQLSlowEvent{{PID: 1, TID: 2, Comm: "mysqld", LatencyMs: 900,
-		Query: "select * from users where pw = 'secret'", Timestamp: time.Unix(1_800_000_000, 5_000_000)}}
-	d := sqldigest.Normalize(ev[0].Query)
+	ev := []model.SlowQuery{{Event: model.MySQLSlowEvent{PID: 1, TID: 2, Comm: "mysqld", LatencyMs: 900,
+		Query: "select * from users where pw = 'secret'", Timestamp: time.Unix(1_800_000_000, 5_000_000)}}}
+	d := sqldigest.Normalize(ev[0].Event.Query)
+	ev[0].DigestID = d.ID
 	rows := slowRows("h", ev, false)
 	if strings.Contains(rows[0].Query, "secret") || rows[0].Query != d.Text || rows[0].DigestID != d.ID {
 		t.Fatalf("stripped row = %+v", rows[0])
@@ -99,8 +100,22 @@ func TestSlowRowsPrivacy(t *testing.T) {
 	if !strings.HasSuffix(rows[0].TS, ".005") {
 		t.Fatalf("ts = %q, want millisecond precision", rows[0].TS)
 	}
-	if raw := slowRows("h", ev, true); raw[0].Query != ev[0].Query {
+	if raw := slowRows("h", ev, true); raw[0].Query != ev[0].Event.Query {
 		t.Fatalf("include raw: %q", raw[0].Query)
+	}
+}
+
+func TestSlowRowsKeepSuppliedDigestID(t *testing.T) {
+	ev := []model.SlowQuery{
+		{DigestID: "ph-id", Event: model.MySQLSlowEvent{Query: "<COM_STMT_EXECUTE: prepared, text unavailable>"}},
+		{DigestID: "sys-id", Event: model.MySQLSlowEvent{Query: "select * from information_schema.tables where n = 'secret'"}},
+	}
+	rows := slowRows("h", ev, false)
+	if rows[0].DigestID != "ph-id" || rows[1].DigestID != "sys-id" {
+		t.Fatalf("ids = %q %q, want supplied ids kept", rows[0].DigestID, rows[1].DigestID)
+	}
+	if strings.Contains(rows[1].Query, "secret") {
+		t.Fatalf("system-schema row leaks literal: %q", rows[1].Query)
 	}
 }
 

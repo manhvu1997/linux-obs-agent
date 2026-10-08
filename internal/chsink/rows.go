@@ -137,17 +137,22 @@ func textRows(d []querystats.DigestDelta, seen *idSet, includeSample bool, now t
 
 // slowRows keeps the raw statement only when includeRaw; otherwise the
 // literal-free digest text, so the row stays useful without secrets.
-func slowRows(host string, ev []model.MySQLSlowEvent, includeRaw bool) []SlowQueryRow {
+//
+// DigestID is taken from the item (the analyzer computed it exactly as the
+// command path does, including placeholder and system-schema folding). The
+// stripped query column is the normalised text of the event's query, which
+// is literal-free for every case, including placeholders.
+func slowRows(host string, ev []model.SlowQuery, includeRaw bool) []SlowQueryRow {
 	rows := make([]SlowQueryRow, 0, len(ev))
-	for _, e := range ev {
-		d := sqldigest.Normalize(e.Query)
-		q := d.Text
+	for _, it := range ev {
+		e := it.Event
+		q := sqldigest.Normalize(e.Query).Text
 		if includeRaw {
 			q = e.Query
 		}
 		rows = append(rows, SlowQueryRow{
 			TS: chTime64(e.Timestamp), Host: host, PID: e.PID, TID: e.TID, Comm: e.Comm,
-			LatencyMs: e.LatencyMs, DigestID: d.ID, Query: q,
+			LatencyMs: e.LatencyMs, DigestID: it.DigestID, Query: q,
 		})
 	}
 	return rows

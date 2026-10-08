@@ -956,6 +956,14 @@ type MySQLSlowEvent struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// SlowQuery is a slow event paired with the digest id the command path assigns
+// to the same text (placeholder and system-schema folding included), so
+// exported slow rows join mysql_digest_text. Not part of any JSON payload.
+type SlowQuery struct {
+	Event    MySQLSlowEvent
+	DigestID string
+}
+
 // MySQLProcessStats holds aggregated per-PID query statistics enriched with
 // /proc metadata by the userspace analyzer.
 type MySQLProcessStats struct {

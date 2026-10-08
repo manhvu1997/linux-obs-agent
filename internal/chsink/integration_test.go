@@ -88,8 +88,8 @@ func TestIntegrationRoundTrip(t *testing.T) {
 			return []netflow.FlowDelta{{TGID: 9, Family: "mysql.service", Direction: "inbound",
 				Peer: netip.MustParseAddr("10.0.0.2"), ServicePort: 3306, BytesRx: 10, BytesTx: 100, Opened: 1}}, 0
 		},
-		Slow: func() ([]model.MySQLSlowEvent, uint64) {
-			return []model.MySQLSlowEvent{{PID: 1, TID: 2, Comm: "mysqld", LatencyMs: 900, Query: "select 1", Timestamp: time.Now()}}, 0
+		Slow: func() ([]model.SlowQuery, uint64) {
+			return []model.SlowQuery{{DigestID: "d1", Event: model.MySQLSlowEvent{PID: 1, TID: 2, Comm: "mysqld", LatencyMs: 900, Query: "select 1", Timestamp: time.Now()}}}, 0
 		},
 		Families: func() []process.FamilyWindow {
 			return []process.FamilyWindow{{Family: "mysql.service", CPUPercentAvg: 5}}

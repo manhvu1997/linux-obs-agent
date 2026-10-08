@@ -112,3 +112,23 @@ func TestSlowQueryText(t *testing.T) {
 		}
 	}
 }
+
+func TestSlowDigestMatchesClassify(t *testing.T) {
+	for _, tc := range []struct {
+		cmd   uint32
+		query string
+		track bool
+	}{
+		{ComQuery, "SELECT * FROM t WHERE id = 5", false},
+		{ComQuery, "", false},
+		{ComStmtExecute, "", true},
+		{ComStmtExecute, "", false},
+		{ComStmtExecute, "select a from t where b = 1", true},
+	} {
+		_, want, _, _ := Classify(tc.cmd, tc.query, uint32(len(tc.query)), tc.track)
+		got := SlowDigest(SlowQueryText(tc.cmd, tc.query, tc.track))
+		if got.ID != want.ID {
+			t.Errorf("cmd %d %q: slow id %s != command id %s", tc.cmd, tc.query, got.ID, want.ID)
+		}
+	}
+}
