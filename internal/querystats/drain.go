@@ -87,4 +87,9 @@ func (a *Aggregator) addDrain(e Event) {
 		}
 	}
 	x.add(e)
+	if k.id == OtherDigestID {
+		// The overflow bucket mixes unrelated statements; a sample of the
+		// first one would be arbitrary and misleading.
+		x.sample = ""
+	}
 }

@@ -55,8 +55,10 @@ func TestDrainCapFoldsIntoOther(t *testing.T) {
 	a := New(Config{})
 	a.EnableDrain(1)
 	a.Add(dEv(1, "d1", 1))
-	a.Add(dEv(1, "d2", 2))
-	a.Add(dEv(1, "d3", 3))
+	e2, e3 := dEv(1, "d2", 2), dEv(1, "d3", 3)
+	e2.SampleQuery, e3.SampleQuery = "select 'secret2'", "select 'secret3'"
+	a.Add(e2)
+	a.Add(e3)
 	out, folded := a.DrainDigests()
 	if folded != 2 {
 		t.Fatalf("folded = %d, want 2", folded)
@@ -74,6 +76,9 @@ func TestDrainCapFoldsIntoOther(t *testing.T) {
 	}
 	if other == nil || other.Calls != 2 || other.Text != OtherDigestText || other.PID != 1 {
 		t.Fatalf("other = %+v", other)
+	}
+	if other.Sample != "" {
+		t.Fatalf("overflow entry must carry no sample, got %q", other.Sample)
 	}
 }
 
