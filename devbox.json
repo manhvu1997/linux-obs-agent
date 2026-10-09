@@ -2,8 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.1/.schema/devbox.schema.json",
   "packages": [
     "go@1.26.1",
-    "shellcheck@latest",
-    "llvmPackages_18.clang-unwrapped@18.1.8"
+    "shellcheck@latest"
   ],
   "shell": {
     "init_hook": [
