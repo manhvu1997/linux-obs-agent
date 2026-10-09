@@ -52,6 +52,13 @@
         "current": {
           "value": ""
         }
+      },
+      {
+        "name": "flush_s",
+        "label": "ClickHouse flush interval (s)",
+        "type": "constant",
+        "query": "60",
+        "hide": 2
       }
     ]
   },
@@ -105,7 +112,7 @@
             "uid": "${ds_clickhouse}"
           },
           "format": 1,
-          "rawSql": "SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,\n  sum(s.cpu_ns) / 1e9 AS cpuSec,\n  sum(s.cpu_ns) / 1e9 / greatest(dateDiff('second', $__fromTime, $__toTime), 1) AS cpuCores,\n  100 * sum(s.cpu_ns) / greatest(sum(sum(s.cpu_ns)) OVER (), 1) AS cpuSharePct,\n  sum(s.cpu_ns) / greatest(sum(s.calls), 1) / 1e6 AS cpuMsAvg,\n  sum(s.runq_ns) / greatest(sum(s.calls), 1) / 1e6 AS runqMsAvg,\n  sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS wallMsAvg,\n  max(s.wall_max_ns) / 1e6 AS wallMsMax,\n  sum(s.bytes_out) / greatest(sum(s.calls), 1) AS bytesOutAvg,\n  sum(s.bytes_out) AS bytesOut\nFROM obs.mysql_digest_stats AS s\nLEFT JOIN (SELECT digest_id, digest_text FROM obs.mysql_digest_text FINAL) AS t ON t.digest_id = s.digest_id\nWHERE $__timeFilter(s.window_end) AND s.host IN (${host:singlequote})\nGROUP BY s.digest_id ORDER BY cpuSec DESC LIMIT 50",
+          "rawSql": "SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,\n  sum(s.cpu_ns) / 1e9 AS cpuSec,\n  sum(s.cpu_ns) / 1e9 / greatest(dateDiff('second', $__fromTime, $__toTime), 1) AS cpuCores,\n  max(s.cpu_ns / greatest(dateDiff('second', s.window_start, s.window_end), 1)) / 1e9 AS peakCores,\n  100 * sum(s.cpu_ns) / greatest(sum(sum(s.cpu_ns)) OVER (), 1) AS cpuSharePct,\n  sum(s.cpu_ns) / greatest(sum(s.calls), 1) / 1e6 AS cpuMsAvg,\n  sum(s.runq_ns) / greatest(sum(s.calls), 1) / 1e6 AS runqMsAvg,\n  sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS wallMsAvg,\n  max(s.wall_max_ns) / 1e6 AS wallMsMax,\n  sum(s.bytes_out) / greatest(sum(s.calls), 1) AS bytesOutAvg,\n  sum(s.bytes_out) AS bytesOut\nFROM obs.mysql_digest_stats AS s\nLEFT JOIN (SELECT digest_id, digest_text FROM obs.mysql_digest_text FINAL) AS t ON t.digest_id = s.digest_id\nWHERE $__timeFilter(s.window_end) AND s.host IN (${host:singlequote})\nGROUP BY s.digest_id ORDER BY cpuSec DESC LIMIT 50",
           "editorType": "sql",
           "queryType": "table"
         }
@@ -213,7 +220,7 @@
           }
         ]
       },
-      "description": "cpuCores: average cores busy over the selected time range (1 = one core; understated when data does not cover the whole range). cpuSharePct: share of all query CPU of the selected hosts. wall ≈ cpu: the query itself is expensive; runq ≫ cpu: it waited for CPU (victim); wall ≫ cpu + runq: it waited on locks or I/O. bytesOutAvg: result size per call. Whether a digest overloaded the node (needs node CPU and process families) is in mysql_report.overload_cause, see the Snapshots table."
+      "description": "cpuCores: average cores busy over the selected time range (1 = one core; understated when data does not cover the whole range), so a short burst is diluted on a long range. peakCores: the highest rate of one flush interval on one host — sort by it to find bursts. cpuSharePct: share of all query CPU of the selected hosts. wall ≈ cpu: the query itself is expensive; runq ≫ cpu: it waited for CPU (victim); wall ≫ cpu + runq: it waited on locks or I/O. bytesOutAvg: result size per call. Whether a digest overloaded the node (needs node CPU and process families) is in mysql_report.overload_cause, see the Snapshots table."
     },
     {
       "id": 3,
@@ -237,7 +244,7 @@
             "uid": "${ds_clickhouse}"
           },
           "format": 0,
-          "rawSql": "SELECT $__timeInterval(window_end) AS time, digest_id AS digest,\n  sum(cpu_ns) / 1e9 / $__interval_s AS cores\nFROM obs.mysql_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n  AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n                    GROUP BY digest_id ORDER BY sum(cpu_ns) DESC LIMIT 10)\nGROUP BY time, digest ORDER BY time",
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, digest_id AS digest,\n  sum(cpu_ns) / 1e9 / greatest($__interval_s, ${flush_s}) AS cores\nFROM obs.mysql_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n  AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n                    GROUP BY digest_id ORDER BY sum(cpu_ns) DESC LIMIT 10)\nGROUP BY time, digest ORDER BY time",
           "editorType": "sql",
           "queryType": "timeseries"
         }
@@ -305,7 +312,7 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Calls and average latency",
+      "title": "Calls per second and average latency",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -324,7 +331,7 @@
             "uid": "${ds_clickhouse}"
           },
           "format": 0,
-          "rawSql": "SELECT $__timeInterval(window_end) AS time, sum(calls) AS callCount,\n  sum(cpu_ns) / greatest(sum(calls), 1) / 1e6 AS cpuMsAvg,\n  sum(wall_ns) / greatest(sum(calls), 1) / 1e6 AS wallMsAvg,\n  sum(runq_ns) / greatest(sum(calls), 1) / 1e6 AS runqMsAvg\nFROM obs.mysql_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND digest_id = '${digest}'\nGROUP BY time ORDER BY time",
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, sum(calls) / greatest($__interval_s, ${flush_s}) AS callsPerSec,\n  sum(cpu_ns) / greatest(sum(calls), 1) / 1e6 AS cpuMsAvg,\n  sum(wall_ns) / greatest(sum(calls), 1) / 1e6 AS wallMsAvg,\n  sum(runq_ns) / greatest(sum(calls), 1) / 1e6 AS runqMsAvg\nFROM obs.mysql_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND digest_id = '${digest}'\nGROUP BY time ORDER BY time",
           "editorType": "sql",
           "queryType": "timeseries"
         }
@@ -498,7 +505,7 @@
             "uid": "${ds_clickhouse}"
           },
           "format": 0,
-          "rawSql": "SELECT $__timeInterval(window_end) AS time, family, avg(cpu_percent_avg) AS cpu\nFROM obs.family_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, family ORDER BY time",
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, family, avg(cpu_percent_avg) AS cpu\nFROM obs.family_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, family ORDER BY time",
           "editorType": "sql",
           "queryType": "timeseries"
         }
@@ -532,7 +539,7 @@
             "uid": "${ds_clickhouse}"
           },
           "format": 0,
-          "rawSql": "SELECT $__timeInterval(window_end) AS time, family, max(rss_bytes_max) AS rss\nFROM obs.family_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, family ORDER BY time",
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, family, max(rss_bytes_max) AS rss\nFROM obs.family_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, family ORDER BY time",
           "editorType": "sql",
           "queryType": "timeseries"
         }
@@ -668,7 +675,7 @@
     {
       "id": 18,
       "type": "timeseries",
-      "title": "TCP bytes by direction",
+      "title": "TCP throughput by direction",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -687,14 +694,14 @@
             "uid": "${ds_clickhouse}"
           },
           "format": 0,
-          "rawSql": "SELECT $__timeInterval(window_end) AS time, direction,\n  sum(bytes_rx + bytes_tx) AS bytes\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, direction ORDER BY time",
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, direction,\n  sum(bytes_rx + bytes_tx) / greatest($__interval_s, ${flush_s}) AS bytesPerSec\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${family:singlequote})\nGROUP BY time, direction ORDER BY time",
           "editorType": "sql",
           "queryType": "timeseries"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "Bps"
         },
         "overrides": []
       }

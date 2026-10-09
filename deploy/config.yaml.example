@@ -420,7 +420,7 @@ clickhouse:
   password_file: ""                  # wins over password; trailing newline trimmed
   timeout: 10s
   tls_insecure_skip_verify: false
-  flush_interval: 60s                # row grain; minimum 10s
+  flush_interval: 60s                # row grain; minimum 10s. Keep the Analysis dashboard's flush_s equal to it
   max_buffer_bytes: 33554432         # 32 MB of encoded rows kept while ClickHouse is down
   max_batches_per_flush: 10
   max_digest_keys: 10000             # per interval; overflow folds into <other>

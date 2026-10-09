@@ -74,6 +74,7 @@ type Var struct {
 	Datasource *DS    `json:"datasource,omitempty"`
 	Query      any    `json:"query,omitempty"`
 	Definition string `json:"definition,omitempty"`
+	Regex      string `json:"regex,omitempty"`
 	Multi      bool   `json:"multi,omitempty"`
 	IncludeAll bool   `json:"includeAll,omitempty"`
 	Refresh    int    `json:"refresh,omitempty"`
@@ -180,6 +181,13 @@ func chTable(title, sql string) Panel {
 const (
 	inst  = `instance=~"$instance"`
 	hostF = `host IN (${host:singlequote})`
+
+	// Interval tables hold one row per clickhouse.flush_interval. A bucket
+	// narrower than that holds a whole row or nothing, so rates divided by
+	// $__interval_s were overstated by flush_interval / $__interval. Buckets
+	// are therefore never narrower than the flush_s variable.
+	flushBucketS = "greatest($__interval_s, ${flush_s})"
+	flushBucket  = "toDateTime(intDiv(toUInt32(window_end), " + flushBucketS + ") * " + flushBucketS + ", 'UTC')"
 )
 
 func overview() Dashboard {
@@ -195,6 +203,9 @@ func overview() Dashboard {
 		{Name: "host", Label: "ClickHouse host", Type: "query", Datasource: &promDS,
 			Query: `label_values(obs_agent_clickhouse_host_info{` + inst + `}, host)`, Definition: `label_values(obs_agent_clickhouse_host_info{` + inst + `}, host)`,
 			Multi: true, IncludeAll: true, Refresh: 2, Hide: 2},
+		{Name: "mysql_family", Label: "mysqld family", Type: "query", Datasource: &promDS,
+			Query: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`, Definition: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`,
+			Regex: `/^(?!.*exporter).*(mysql|mariadb).*$/i`, Multi: true, IncludeAll: true, Refresh: 2},
 	}
 	d.Links = []map[string]any{{"title": "MySQL & Network Analysis (ClickHouse)", "type": "link", "targetBlank": true,
 		"url": "/d/obs-agent-analysis/obs-agent-analysis?${host:queryparam}&${family:queryparam}&$__url_time_range"}}
@@ -240,6 +251,13 @@ func overview() Dashboard {
 	b.add(prom("Query CPU and run-queue wait by command (cores)", "short",
 		[2]string{`sum by (instance, command) (rate(obs_agent_mysql_query_cpu_seconds_total{` + inst + `}[$__rate_interval]))`, "{{instance}} {{command}} on-CPU"},
 		[2]string{`sum by (instance, command) (rate(obs_agent_mysql_query_runq_wait_seconds_total{` + inst + `}[$__rate_interval]))`, "{{instance}} {{command}} waiting for CPU"}), 12)
+	cov := prom("MySQL query CPU vs mysqld CPU (cores)", "short",
+		[2]string{`sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{` + inst + `}[$__rate_interval]))`, "{{instance}} query CPU (attributed to digests)"},
+		[2]string{`sum by (instance) (obs_agent_family_cpu_percent{` + inst + `,family=~"$mysql_family"}) / 100 * on (instance) obs_agent_cpu_count{` + inst + `}`, "{{instance}} mysqld family CPU"})
+	cov.Description = "Query CPU is measured inside dispatch_command and is what digests can explain. The gap up to the mysqld family's CPU " +
+		"is spent outside it (reading the next packet, network, InnoDB background threads) and cannot be attributed to a query. " +
+		"Pick the mysqld family with the mysqld family variable if the default regex misses it."
+	b.add(cov, 12)
 	b.add(promTable("Top digests by CPU (cores, last 5m)",
 		`topk(10, rate(obs_agent_mysql_digest_cpu_seconds_total{`+inst+`}[5m]) * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{`+inst+`})`), 12)
 	b.add(prom("Digest coverage and dropped events", "short",
@@ -272,6 +290,8 @@ func analysis() Dashboard {
 		{Name: "family", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
 			Query: "SELECT DISTINCT family FROM obs.family_stats WHERE $__timeFilter(window_end) AND " + hostF + " ORDER BY family"},
 		{Name: "digest", Label: "Digest id (drill-down)", Type: "textbox", Query: "", Current: map[string]any{"value": ""}},
+		// Must equal the agents' clickhouse.flush_interval in seconds (edit in dashboard settings).
+		{Name: "flush_s", Label: "ClickHouse flush interval (s)", Type: "constant", Query: "60", Hide: 2},
 	}
 	d.Links = []map[string]any{{"title": "obs-agent Overview (Prometheus)", "type": "link", "targetBlank": true,
 		"url": "/d/obs-agent-overview/obs-agent-overview?$__url_time_range"}}
@@ -281,6 +301,7 @@ func analysis() Dashboard {
 	topDigests := chTable("Top digests by CPU", `SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,
   sum(s.cpu_ns) / 1e9 AS cpuSec,
   sum(s.cpu_ns) / 1e9 / greatest(dateDiff('second', $__fromTime, $__toTime), 1) AS cpuCores,
+  max(s.cpu_ns / greatest(dateDiff('second', s.window_start, s.window_end), 1)) / 1e9 AS peakCores,
   100 * sum(s.cpu_ns) / greatest(sum(sum(s.cpu_ns)) OVER (), 1) AS cpuSharePct,
   sum(s.cpu_ns) / greatest(sum(s.calls), 1) / 1e6 AS cpuMsAvg,
   sum(s.runq_ns) / greatest(sum(s.calls), 1) / 1e6 AS runqMsAvg,
@@ -296,13 +317,14 @@ GROUP BY s.digest_id ORDER BY cpuSec DESC LIMIT 50`)
 		"cpuSharePct": "percent", "cpuMsAvg": "ms", "runqMsAvg": "ms", "wallMsAvg": "ms", "wallMsMax": "ms",
 		"bytesOutAvg": "bytes", "bytesOut": "bytes", "cpuSec": "s",
 	})
-	topDigests.Description = "cpuCores: average cores busy over the selected time range (1 = one core; understated when data does not cover the whole range). " +
+	topDigests.Description = "cpuCores: average cores busy over the selected time range (1 = one core; understated when data does not cover the whole range), " +
+		"so a short burst is diluted on a long range. peakCores: the highest rate of one flush interval on one host — sort by it to find bursts. " +
 		"cpuSharePct: share of all query CPU of the selected hosts. wall ≈ cpu: the query itself is expensive; runq ≫ cpu: it waited for CPU (victim); " +
 		"wall ≫ cpu + runq: it waited on locks or I/O. bytesOutAvg: result size per call. " +
 		"Whether a digest overloaded the node (needs node CPU and process families) is in mysql_report.overload_cause, see the Snapshots table."
 	b.add(topDigests, 24)
-	b.add(chTS("CPU of the top 10 digests (cores)", "short", `SELECT $__timeInterval(window_end) AS time, digest_id AS digest,
-  sum(cpu_ns) / 1e9 / $__interval_s AS cores
+	b.add(chTS("CPU of the top 10 digests (cores)", "short", `SELECT `+flushBucket+` AS time, digest_id AS digest,
+  sum(cpu_ns) / 1e9 / `+flushBucketS+` AS cores
 FROM obs.mysql_digest_stats
 WHERE $__timeFilter(window_end) AND `+hostF+`
   AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND `+hostF+`
@@ -319,7 +341,7 @@ GROUP BY digest_id HAVING cpuSecNow > 1 ORDER BY ratio DESC LIMIT 30`), 12)
 
 	b.row("Digest drill-down (set the digest variable)")
 	digF := "digest_id = '${digest}'"
-	b.add(chTS("Calls and average latency", "short", `SELECT $__timeInterval(window_end) AS time, sum(calls) AS callCount,
+	b.add(chTS("Calls per second and average latency", "short", `SELECT `+flushBucket+` AS time, sum(calls) / `+flushBucketS+` AS callsPerSec,
   sum(cpu_ns) / greatest(sum(calls), 1) / 1e6 AS cpuMsAvg,
   sum(wall_ns) / greatest(sum(calls), 1) / 1e6 AS wallMsAvg,
   sum(runq_ns) / greatest(sum(calls), 1) / 1e6 AS runqMsAvg
@@ -344,11 +366,11 @@ GROUP BY time, host ORDER BY time`), 12)
 
 	b.row("Process families")
 	famF := "family IN (${family:singlequote})"
-	b.add(chTS("Family CPU (avg)", "percent", `SELECT $__timeInterval(window_end) AS time, family, avg(cpu_percent_avg) AS cpu
+	b.add(chTS("Family CPU (avg)", "percent", `SELECT `+flushBucket+` AS time, family, avg(cpu_percent_avg) AS cpu
 FROM obs.family_stats
 WHERE $__timeFilter(window_end) AND `+hostF+` AND `+famF+`
 GROUP BY time, family ORDER BY time`), 12)
-	b.add(chTS("Family RSS (max)", "bytes", `SELECT $__timeInterval(window_end) AS time, family, max(rss_bytes_max) AS rss
+	b.add(chTS("Family RSS (max)", "bytes", `SELECT `+flushBucket+` AS time, family, max(rss_bytes_max) AS rss
 FROM obs.family_stats
 WHERE $__timeFilter(window_end) AND `+hostF+` AND `+famF+`
 GROUP BY time, family ORDER BY time`), 12)
@@ -370,8 +392,8 @@ GROUP BY peer, port, family ORDER BY bytes DESC LIMIT 50`), 12)
 FROM obs.netflow_peer_stats
 WHERE $__timeFilter(window_end) AND `+hostF+` AND `+famF+` AND direction = 'outbound'
 GROUP BY peer, port, family ORDER BY bytes DESC LIMIT 50`), 12)
-	b.add(chTS("TCP bytes by direction", "bytes", `SELECT $__timeInterval(window_end) AS time, direction,
-  sum(bytes_rx + bytes_tx) AS bytes
+	b.add(chTS("TCP throughput by direction", "Bps", `SELECT `+flushBucket+` AS time, direction,
+  sum(bytes_rx + bytes_tx) / `+flushBucketS+` AS bytesPerSec
 FROM obs.netflow_peer_stats
 WHERE $__timeFilter(window_end) AND `+hostF+` AND `+famF+`
 GROUP BY time, direction ORDER BY time`), 12)

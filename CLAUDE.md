@@ -1050,6 +1050,7 @@ All metrics are prefixed with `obs_agent_`.
 | `cpu_iowait_percent` | Gauge | % of time CPUs waiting for IO |
 | `cpu_steal_percent` | Gauge | VM steal time |
 | `cpu_ctx_switches_per_sec` | Gauge | Context switches/s |
+| `cpu_count` | Gauge | CPUs usable by the agent (`runtime.NumCPU()`): the divisor of `family_cpu_percent` and process CPU%, so `percent / 100 * cpu_count` = cores |
 | `procs_running` | Gauge | Processes in R state |
 | `procs_blocked` | Gauge | Processes in D (IO wait) state |
 | `mem_total_bytes` | Gauge | Total physical memory |
@@ -1817,7 +1818,7 @@ Every `snapshots.check_interval` (30 s) the Snapshotter looks for a **reason**: 
 
 ### Dashboards
 
-`deploy/grafana/obs-agent-overview.json` (Prometheus) and `obs-agent-analysis.json` (ClickHouse, official `grafana-clickhouse-datasource`, read-only user). "Top digests by CPU" adds `cpuCores` (average cores over the selected range), `cpuSharePct` (share of the selected hosts' query CPU), `wallMsMax` and `bytesOutAvg`; there is no node-relative column because ClickHouse rows carry no CPU count. The Snapshots table shows `overload_cause.verdict` / `digest_id` extracted from each snapshot. Each picks its data source at view time with a picker variable (`ds_prometheus` / `ds_clickhouse`, no import-time inputs) and both are **generated**: edit `deploy/grafana/gen/main.go`, then `go run ./deploy/grafana/gen`. Setup and import steps: `deploy/grafana/README.md`. The Overview → Analysis link carries `host`, `family` and the time range. Ad-hoc SQL: `deploy/clickhouse/queries.sql`.
+`deploy/grafana/obs-agent-overview.json` (Prometheus) and `obs-agent-analysis.json` (ClickHouse, official `grafana-clickhouse-datasource`, read-only user). "Top digests by CPU" adds `cpuCores` (average cores over the selected range, which dilutes a short burst), `peakCores` (highest rate of one flush interval on one host — sort by it to find bursts), `cpuSharePct` (share of the selected hosts' query CPU), `wallMsMax` and `bytesOutAvg`; there is no node-relative column because ClickHouse rows carry no CPU count. The Snapshots table shows `overload_cause.verdict` / `digest_id` extracted from each snapshot. Each picks its data source at view time with a picker variable (`ds_prometheus` / `ds_clickhouse`, no import-time inputs) and both are **generated**: edit `deploy/grafana/gen/main.go`, then `go run ./deploy/grafana/gen`. Setup and import steps: `deploy/grafana/README.md`. The Overview → Analysis link carries `host`, `family` and the time range. ClickHouse time series bucket by `greatest($__interval_s, ${flush_s})`: rows are one per `flush_interval`, and a narrower Grafana bucket holds a whole row or none, which overstated rates by `flush_interval / $__interval` (≈3× on a 6 h range). `flush_s` is a hidden constant variable (60) that must equal the agents' `clickhouse.flush_interval`. `window_end` is the agent host's wall clock: an unsynchronised host clock shifts every ClickHouse panel against Prometheus. The Overview's "MySQL query CPU vs mysqld CPU (cores)" panel compares query CPU (inside `dispatch_command`, what digests can explain) with the mysqld family's CPU (`family_cpu_percent / 100 × cpu_count`, family picked by the `mysql_family` variable); the gap is mysqld CPU outside any query. Ad-hoc SQL: `deploy/clickhouse/queries.sql`.
 
 ### Configuration
 
@@ -1846,5 +1847,5 @@ clickhouse-client -q "SELECT digest_id, sum(calls), sum(cpu_ns)/1e9 FROM obs.mys
 - Digests beyond `max_digest_keys` per interval fold into `<other>` per pid; peers beyond `max_flow_keys` into `::`/0; slow queries beyond `max_slow_queries_per_flush` are dropped (counted).
 - `MySQLSlowEvent` has no CPU / run-queue / bytes, so `mysql_slow_queries` lacks those columns; use `mysql_digest_stats`.
 - `mysql_slow_queries.digest_id` is computed from the event text: statements folded by `fold_system_schemas`, and prepared executes without recovered text, may not join to `mysql_digest_stats`.
-- Dashboards: per-cell data links, a Snapshots link column, PSI panels and a load ÷ CPUs panel are **not implemented** — no PSI or NumCPU metric is exported to Prometheus. Snapshots are read with the SQL in `deploy/grafana/README.md`.
+- Dashboards: per-cell data links, a Snapshots link column, PSI panels and a load ÷ CPUs panel are **not implemented** — no PSI metric is exported, and `cpu_count` exists only in Prometheus (ClickHouse rows carry no CPU count). Snapshots are read with the SQL in `deploy/grafana/README.md`.
 - MongoDB digests, Kafka/collector transports and agent-managed schema migrations are not covered.

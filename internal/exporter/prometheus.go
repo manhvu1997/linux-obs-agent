@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -119,6 +120,10 @@ func NewPrometheusExporter(addr string, coll *collector.Collector) *PrometheusEx
 	p.ctxSw = promauto.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "cpu_ctx_switches_per_sec"})
 	p.runningProcs = promauto.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "procs_running"})
 	p.blockedProcs = promauto.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "procs_blocked"})
+	// The divisor of every node-relative CPU percent (family_cpu_percent,
+	// process CPU%): percent / 100 * cpu_count converts those to cores.
+	promauto.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "cpu_count",
+		Help: "CPUs usable by the agent (runtime.NumCPU); the divisor of the node-relative CPU percentages."}).Set(float64(runtime.NumCPU()))
 
 	p.memTotal = promauto.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "mem_total_bytes"})
 	p.memUsed = promauto.NewGauge(prometheus.GaugeOpts{Namespace: ns, Name: "mem_used_bytes"})

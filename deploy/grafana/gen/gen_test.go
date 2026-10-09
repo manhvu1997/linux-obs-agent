@@ -267,3 +267,79 @@ func TestJSONIsValidDashboard(t *testing.T) {
 		}
 	}
 }
+
+// Interval tables hold one row per flush_interval (60 s by default). A time
+// series bucketed by Grafana's $__interval (≈20 s on a 6 h range) puts one
+// whole row into some buckets and none into others, so dividing by
+// $__interval_s overstated a rate by flush_interval / $__interval. Every
+// panel over window_end must bucket by at least the flush interval.
+func TestIntervalPanelsBucketByFlushInterval(t *testing.T) {
+	bareInterval := regexp.MustCompile(`/\s*\$__interval_s`)
+	d := dashboards()["obs-agent-analysis.json"]
+	for _, p := range d.Panels {
+		for _, tg := range p.Targets {
+			if !strings.Contains(tg.RawSQL, "window_end") {
+				continue
+			}
+			if strings.Contains(tg.RawSQL, "$__timeInterval(window_end)") {
+				t.Errorf("panel %q: buckets interval rows by $__timeInterval; use flushBucket", p.Title)
+			}
+			if bareInterval.MatchString(tg.RawSQL) {
+				t.Errorf("panel %q: divides by bare $__interval_s; use flushBucketS", p.Title)
+			}
+		}
+	}
+	var flush *Var
+	for i, tv := range d.Templating.List {
+		if tv.Name == "flush_s" {
+			flush = &d.Templating.List[i]
+		}
+	}
+	if flush == nil || flush.Type != "constant" || flush.Query != "60" {
+		t.Fatalf("want a constant flush_s variable defaulting to 60, got %+v", flush)
+	}
+}
+
+func TestTopDigestsHasPeakCores(t *testing.T) {
+	for _, p := range dashboards()["obs-agent-analysis.json"].Panels {
+		if p.Title == "Top digests by CPU" {
+			if !strings.Contains(p.Targets[0].RawSQL, "AS peakCores") {
+				t.Fatal("Top digests by CPU has no peakCores column")
+			}
+			return
+		}
+	}
+	t.Fatal("Top digests by CPU panel not found")
+}
+
+func TestOverviewHasMySQLCPUCoverage(t *testing.T) {
+	d := dashboards()["obs-agent-overview.json"]
+	found := false
+	for _, p := range d.Panels {
+		if p.Title != "MySQL query CPU vs mysqld CPU (cores)" {
+			continue
+		}
+		found = true
+		var all string
+		for _, tg := range p.Targets {
+			all += tg.Expr + "\n"
+		}
+		for _, want := range []string{"obs_agent_mysql_query_cpu_seconds_total", "obs_agent_cpu_count", `family=~"$mysql_family"`} {
+			if !strings.Contains(all, want) {
+				t.Errorf("coverage panel does not use %s", want)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("overview has no MySQL query CPU vs mysqld CPU panel")
+	}
+	for _, tv := range d.Templating.List {
+		if tv.Name == "mysql_family" {
+			if tv.Regex == "" || !tv.IncludeAll {
+				t.Errorf("mysql_family must default to a regex-filtered All, got %+v", tv)
+			}
+			return
+		}
+	}
+	t.Error("overview has no mysql_family variable")
+}

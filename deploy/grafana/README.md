@@ -31,6 +31,16 @@ the Analysis dashboard opens on its default ClickHouse data source. Prometheus `
 the link uses `obs_agent_clickhouse_host_info{host}` to translate, so it only works for agents with
 `clickhouse.enabled: true`.
 
+## Reading the ClickHouse panels
+
+- Rows are one per agent `clickhouse.flush_interval`; time series bucket by at least that much and show
+  rates (cores, calls/s, bytes/s), so they do not change with zoom. If your agents use a flush interval
+  other than 60 s, set the hidden constant `flush_s` (Dashboard settings → Variables) to it.
+- "Top digests by CPU": `cpuCores` is averaged over the whole range and hides short bursts; sort by
+  `peakCores` to find them.
+- `window_end` is stamped with the agent host's clock. If ClickHouse panels look shifted against the
+  Prometheus ones, check NTP on that host (`timedatectl`, `chronyc tracking`).
+
 ## Reading a snapshot
 
 The Snapshots table lists them; fetch one report with:

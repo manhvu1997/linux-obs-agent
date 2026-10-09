@@ -59,6 +59,21 @@
         "includeAll": true,
         "refresh": 2,
         "hide": 2
+      },
+      {
+        "name": "mysql_family",
+        "label": "mysqld family",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds_prometheus}"
+        },
+        "query": "label_values(obs_agent_family_cpu_percent{instance=~\"$instance\"}, family)",
+        "definition": "label_values(obs_agent_family_cpu_percent{instance=~\"$instance\"}, family)",
+        "regex": "/^(?!.*exporter).*(mysql|mariadb).*$/i",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
       }
     ]
   },
@@ -683,12 +698,54 @@
     },
     {
       "id": 20,
+      "type": "timeseries",
+      "title": "MySQL query CPU vs mysqld CPU (cores)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} query CPU (attributed to digests)"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance) (obs_agent_family_cpu_percent{instance=~\"$instance\",family=~\"$mysql_family\"}) / 100 * on (instance) obs_agent_cpu_count{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} mysqld family CPU"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Query CPU is measured inside dispatch_command and is what digests can explain. The gap up to the mysqld family's CPU is spent outside it (reading the next packet, network, InnoDB background threads) and cannot be attributed to a query. Pick the mysqld family with the mysqld family variable if the default regex misses it."
+    },
+    {
+      "id": 21,
       "type": "table",
       "title": "Top digests by CPU (cores, last 5m)",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 68
       },
       "datasource": {
@@ -715,14 +772,14 @@
       }
     },
     {
-      "id": 21,
+      "id": 22,
       "type": "timeseries",
       "title": "Digest coverage and dropped events",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 68
+        "x": 0,
+        "y": 76
       },
       "datasource": {
         "type": "prometheus",
@@ -756,14 +813,14 @@
       }
     },
     {
-      "id": 22,
+      "id": 23,
       "type": "row",
       "title": "Agent",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 76
+        "y": 84
       },
       "datasource": {
         "type": "",
@@ -775,14 +832,14 @@
       }
     },
     {
-      "id": 23,
+      "id": 24,
       "type": "timeseries",
       "title": "ClickHouse rows sent / dropped",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 77
+        "y": 85
       },
       "datasource": {
         "type": "prometheus",
@@ -816,14 +873,14 @@
       }
     },
     {
-      "id": 24,
+      "id": 25,
       "type": "timeseries",
       "title": "ClickHouse buffer and staleness",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 77
+        "y": 85
       },
       "datasource": {
         "type": "prometheus",
@@ -857,14 +914,14 @@
       }
     },
     {
-      "id": 25,
+      "id": 26,
       "type": "timeseries",
       "title": "Diagnose snapshots",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 85
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -889,14 +946,14 @@
       }
     },
     {
-      "id": 26,
+      "id": 27,
       "type": "timeseries",
       "title": "eBPF events by module",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 85
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
