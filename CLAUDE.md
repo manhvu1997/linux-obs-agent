@@ -1070,11 +1070,12 @@ All metrics are prefixed with `obs_agent_`.
 | `ebpf_events_total{module}` | Counter | eBPF events emitted per module |
 | `ebpf_events_total{module="fsync"}` | Counter | Fsync outlier events (latency > threshold) |
 | `family_*` (cpu_percent, mem_rss_bytes, processes, net_*, inbound/outbound bytes) | Gauge/Counter | Per process family; never per PID. See §20 |
-| `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes, digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. See §20 |
+| `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes, digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. `events_dropped` counts commands genuinely lost (fallback ring buffer full or consumer behind). See §20 |
 | `family_inbound_peer_bytes_total{family,peer_ip,service_port,flow}` | Counter | Inbound client bytes; top `netflow.max_inbound_peers` IPs node-wide, overflow `other`. See §20 |
 | `mysql_digest_coverage_ratio` | Gauge | Share (0–1) of window query CPU explained by the exported digest series. See §20 |
 | `mysql_agg_overflow_total` | Counter | Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact) |
-| `mysql_hash_mismatch_total` | Counter | Kernel text-hash verification samples whose digest differed from the cached one; the hash is switched to exact per-event processing |
+| `mysql_text_events_dropped_total` | Counter | Statement text events dropped because the consumer was behind; first-sight texts are re-requested (no command lost; the hash's commands may show under a text-unavailable placeholder until the resend) |
+| `mysql_hash_mismatch_total` | Counter | Kernel text hashes found inconsistent: a verification sample or resend whose digest differed from the cached one, or a first-sight text whose kernel hash differed from the Go reference; the hash is switched to exact per-event processing |
 | `clickhouse_{rows_sent_total,rows_dropped_total,buffer_bytes,last_success_timestamp_seconds,snapshots_total,host_info}` | Counter/Gauge | ClickHouse sink health; registered only when `clickhouse.enabled`. See §22 |
 
 ---
@@ -1094,14 +1095,14 @@ All metrics are prefixed with `obs_agent_`.
 | **Fsync analyzer poll (5s)** | **~0.001%** | **< 1 MB** |
 | Go runtime overhead | ~0.02% | ~12 MB |
 | **eBPF netflow (always-on, ~100k hook calls/s)** — estimated, not measured | **~0.4%** | **~6 MB (maps)** |
-| **MySQL in-kernel aggregation (20k QPS)** — estimated, not measured | **~0.2 % kernel + < 0.1 % userspace** | **2 × 16 384-entry agg maps (~3 MB) + 1 MB text ringbuf + ~5 MB digests** |
+| **MySQL tracer with in-kernel aggregation (20k QPS)** — estimated, not measured; kernel text hashing unmeasured | **~0.2 % kernel + < 0.1 % userspace (~0.3 %)** | **~35 MB typical**: kernel maps ~25 MB (agg 2 × 16 384 ~3 MB, `cmd_events` ringbuf 4 MB, `text_events` ringbuf 1 MB, `text_seen` LRU ~2–3 MB, `ps_text` ~9 MB, `mysql_pending` ~5 MB, slow events + pid stats < 1 MB) + userspace ~10 MB (digests ~5 MB, text cache ~5 MB) |
 | **Family grouping (10s scan)** — estimated, not measured | **~0.02%** | **< 1 MB** |
 | **ClickHouse export (drains + 60 s flush, 20k QPS)** — estimated, not measured | **~0.1–0.2 % (digest drain) + a few ms/min encoding** | **≤ 32 MB buffer + per-interval drain maps** |
 | netinv (per /api/diagnose) — estimated, not measured | 20–50 ms per call | transient |
-| **Total (all eBPF active + fsync + netflow + MySQL events)** — estimated, not measured | **~1.1%** | **~70 MB** |
-| **Total (no trigger-eBPF; fsync + netflow + MySQL events)** — estimated, not measured | **~0.7%** | **~35 MB** |
+| **Total (all eBPF active + fsync + netflow + MySQL)** — estimated, not measured | **~1.4%** | **~98 MB** |
+| **Total (no trigger-eBPF; fsync + netflow + MySQL)** — estimated, not measured | **~0.9%** | **~63 MB** |
 
-The totals add the always-on netflow (~0.4 % / ~6 MB) and MySQL in-kernel aggregation (~0.3 % / ~9 MB, only when `mysql.enabled`) to the previously measured figures. All other measurements are on a 4-core 8GB VM under moderate load. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
+The totals are the sum of the rows above, except ClickHouse export (off by default; adds ~0.1–0.2 % and up to 32 MB when enabled) and netinv (per `/api/diagnose` call, transient). The measured rows (4-core 8GB VM, moderate load) sum to ~0.64 % / ~56 MB with every trigger module active and ~0.17 % / ~21 MB without; the totals add the estimated rows: netflow (~0.4 % / ~6 MB), the MySQL tracer (~0.3 % / ~35 MB typical, only when `mysql.enabled`) and family grouping (~0.02 % / ~1 MB). MySQL worst cases on top: the text cache holds up to 32 768 hashes (~150 B each, ~5 MB) plus one record per **distinct** digest among them (~0.65 KB: id + normalised text, +~0.5 KB sample only with `mysql.sample_queries`), so if every cached hash were its own digest it reaches ~26 MB (~43 MB with samples), i.e. +21 / +38 MB. Kernel map memory is not Go heap (charged to the agent's memory cgroup on kernels ≥ 5.11). **Unmeasured**: the kernel text-hashing cost — `text_hash` runs up to 511 loop iterations per COM_QUERY / COM_STMT_PREPARE at `dispatch_command` entry, and a prepare is hashed twice (also in `Prepared_statement::prepare`) — is not in the MySQL CPU estimate. All totals are **estimated, not measured**. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
 
 **Fsync overhead detail**: At 10 000 fsync/s with a 5 ms slow threshold, the kprobe/kretprobe pair executes ~20 000 times/s. Each execution does one map lookup + one atomic add (~50 ns each). Total: ~1 ms/s ≈ **0.01% CPU** on a single core. The ringbuf emits zero events at normal latencies.
 
@@ -1227,10 +1228,17 @@ against real `mysqld` builds (`.dynsym`; fixtures in
 `go run ./internal/mysql/mysqldsym/cmd/symdump -label "<version> (<package>)" <mysqld> > internal/mysql/mysqldsym/testdata/<version>.syms`,
 add the expected hooks to `TestCompatMatrix`, run the tests. A changed
 signature fails there, naming the hook. Then run the runtime matrix on a
-Linux x86_64 host: `sudo make test-mysql-matrix` (Docker; images from
-`MYSQL_IMAGES`, default `mysql:5.7 mysql:8.0 mysql:8.4 mysql:9`), which
-attaches through `/proc/<pid>/root/usr/sbin/mysqld` and checks a COM_QUERY and
-a server-side prepared statement's recovered text.
+Linux x86_64 host: `make generate` first **as your user** (not under sudo:
+root's toolchain would generate root-owned files), then
+`sudo make test-mysql-matrix` (add `GO=$(command -v go)` if root's PATH has no
+Go; Docker; images from `MYSQL_IMAGES`, default
+`mysql:5.7 mysql:8.0 mysql:8.4 mysql:9`). The target refuses to run without
+the generated code. It attaches through `/proc/<pid>/root/usr/sbin/mysqld` and
+runs every integration test: verifier acceptance of literal skipping
+(`TestLiteralSkipLoaded`), in-kernel aggregation, kernel/Go hash parity, the
+unsafe-hash fallback, command events and a server-side prepared statement's
+recovered text. A failing image is reported and the next one still runs; the
+exit status is non-zero if any failed.
 
 ### GET /api/diagnose — MySQLReport field
 
@@ -1708,7 +1716,7 @@ Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound p
 | `obs_agent_mysql_digest_{cpu_seconds,calls,bytes_out,runq_wait_seconds}_total` | `digest_id` |
 | `obs_agent_mysql_digest_info` (=1) | `digest_id, digest_text` |
 | `obs_agent_mysql_digest_coverage_ratio` | — |
-| `obs_agent_mysql_events_dropped_total` | — |
+| `obs_agent_mysql_events_dropped_total` (commands lost), `obs_agent_mysql_text_events_dropped_total` (texts re-requested) | — |
 | `obs_agent_mysql_agg_overflow_total`, `obs_agent_mysql_hash_mismatch_total` | — |
 
 **Inbound peers**: `…_inbound_peer_bytes_total` is the client side (`service_port` is the local listening port). `netflow.max_inbound_peers` (default 100, `NETFLOW_MAX_INBOUND_PEERS`) caps distinct `peer_ip` values node-wide; further peers fold into `peer_ip="other"`; `0` disables the series. Idle labels expire like the outbound ones.
@@ -1733,7 +1741,10 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 - Query text is captured up to 511 bytes (`truncated: true` beyond).
 - Digest windows are built from per-poll sums: a command is attributed to the poll that drained it (≤ `poll_interval`, 5 s, later than it ran).
 - `wall_max` / `cpu_ms_max` are best effort: two CPUs updating the same statement at the same instant can lose one maximum (no compare-and-swap before kernel 5.12). Sums are exact.
-- A statement whose text never reached the agent is shown as `<text unavailable>` for one poll and its text is requested again.
+- A statement whose text never reached the agent (text event dropped, see `text_events_dropped_total`) is attributed for one poll to a placeholder and its text is requested again: `<text unavailable>` for COM_QUERY, `prepare: <text unavailable>` (its own digest) for COM_STMT_PREPARE, and for COM_STMT_EXECUTE the execute placeholder `<COM_STMT_EXECUTE: prepared before agent start, text unavailable>` — the same row as statements prepared before the agent attached.
+- Kernel/Go hash consistency is checked continuously: every first-sight text is re-hashed in Go (`sqlhash.KernelHash`, or `ExactHash` in the fallback below) and every 1/1024 verification resend and text resend is compared with the cached digest. Any disagreement marks that hash unsafe (its commands then arrive as exact full events) and counts in `hash_mismatch_total`.
+- If a kernel's verifier rejects the literal-skipping hash loop, the loader retries once with `literal_skip = 0` (exact-text FNV-1a) and logs one warning. Digests and totals stay exact, but statements that differ only in literals no longer share a kernel entry (more agg entries, text events and overflow risk).
+- The drain flips the active aggregation buffer and waits 50 ms before reading the old one: since kernel 6.1 uprobe programs run under `migrate_disable()` and can be preempted mid-update on a `preempt=full` kernel, and a saturated CPU is the scenario being diagnosed. An update still running after 50 ms lands in the drained buffer and is returned by a later drain of it, unless it hits an entry between that entry's iteration and its delete (tiny window: that increment is lost).
 - **Privacy:** `top_digests[].sample_query` is the raw text of the first execution of each digest, **literals included** — potentially secrets (e.g. `CREATE USER … IDENTIFIED BY '…'`). `digest_text` (and the `digest_info` metric) is literal-free. Set `mysql.sample_queries: false` (`MYSQL_SAMPLE_QUERIES=false`) to never store or emit it. `/api/diagnose` and `/metrics` are unauthenticated (with peer IPs and cmdlines): restrict network access to `:9200`.
 - `COM_STMT_EXECUTE` (server-side prepared statements) carries the SQL text recovered from its `COM_STMT_PREPARE` — see *Prepared statements and command names* below for when it cannot be recovered.
 - Process-level network covers TCP only (no UDP, no unix sockets). Pre-existing idle connections are invisible to eBPF until they carry traffic; the `/proc` `connections` list still shows them.
@@ -1761,7 +1772,7 @@ uretprobe dispatch_command (COM_STMT_EXECUTE): text = ps_text[ps_exec[tid]]; ps_
 
 - An execute with recovered text gets **the same digest** as the same statement sent as `COM_QUERY` (`command` stays `stmt_execute`). The prepare itself is a separate `stmt_prepare` digest, `prepare: <normalised text>`.
 - **Statements prepared before the agent attached** (pooled connections) are reported as `<COM_STMT_EXECUTE: prepared before agent start, text unavailable>`. The text appears only when the **client** sends `COM_STMT_PREPARE` again (a new or recycled connection, or the driver re-preparing). A server-side re-prepare (triggered by DDL / metadata change) does **not** refresh it: mysqld prepares a temporary copy and swaps its contents into the original statement, so the original `Prepared_statement*` keeps whatever text — or none — it already had.
-- `ps_text` holds **16 384** statements (LRU). With more live prepared statements than that across all sessions, the least recently prepared are evicted and their later executes show `prepared before agent start` too. (An entry evicted and re-filled concurrently can in rare cases pair an execute with the wrong text.)
+- `ps_text` holds **16 384** statements (LRU). With more live prepared statements than that across all sessions, the least recently prepared are evicted and their later executes show `prepared before agent start` too. (An entry evicted and re-filled concurrently can in rare cases pair an execute with the wrong text, or send a verification text that does not match its hash; userspace then detects the mismatch and marks the hash unsafe, so that statement is pinned to the exact full-event path.)
 - `COM_STMT_FETCH` (server-side cursors) runs without `execute_loop`; its cost shows under `<COM_STMT_FETCH>` without text.
 - A prepared `CALL p(?)` whose procedure runs `EXECUTE s` re-enters `execute_loop`; the outermost statement wins, so the whole command is attributed to the `CALL`.
 - Needs `Prepared_statement::prepare` and `Prepared_statement::execute_loop` in mysqld's symbol table (`.symtab`, then `.dynsym`). Supported `prepare` layouts: `thd_first` `prepare(THD*, const char*, size_t, …)` (8.0.36+, 8.4, 9.x, 26.x) and `query_first` `prepare(const char*, size_t, …)` (5.7, 8.0 up to at least 8.0.28); the layout is chosen from the mangled name — see *MySQL version compatibility* in §16. Otherwise (stripped binary, unknown overload, attach error) the agent logs one warning, `PreparedTextTracking` is off and executes keep the placeholder `<COM_STMT_EXECUTE: prepared, text unavailable>`.
@@ -1787,7 +1798,7 @@ sudo bpftool map show name ps_text; sudo bpftool map show name ps_exec
 | Component | CPU | Memory |
 |---|---|---|
 | netflow eBPF (~100k hook calls/s) | ~0.4 % | ~6 MB maps |
-| mysql in-kernel aggregation (20k QPS) | ~0.2 % kernel + < 0.1 % userspace | 2 × 16 384-entry agg maps (~3 MB) + 1 MB text ringbuf + ~5 MB digests |
+| mysql in-kernel aggregation (20k QPS) | ~0.2 % kernel + < 0.1 % userspace; kernel text hashing (≤ 511 iterations per COM_QUERY / COM_STMT_PREPARE at entry, prepares hashed twice) unmeasured | agg maps 2 × 16 384 (~3 MB) + `cmd_events` ringbuf 4 MB + `text_events` ringbuf 1 MB + `text_seen` LRU 32 768 (~2–3 MB) + digests (~5 MB) + text cache (~5 MB typical; ≤ ~26 MB, ≤ ~43 MB with `sample_queries`, if every cached hash is a distinct digest) |
 | mysql prepared-statement text (`ps_text` 16 384 × 520 B, `ps_exec`) | one map update per prepare / execute | ~9 MB maps (preallocated LRU) |
 | family grouping (10 s scan) | ~0.02 % | < 1 MB |
 | netinv (per /api/diagnose) | 20–50 ms per call | transient |
