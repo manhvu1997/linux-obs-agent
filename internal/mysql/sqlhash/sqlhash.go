@@ -41,7 +41,10 @@ const (
 	stDigits
 )
 
-// Region is a byte range [Start, End) the hash replaces by '?'.
+// Region is a byte range [Start, End) that KernelHash does not hash byte by
+// byte: a digit run (Number) hashes as one NUL byte; a quoted string's
+// content is not hashed at all (nor is its closing quote at End), only its
+// opening quote byte at Start-1.
 type Region struct {
 	Start, End int
 	Number     bool // a digit run; otherwise a quoted string's content
@@ -83,6 +86,17 @@ func clip(b []byte) []byte {
 // KernelHash returns the kernel's aggregation hash of a statement text.
 func KernelHash(text []byte) uint64 {
 	h, _ := walk(clip(text), false)
+	return h
+}
+
+// ExactHash returns the kernel's hash when literal skipping is off
+// (literal_skip = 0, the verifier fallback): plain FNV-1a 64 over the same
+// clipped bytes as KernelHash.
+func ExactHash(text []byte) uint64 {
+	h := uint64(offset64)
+	for _, c := range clip(text) {
+		h = fnv(h, c)
+	}
 	return h
 }
 

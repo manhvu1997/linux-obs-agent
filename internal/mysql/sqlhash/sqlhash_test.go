@@ -68,6 +68,27 @@ func TestStopsAtNULAndMaxText(t *testing.T) {
 	}
 }
 
+// ExactHash is the literal_skip = 0 fallback: plain FNV-1a over the same
+// clipped bytes, so literals are part of the key.
+func TestExactHash(t *testing.T) {
+	if ExactHash([]byte("")) != offset64 {
+		t.Error("empty text must hash to the FNV offset basis")
+	}
+	if ExactHash([]byte("a")) != fnv(offset64, 'a') {
+		t.Error("not FNV-1a 64")
+	}
+	if ExactHash([]byte("SELECT 1")) == ExactHash([]byte("SELECT 2")) {
+		t.Error("exact hashing must keep literals apart")
+	}
+	if ExactHash([]byte("SELECT 1\x00garbage")) != ExactHash([]byte("SELECT 1")) {
+		t.Error("bytes after NUL must be ignored")
+	}
+	long := []byte(strings.Repeat("a", 600))
+	if ExactHash(long) != ExactHash(long[:MaxText]) {
+		t.Error("only the first MaxText bytes are hashed")
+	}
+}
+
 // TestEqualHashImpliesEqualDigest checks the safety property across
 // independent texts (the fuzz test only mutates one text): over every token
 // sequence of length 1..4, joined with "" and with " ", one hash must never
@@ -76,6 +97,9 @@ func TestEqualHashImpliesEqualDigest(t *testing.T) {
 	tokens := []string{
 		"select", "t", ".", "5", "1", "1.5", "e3", "'a'", "\"a\"", "?", "-", "+",
 		"x", "(", ",", "in", "`c`", "/*c*/", "#c\n", "0x1F", "@v",
+		// String edge cases: unterminated (swallows every later token),
+		// doubled quote, backslash-escaped quote.
+		"'u", "'it''s'", `'a\'b'`,
 	}
 	type seen struct{ text, digest string }
 	byHash := map[uint64]seen{}
