@@ -1,12 +1,4 @@
 {
-  "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "Prometheus",
-      "type": "datasource",
-      "pluginId": "prometheus"
-    }
-  ],
   "uid": "obs-agent-overview",
   "title": "obs-agent Overview",
   "tags": [
@@ -21,11 +13,18 @@
   "templating": {
     "list": [
       {
+        "name": "ds_prometheus",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1
+      },
+      {
         "name": "instance",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
+          "uid": "${ds_prometheus}"
         },
         "query": "label_values(obs_agent_cpu_usage_percent, instance)",
         "definition": "label_values(obs_agent_cpu_usage_percent, instance)",
@@ -38,7 +37,7 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
+          "uid": "${ds_prometheus}"
         },
         "query": "label_values(obs_agent_family_cpu_percent{instance=~\"$instance\"}, family)",
         "definition": "label_values(obs_agent_family_cpu_percent{instance=~\"$instance\"}, family)",
@@ -52,7 +51,7 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
+          "uid": "${ds_prometheus}"
         },
         "query": "label_values(obs_agent_clickhouse_host_info{instance=~\"$instance\"}, host)",
         "definition": "label_values(obs_agent_clickhouse_host_info{instance=~\"$instance\"}, host)",
@@ -103,14 +102,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_cpu_usage_percent{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} usage"
@@ -119,7 +118,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_cpu_iowait_percent{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} iowait"
@@ -128,7 +127,7 @@
           "refId": "C",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_cpu_steal_percent{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} steal"
@@ -153,14 +152,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_load1{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} load1"
@@ -169,7 +168,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_procs_blocked{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} D-state"
@@ -194,14 +193,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "100 * obs_agent_mem_available_bytes{instance=~\"$instance\"} / obs_agent_mem_total_bytes{instance=~\"$instance\"}",
           "legendFormat": "{{instance}}"
@@ -226,14 +225,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_cpu_ctx_switches_per_sec{instance=~\"$instance\"}",
           "legendFormat": "{{instance}}"
@@ -277,14 +276,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_disk_io_util_percent{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} {{device}}"
@@ -309,14 +308,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_disk_avg_wait_ms{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} {{device}}"
@@ -341,14 +340,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_disk_read_bytes_per_sec{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} {{device}} read"
@@ -357,7 +356,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_disk_write_bytes_per_sec{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} {{device}} write"
@@ -382,14 +381,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_net_rx_bytes_per_sec{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} {{interface}} rx"
@@ -398,7 +397,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_net_tx_bytes_per_sec{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} {{interface}} tx"
@@ -442,14 +441,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "topk(10, obs_agent_family_cpu_percent{instance=~\"$instance\",family=~\"$family\"})",
           "legendFormat": "{{instance}} {{family}}"
@@ -474,14 +473,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "topk(10, obs_agent_family_mem_rss_bytes{instance=~\"$instance\",family=~\"$family\"})",
           "legendFormat": "{{instance}} {{family}}"
@@ -506,14 +505,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "sum by (instance, family, direction) (rate(obs_agent_family_net_bytes_total{instance=~\"$instance\",family=~\"$family\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} {{family}} {{direction}}"
@@ -538,14 +537,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "topk(10, sum by (instance, family, peer_ip, service_port) (rate(obs_agent_family_inbound_peer_bytes_total{instance=~\"$instance\",family=~\"$family\"}[$__rate_interval])))",
           "legendFormat": "{{family}} ← {{peer_ip}}:{{service_port}}"
@@ -570,14 +569,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "topk(10, sum by (instance, family, peer_ip, service_port) (rate(obs_agent_family_outbound_peer_bytes_total{instance=~\"$instance\",family=~\"$family\"}[$__rate_interval])))",
           "legendFormat": "{{family}} → {{peer_ip}}:{{service_port}}"
@@ -621,14 +620,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "sum by (instance, command) (rate(obs_agent_mysql_queries_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} {{command}}"
@@ -653,14 +652,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "sum by (instance, command) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} {{command}} on-CPU"
@@ -669,7 +668,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "sum by (instance, command) (rate(obs_agent_mysql_query_runq_wait_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} {{command}} waiting for CPU"
@@ -694,14 +693,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "topk(10, rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\"}[5m]) * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{instance=~\"$instance\"})",
           "instant": true,
@@ -727,14 +726,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_mysql_digest_coverage_ratio{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} coverage"
@@ -743,7 +742,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "rate(obs_agent_mysql_events_dropped_total{instance=~\"$instance\"}[$__rate_interval])",
           "legendFormat": "{{instance}} dropped/s"
@@ -787,14 +786,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "sum by (instance, table) (rate(obs_agent_clickhouse_rows_sent_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} sent {{table}}"
@@ -803,7 +802,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "sum by (instance, table, reason) (rate(obs_agent_clickhouse_rows_dropped_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} dropped {{table}} {{reason}}"
@@ -828,14 +827,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_clickhouse_buffer_bytes{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} buffer bytes"
@@ -844,7 +843,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "time() - obs_agent_clickhouse_last_success_timestamp_seconds{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} seconds since last insert"
@@ -869,14 +868,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "sum by (instance, reason_kind) (increase(obs_agent_clickhouse_snapshots_total{instance=~\"$instance\"}[$__range]))",
           "legendFormat": "{{instance}} {{reason_kind}}"
@@ -901,14 +900,14 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${ds_prometheus}"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${ds_prometheus}"
           },
           "expr": "sum by (instance, module) (rate(obs_agent_ebpf_events_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} {{module}}"

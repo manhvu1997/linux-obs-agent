@@ -23,27 +23,38 @@ func TestGeneratedFilesUpToDate(t *testing.T) {
 	}
 }
 
-func isVar(uid string) bool { return uid == "${DS_PROMETHEUS}" || uid == "${DS_CLICKHOUSE}" }
+// dsVars returns the "${name}" references of d's datasource-type template
+// variables: the only datasource uids panels and queries may use.
+func dsVars(d Dashboard) map[string]bool {
+	m := map[string]bool{}
+	for _, tv := range d.Templating.List {
+		if tv.Type == "datasource" {
+			m["${"+tv.Name+"}"] = true
+		}
+	}
+	return m
+}
 
 // dsViolations lists every panel, target and template variable of d whose
-// datasource uid is not one of the import variables.
+// datasource uid is not one of d's own datasource variables.
 func dsViolations(d Dashboard) []string {
+	ok := dsVars(d)
 	var v []string
 	for _, p := range d.Panels {
 		if p.Type == "row" {
 			continue
 		}
-		if !isVar(p.Datasource.UID) {
+		if !ok[p.Datasource.UID] {
 			v = append(v, "panel "+p.Title+": "+p.Datasource.UID)
 		}
 		for _, tg := range p.Targets {
-			if !isVar(tg.Datasource.UID) {
+			if !ok[tg.Datasource.UID] {
 				v = append(v, "target of "+p.Title+": "+tg.Datasource.UID)
 			}
 		}
 	}
 	for _, tv := range d.Templating.List {
-		if tv.Datasource != nil && !isVar(tv.Datasource.UID) {
+		if tv.Datasource != nil && !ok[tv.Datasource.UID] {
 			v = append(v, "variable "+tv.Name+": "+tv.Datasource.UID)
 		}
 	}
@@ -53,7 +64,7 @@ func dsViolations(d Dashboard) []string {
 func TestPanelsUseDatasourceVariables(t *testing.T) {
 	for name, d := range dashboards() {
 		if v := dsViolations(d); len(v) > 0 {
-			t.Errorf("%s: hard-coded datasources: %v", name, v)
+			t.Errorf("%s: datasources not bound to the dashboard's datasource variable: %v", name, v)
 		}
 	}
 }
@@ -61,14 +72,50 @@ func TestPanelsUseDatasourceVariables(t *testing.T) {
 func TestDatasourceCheckRejectsHardCodedUID(t *testing.T) {
 	bad := DS{"prometheus", "abc123"}
 	var d Dashboard
+	d.Templating.List = []Var{{Name: "ds_prometheus", Type: "datasource", Query: "prometheus"}, {Name: "v", Datasource: &bad}}
 	d.Panels = []Panel{{Type: "timeseries", Title: "p", Datasource: promDS, Targets: []Target{{Datasource: bad}}}}
-	d.Templating.List = []Var{{Name: "v", Datasource: &bad}}
 	if v := dsViolations(d); len(v) != 2 {
 		t.Fatalf("want 2 violations, got %v", v)
 	}
 	d.Panels[0].Datasource = bad
 	if v := dsViolations(d); len(v) != 3 {
 		t.Fatalf("want 3 violations, got %v", v)
+	}
+	// A leftover import placeholder is a violation too.
+	d.Panels[0].Datasource = DS{"prometheus", "${DS_PROMETHEUS}"}
+	if v := dsViolations(d); len(v) != 3 {
+		t.Fatalf("${DS_PROMETHEUS} must be rejected, got %v", v)
+	}
+}
+
+// Each dashboard picks its datasource at view time: exactly one datasource
+// variable, listed first so the query variables after it can use it.
+func TestDatasourceVariable(t *testing.T) {
+	want := map[string]struct{ name, plugin string }{
+		"obs-agent-overview.json": {"ds_prometheus", "prometheus"},
+		"obs-agent-analysis.json": {"ds_clickhouse", "grafana-clickhouse-datasource"},
+	}
+	for file, d := range dashboards() {
+		w := want[file]
+		var ds []Var
+		for _, tv := range d.Templating.List {
+			if tv.Type == "datasource" {
+				ds = append(ds, tv)
+			}
+		}
+		if len(ds) != 1 || ds[0].Name != w.name || ds[0].Query != w.plugin {
+			t.Fatalf("%s: datasource variables = %+v, want one %s for plugin %s", file, ds, w.name, w.plugin)
+		}
+		if d.Templating.List[0].Name != w.name {
+			t.Errorf("%s: %s must be the first template variable", file, w.name)
+		}
+		b, err := render(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), `"__inputs"`) || strings.Contains(string(b), "${DS_") {
+			t.Errorf("%s: still contains import-time datasource inputs", file)
+		}
 	}
 }
 

@@ -16,10 +16,18 @@ type DS struct {
 	UID  string `json:"uid"`
 }
 
+// Every panel and query variable points at the dashboard's datasource
+// template variable, so the viewer picks the datasource at view time.
 var (
-	promDS = DS{"prometheus", "${DS_PROMETHEUS}"}
-	chDS   = DS{"grafana-clickhouse-datasource", "${DS_CLICKHOUSE}"}
+	promDS = DS{"prometheus", "${ds_prometheus}"}
+	chDS   = DS{"grafana-clickhouse-datasource", "${ds_clickhouse}"}
 )
+
+// dsVar is the datasource picker; it must come first in the variable list
+// because the query variables after it use it.
+func dsVar(name, label, pluginID string) Var {
+	return Var{Name: name, Label: label, Type: "datasource", Query: pluginID, Refresh: 1}
+}
 
 type Target struct {
 	RefID        string `json:"refId"`
@@ -73,15 +81,7 @@ type Var struct {
 	Current    any    `json:"current,omitempty"`
 }
 
-type Input struct {
-	Name     string `json:"name"`
-	Label    string `json:"label"`
-	Type     string `json:"type"`
-	PluginID string `json:"pluginId"`
-}
-
 type Dashboard struct {
-	Inputs        []Input           `json:"__inputs"`
 	UID           string            `json:"uid"`
 	Title         string            `json:"title"`
 	Tags          []string          `json:"tags"`
@@ -184,10 +184,10 @@ const (
 
 func overview() Dashboard {
 	var d Dashboard
-	d.Inputs = []Input{{Name: "DS_PROMETHEUS", Label: "Prometheus", Type: "datasource", PluginID: "prometheus"}}
 	d.UID, d.Title, d.Tags = "obs-agent-overview", "obs-agent Overview", []string{"obs-agent"}
 	d.SchemaVersion, d.Time, d.Refresh = 39, map[string]string{"from": "now-6h", "to": "now"}, "1m"
 	d.Templating.List = []Var{
+		dsVar("ds_prometheus", "Prometheus", "prometheus"),
 		{Name: "instance", Type: "query", Datasource: &promDS, Query: "label_values(obs_agent_cpu_usage_percent, instance)",
 			Definition: "label_values(obs_agent_cpu_usage_percent, instance)", Multi: true, IncludeAll: true, Refresh: 2},
 		{Name: "family", Type: "query", Datasource: &promDS, Query: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`,
@@ -263,10 +263,10 @@ func overview() Dashboard {
 
 func analysis() Dashboard {
 	var d Dashboard
-	d.Inputs = []Input{{Name: "DS_CLICKHOUSE", Label: "ClickHouse", Type: "datasource", PluginID: "grafana-clickhouse-datasource"}}
 	d.UID, d.Title, d.Tags = "obs-agent-analysis", "obs-agent MySQL & Network Analysis", []string{"obs-agent", "clickhouse"}
 	d.SchemaVersion, d.Time, d.Refresh = 39, map[string]string{"from": "now-6h", "to": "now"}, ""
 	d.Templating.List = []Var{
+		dsVar("ds_clickhouse", "ClickHouse", "grafana-clickhouse-datasource"),
 		{Name: "host", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
 			Query: "SELECT DISTINCT host FROM obs.family_stats WHERE $__timeFilter(window_end) ORDER BY host"},
 		{Name: "family", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
