@@ -53,6 +53,110 @@
         }
       }
     },
+    "llvmPackages_18.clang-unwrapped@18.1.8": {
+      "last_modified": "2026-08-29T00:50:12Z",
+      "resolved": "github:NixOS/nixpkgs/e8be7818e19ada32105a8af937a6a473b38167ca#llvmPackages_18.clang-unwrapped",
+      "source": "devbox-search",
+      "version": "18.1.8",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/3fx1h656gbrawllri4g325i9484hb0hk-clang-18.1.8",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/wsrh4hih1yw13ivc6sbls3yslwqn4lfc-clang-18.1.8-dev"
+            },
+            {
+              "name": "lib",
+              "path": "/nix/store/djk97fnyqzpg9jwa1b49v6f0lssci1v2-clang-18.1.8-lib"
+            },
+            {
+              "name": "python",
+              "path": "/nix/store/hd590wzc2rfpwvy7n3jxzpi7k4b74i9l-clang-18.1.8-python"
+            }
+          ],
+          "store_path": "/nix/store/3fx1h656gbrawllri4g325i9484hb0hk-clang-18.1.8"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/b6fbs0ryjhq9czmhfb8flkvghsv6kkd6-clang-18.1.8",
+              "default": true
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/csn0in1l9j4sm1zajjqg0bka9s5gsf0p-clang-18.1.8-debug"
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/kc82ivgr5gxkg354p28nal656n9n1hj3-clang-18.1.8-dev"
+            },
+            {
+              "name": "lib",
+              "path": "/nix/store/2xpw4i5w1dbbvacpbblsaa4lw4pgpj99-clang-18.1.8-lib"
+            },
+            {
+              "name": "python",
+              "path": "/nix/store/6j818p2qmppawzq65g0bpay02s145jg2-clang-18.1.8-python"
+            }
+          ],
+          "store_path": "/nix/store/b6fbs0ryjhq9czmhfb8flkvghsv6kkd6-clang-18.1.8"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/85qax8gh4npq358r4g6flxwp38qf0rhb-clang-18.1.8",
+              "default": true
+            },
+            {
+              "name": "lib",
+              "path": "/nix/store/07f9c0hr11rw5wzqfw14im8vj1fwffwi-clang-18.1.8-lib"
+            },
+            {
+              "name": "python",
+              "path": "/nix/store/8j038y062jz5ccqgi8zplfn3zxpsljpm-clang-18.1.8-python"
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/cdyrfb1367n2f60q64a8kkqw91gdqx8v-clang-18.1.8-dev"
+            }
+          ],
+          "store_path": "/nix/store/85qax8gh4npq358r4g6flxwp38qf0rhb-clang-18.1.8"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/gby6k5yayznk6339rqf9crwbafzppr4w-clang-18.1.8",
+              "default": true
+            },
+            {
+              "name": "lib",
+              "path": "/nix/store/92vq43zbrf6j22crqhbinpp59sa71ram-clang-18.1.8-lib"
+            },
+            {
+              "name": "python",
+              "path": "/nix/store/x6ay0j3bbmilkkx6w2gkbbad8p8i89k7-clang-18.1.8-python"
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/f5w7j65fjzp2gw40n2n4lgmq4dp0g716-clang-18.1.8-debug"
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/cj29hrhyzw2yv4lawxpg9gyvhxpl03qy-clang-18.1.8-dev"
+            }
+          ],
+          "store_path": "/nix/store/gby6k5yayznk6339rqf9crwbafzppr4w-clang-18.1.8"
+        }
+      }
+    },
     "shellcheck@latest": {
       "last_modified": "2026-08-27T07:16:00Z",
       "resolved": "github:NixOS/nixpkgs/c27cdad491a991b11ed731760aa2ef8db0cb0410#shellcheck",
