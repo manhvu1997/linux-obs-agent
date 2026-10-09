@@ -5,12 +5,15 @@ package mysql_query
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+
+	"github.com/manhvu1997/linux-obs-agent/internal/mysql/sqlhash"
 )
 
 // Needs root and a running mysqld (any supported version; `make
@@ -69,6 +72,9 @@ func waitCmd(t *testing.T, l *Loader, ok func(CmdEvent) bool) CmdEvent {
 func TestCmdEventCarriesCPUAndBytes(t *testing.T) {
 	l, db := startLoader(t)
 	const q = "SELECT REPEAT('a', 100000) AS big"
+	// Aggregated commands no longer reach CmdEvents; mark the statement unsafe
+	// so this test keeps exercising the full-event path.
+	l.MarkUnsafe(3, sqlhash.KernelHash([]byte(q)))
 	var big string
 	if err := db.QueryRow(q).Scan(&big); err != nil { // no args: COM_QUERY
 		t.Fatal(err)
@@ -93,7 +99,8 @@ func TestPreparedStatementTextRecovered(t *testing.T) {
 		t.Fatal("prepared-statement text tracking is off for this mysqld (see the loader's warning)")
 	}
 	const q = "SELECT ? + 41 AS answer"
-	stmt, err := db.Prepare(q) // binary protocol: COM_STMT_PREPARE
+	l.MarkUnsafe(23, sqlhash.KernelHash([]byte(q))) // keep the full-event path
+	stmt, err := db.Prepare(q)                      // binary protocol: COM_STMT_PREPARE
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,4 +113,91 @@ func TestPreparedStatementTextRecovered(t *testing.T) {
 	if ev.Query != q {
 		t.Fatalf("COM_STMT_EXECUTE text = %q, want %q", ev.Query, q)
 	}
+}
+
+// drainUntil drains until pred holds for the accumulated entries or 5 s pass.
+func drainUntil(t *testing.T, l *Loader, pred func([]AggEntry) bool) []AggEntry {
+	t.Helper()
+	var all []AggEntry
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err := l.DrainAgg()
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, got...)
+		if pred(all) {
+			return all
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("condition not met; entries: %+v", all)
+	return nil
+}
+
+// 50 executions that differ only in literals land in one entry.
+func TestAggregatesIdenticalShapes(t *testing.T) {
+	l, db := startLoader(t)
+	for i := 0; i < 50; i++ {
+		var n int
+		if err := db.QueryRow(fmt.Sprintf("SELECT %d + 1", i)).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := sqlhash.KernelHash([]byte("SELECT 0 + 1"))
+	drainUntil(t, l, func(es []AggEntry) bool {
+		var calls uint64
+		for _, e := range es {
+			if e.Command == 3 && e.Hash == want {
+				calls += e.Calls
+			}
+		}
+		return calls == 50
+	})
+}
+
+// Every first-sight text event's hash equals the Go reference.
+func TestKernelHashMatchesGo(t *testing.T) {
+	l, db := startLoader(t)
+	stmts := []string{
+		"SELECT 'it''s', \"q\", 1.5, -3, 0x1F, 1e3 /* it's */",
+		"SELECT `2col` FROM (SELECT 1 AS `2col`) t -- c\n",
+		"SELECT 1abc FROM (SELECT 1 AS 1abc) t # x\n",
+	}
+	for _, s := range stmts {
+		rows, err := db.Query(s)
+		if err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+		rows.Close()
+	}
+	seen := 0
+	deadline := time.After(5 * time.Second)
+	for seen < len(stmts) {
+		select {
+		case ev := <-l.TextEvents:
+			if ev.Command != 3 {
+				continue
+			}
+			if got := sqlhash.KernelHash([]byte(ev.Query)); got != ev.Hash {
+				t.Fatalf("kernel hash %#x != Go %#x for %q", ev.Hash, got, ev.Query)
+			}
+			seen++
+		case <-deadline:
+			t.Fatalf("saw %d of %d text events", seen, len(stmts))
+		}
+	}
+}
+
+// Statements marked unsafe take the same fallback path as an overflowing
+// aggregation map: delivered as full events, not aggregated.
+func TestUnsafeHashFallsBackToFullEvents(t *testing.T) {
+	l, db := startLoader(t)
+	const q = "SELECT 7 + 1"
+	l.MarkUnsafe(3, sqlhash.KernelHash([]byte(q)))
+	var n int
+	if err := db.QueryRow(q).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	waitCmd(t, l, func(ev CmdEvent) bool { return ev.Command == 3 && ev.Query == q })
 }

@@ -13,10 +13,13 @@
 //  1. uprobe  dispatch_command – record start timestamp + SQL text on entry
 //  2. uretprobe dispatch_command – compute latency on return, emit if slow
 //
-// Every command is measured (wall, on-CPU, run-queue wait, bytes) and emitted
-// on cmd_events; COM_QUERY additionally feeds the per-PID stats map and
-// slow-query events. With emitAll == false only COM_QUERY is tracked and no
-// per-command events are emitted (legacy behaviour).
+// Every command is measured in the kernel and added to an aggregation map
+// keyed by {tgid, command, text hash}; DrainAgg returns the sums. Statement
+// text is sent once per (command, hash) on TextEvents. CmdEvents carries only
+// commands that could not be aggregated (map full, or a hash marked unsafe).
+// COM_QUERY additionally feeds the per-PID stats map and slow-query events.
+// With emitAll == false only COM_QUERY is tracked and no per-command events
+// are emitted (legacy behaviour).
 //
 // Prepared statements: COM_STMT_EXECUTE carries only a statement id. Two
 // optional uprobes recover its SQL text — Prepared_statement::prepare stores
@@ -73,6 +76,8 @@ type Loader struct {
 	links       []link.Link
 	rd          *ringbuf.Reader
 	cmdRd       *ringbuf.Reader
+	textRd      *ringbuf.Reader
+	aggActive   uint32 // which agg map the kernel writes (mirrors agg_active)
 	userDropped atomic.Uint64
 	psTracking  atomic.Bool
 
@@ -83,6 +88,11 @@ type Loader struct {
 	// CmdEvents receives one record per dispatch_command call when emitAll
 	// is set. Buffered; when full, events are dropped and counted.
 	CmdEvents chan CmdEvent
+
+	// TextEvents receives statement texts (first sight and verification
+	// samples). Buffered; when full, events are dropped and counted in
+	// Dropped().
+	TextEvents chan TextEvent
 }
 
 // CmdEvent is one MySQL command measured in the kernel.
@@ -151,6 +161,7 @@ func NewLoader(thresholdNs uint64, mysqldPath string, emitAll bool) *Loader {
 		emitAll:     emitAll,
 		SlowEvents:  make(chan model.EBPFEvent, 256),
 		CmdEvents:   make(chan CmdEvent, 8192),
+		TextEvents:  make(chan TextEvent, 4096),
 	}
 }
 
@@ -206,6 +217,7 @@ func (l *Loader) Start(ctx context.Context) error {
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return fmt.Errorf("mysql_query: loading eBPF objects: %w", err)
 	}
+	l.aggActive = 0 // agg_active starts at 0 in every fresh load (also after Stop/Start)
 
 	// Open ringbuf reader before attaching probes to avoid missing early events.
 	rd, err := ringbuf.NewReader(l.objs.Events)
@@ -221,6 +233,13 @@ func (l *Loader) Start(ctx context.Context) error {
 		return fmt.Errorf("mysql_query: opening cmd ringbuf: %w", err)
 	}
 	l.cmdRd = cmdRd
+
+	textRd, err := ringbuf.NewReader(l.objs.TextEvents)
+	if err != nil {
+		l.cleanup()
+		return fmt.Errorf("mysql_query: opening text ringbuf: %w", err)
+	}
+	l.textRd = textRd
 
 	// Open the mysqld executable for uprobe attachment.
 	// link.OpenExecutable resolves the binary's build-ID from the ELF headers,
@@ -290,6 +309,7 @@ func (l *Loader) Start(ctx context.Context) error {
 		"hooks", "uprobe+uretprobe/dispatch_command")
 	go l.consume(ctx)
 	go l.consumeCmd(ctx)
+	go l.consumeText(ctx)
 	return nil
 }
 
@@ -312,6 +332,10 @@ func (l *Loader) cleanup() {
 	if l.cmdRd != nil {
 		l.cmdRd.Close()
 		l.cmdRd = nil
+	}
+	if l.textRd != nil {
+		l.textRd.Close()
+		l.textRd = nil
 	}
 	l.objs.Close()
 }
