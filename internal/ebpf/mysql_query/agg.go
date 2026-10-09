@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/ringbuf"
 )
 
 // AggEntry is one kernel aggregation entry: the sums of every command with
@@ -39,8 +38,13 @@ type TextEvent struct {
 const textEventSize = 536 // sizeof(struct text_event_t)
 
 // drainGrace lets a uretprobe that read the old agg_active finish its
-// update before the old buffer is read. Programs run in microseconds.
-const drainGrace = 5 * time.Millisecond
+// update before the old buffer is read. A program runs in microseconds, but
+// since kernel 6.1 uprobe programs run under migrate_disable(), not
+// preempt_disable(): on a preempt=full kernel a program can be preempted
+// mid-update and wait for a CPU, and a saturated CPU is exactly the scenario
+// this module diagnoses. 50 ms covers several scheduler periods of run-queue
+// wait; it is paid once per poll (default 5 s) in the poll goroutine.
+const drainGrace = 50 * time.Millisecond
 
 func decodeTextEvent(b []byte) (TextEvent, bool) {
 	if len(b) < textEventSize {
@@ -163,31 +167,18 @@ func (l *Loader) AggOverflow() uint64 {
 }
 
 // consumeText forwards text events from the ring buffer to TextEvents.
-func (l *Loader) consumeText(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		rec, err := l.textRd.Read()
-		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
-				return
-			}
-			slog.Warn("mysql_query: text ringbuf read error", "err", err)
-			continue
-		}
-		ev, ok := decodeTextEvent(rec.RawSample)
+func (l *Loader) consumeText(ctx context.Context, rd recordReader) {
+	readLoop(ctx, rd, "text_events", func(sample []byte) {
+		ev, ok := decodeTextEvent(sample)
 		if !ok {
-			continue
+			return
 		}
 		l.forwardText(ev, l.ForgetText)
-	}
+	})
 }
 
 // forwardText delivers ev without blocking. When TextEvents is full the event
-// is dropped and counted in Dropped(). A dropped first-sight event has already
+// is dropped and counted in TextDropped() (not Dropped(): no command is lost). A dropped first-sight event has already
 // marked (command, hash) in the kernel's text_seen map and no consumer will
 // ever see it, so forget re-requests it; the kernel then resends the text with
 // the hash's next command. A dropped verification resend never touched
@@ -196,7 +187,7 @@ func (l *Loader) forwardText(ev TextEvent, forget func(command uint32, hash uint
 	select {
 	case l.TextEvents <- ev:
 	default:
-		l.userDropped.Add(1)
+		l.textDropped.Add(1)
 		if !ev.Verify {
 			forget(ev.Command, ev.Hash)
 		}

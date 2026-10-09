@@ -248,7 +248,13 @@ struct {
 
 /* Prepared_statement* → SQL text. LRU: statements closed by COM_STMT_CLOSE
  * (or freed with their connection) are never explicitly deleted; a reused
- * address is overwritten by its next prepare. */
+ * address is overwritten by its next prepare.
+ * Known race: the uretprobe reads text and hash through a map-value pointer;
+ * if the entry is evicted and its element reused by a concurrent prepare in
+ * that window, an execute can send (or verify-resend) a text that does not
+ * match its hash. Userspace then detects the mismatch (verify sample or the
+ * first-sight kernel-hash check) and marks the hash unsafe: the cost is that
+ * this statement is pinned to the exact (full cmd_events) path. */
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __type(key, __u64);

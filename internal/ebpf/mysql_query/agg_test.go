@@ -55,14 +55,14 @@ func TestForwardTextDropForgetsFirstSightOnly(t *testing.T) {
 
 	// Room in the channel: delivered, nothing forgotten, nothing dropped.
 	l.forwardText(TextEvent{Command: 3, Hash: 1}, forget)
-	if len(l.TextEvents) != 1 || l.userDropped.Load() != 0 || len(calls) != 0 {
-		t.Fatalf("delivered: len=%d dropped=%d forgot=%v", len(l.TextEvents), l.userDropped.Load(), calls)
+	if len(l.TextEvents) != 1 || l.TextDropped() != 0 || len(calls) != 0 {
+		t.Fatalf("delivered: len=%d dropped=%d forgot=%v", len(l.TextEvents), l.TextDropped(), calls)
 	}
 
 	// Channel full, first-sight event: counted and re-requested.
 	l.forwardText(TextEvent{Command: 23, Hash: 0xabc}, forget)
-	if l.userDropped.Load() != 1 {
-		t.Fatalf("dropped = %d, want 1", l.userDropped.Load())
+	if l.TextDropped() != 1 {
+		t.Fatalf("text dropped = %d, want 1", l.TextDropped())
 	}
 	if want := []forgotten{{23, 0xabc}}; !reflect.DeepEqual(calls, want) {
 		t.Fatalf("forget calls = %v, want %v", calls, want)
@@ -70,11 +70,17 @@ func TestForwardTextDropForgetsFirstSightOnly(t *testing.T) {
 
 	// Channel full, verification resend: counted, but text_seen is untouched.
 	l.forwardText(TextEvent{Command: 3, Hash: 0xdef, Verify: true}, forget)
-	if l.userDropped.Load() != 2 {
-		t.Fatalf("dropped = %d, want 2", l.userDropped.Load())
+	if l.TextDropped() != 2 {
+		t.Fatalf("text dropped = %d, want 2", l.TextDropped())
 	}
 	if len(calls) != 1 {
 		t.Fatalf("verify drop must not forget; calls = %v", calls)
+	}
+
+	// A text drop is re-requested (or only a verification sample), never a
+	// lost command: Dropped() must not count it.
+	if l.Dropped() != 0 {
+		t.Fatalf("Dropped() = %d, want 0 (text drops are not lost commands)", l.Dropped())
 	}
 }
 

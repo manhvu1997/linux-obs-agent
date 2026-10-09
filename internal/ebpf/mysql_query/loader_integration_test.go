@@ -53,6 +53,25 @@ func startLoader(t *testing.T) (*Loader, *sql.DB) {
 	return l, db
 }
 
+// textHash is the hash the loaded program computes for q: the literal-
+// skipping KernelHash, or ExactHash after the verifier fallback.
+func textHash(l *Loader, q string) uint64 {
+	if l.LiteralSkip() {
+		return sqlhash.KernelHash([]byte(q))
+	}
+	return sqlhash.ExactHash([]byte(q))
+}
+
+// The verifier must accept the literal-skipping loop. On failure the module
+// still works (exact-text hashing), but the kernel keeps one entry per
+// distinct text, so the matrix reports it.
+func TestLiteralSkipLoaded(t *testing.T) {
+	l, _ := startLoader(t)
+	if !l.LiteralSkip() {
+		t.Fatal("the verifier rejected literal-skipping text_hash; loaded with the exact-text fallback (see the Warn log for the verifier error)")
+	}
+}
+
 // waitCmd returns the first command event matching ok within 5 s.
 func waitCmd(t *testing.T, l *Loader, ok func(CmdEvent) bool) CmdEvent {
 	t.Helper()
@@ -74,7 +93,7 @@ func TestCmdEventCarriesCPUAndBytes(t *testing.T) {
 	const q = "SELECT REPEAT('a', 100000) AS big"
 	// Aggregated commands no longer reach CmdEvents; mark the statement unsafe
 	// so this test keeps exercising the full-event path.
-	l.MarkUnsafe(3, sqlhash.KernelHash([]byte(q)))
+	l.MarkUnsafe(3, textHash(l, q))
 	var big string
 	if err := db.QueryRow(q).Scan(&big); err != nil { // no args: COM_QUERY
 		t.Fatal(err)
@@ -99,8 +118,8 @@ func TestPreparedStatementTextRecovered(t *testing.T) {
 		t.Fatal("prepared-statement text tracking is off for this mysqld (see the loader's warning)")
 	}
 	const q = "SELECT ? + 41 AS answer"
-	l.MarkUnsafe(23, sqlhash.KernelHash([]byte(q))) // keep the full-event path
-	stmt, err := db.Prepare(q)                      // binary protocol: COM_STMT_PREPARE
+	l.MarkUnsafe(23, textHash(l, q)) // keep the full-event path
+	stmt, err := db.Prepare(q)       // binary protocol: COM_STMT_PREPARE
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +157,9 @@ func drainUntil(t *testing.T, l *Loader, pred func([]AggEntry) bool) []AggEntry 
 // 50 executions that differ only in literals land in one entry.
 func TestAggregatesIdenticalShapes(t *testing.T) {
 	l, db := startLoader(t)
+	if !l.LiteralSkip() {
+		t.Skip("exact-text fallback: literals are part of the key (TestLiteralSkipLoaded fails)")
+	}
 	for i := 0; i < 50; i++ {
 		var n int
 		if err := db.QueryRow(fmt.Sprintf("SELECT %d + 1", i)).Scan(&n); err != nil {
@@ -156,7 +178,8 @@ func TestAggregatesIdenticalShapes(t *testing.T) {
 	})
 }
 
-// Every first-sight text event's hash equals the Go reference.
+// Every first-sight text event's hash equals the Go reference (KernelHash, or
+// ExactHash after the verifier fallback).
 func TestKernelHashMatchesGo(t *testing.T) {
 	l, db := startLoader(t)
 	stmts := []string{
@@ -185,7 +208,7 @@ func TestKernelHashMatchesGo(t *testing.T) {
 			if ev.Command != 3 || !want[ev.Query] {
 				continue
 			}
-			if got := sqlhash.KernelHash([]byte(ev.Query)); got != ev.Hash {
+			if got := textHash(l, ev.Query); got != ev.Hash {
 				t.Fatalf("kernel hash %#x != Go %#x for %q", ev.Hash, got, ev.Query)
 			}
 			delete(want, ev.Query) // each statement counts once (verify resends)
@@ -201,7 +224,7 @@ func TestKernelHashMatchesGo(t *testing.T) {
 func TestUnsafeHashFallsBackToFullEvents(t *testing.T) {
 	l, db := startLoader(t)
 	const q = "SELECT 7 + 1"
-	l.MarkUnsafe(3, sqlhash.KernelHash([]byte(q)))
+	l.MarkUnsafe(3, textHash(l, q))
 	var n int
 	if err := db.QueryRow(q).Scan(&n); err != nil {
 		t.Fatal(err)

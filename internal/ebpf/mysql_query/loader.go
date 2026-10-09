@@ -78,9 +78,11 @@ type Loader struct {
 	rd          *ringbuf.Reader
 	cmdRd       *ringbuf.Reader
 	textRd      *ringbuf.Reader
-	aggActive   uint32 // which agg map the kernel writes (mirrors agg_active)
-	userDropped atomic.Uint64
+	aggActive   uint32        // which agg map the kernel writes (mirrors agg_active)
+	userDropped atomic.Uint64 // CmdEvents channel full: commands lost
+	textDropped atomic.Uint64 // TextEvents channel full: re-requested, not lost
 	psTracking  atomic.Bool
+	literalSkip atomic.Bool
 
 	// SlowEvents receives slow-query outlier events (latency > threshold).
 	// Buffered to 256 so the consume goroutine never blocks the ringbuf reader.
@@ -95,7 +97,8 @@ type Loader struct {
 
 	// TextEvents receives statement texts (first sight and verification
 	// samples). Buffered; when full, events are dropped and counted in
-	// Dropped().
+	// TextDropped() (a dropped first-sight text is re-requested from the
+	// kernel, so no command is lost).
 	TextEvents chan TextEvent
 }
 
@@ -131,9 +134,10 @@ func decodeCmdEvent(b []byte) (CmdEvent, bool) {
 // the statement was prepared before the agent attached.
 func (l *Loader) PreparedTextTracking() bool { return l.psTracking.Load() }
 
-// Dropped returns command events lost in the kernel (cmd ring buffer full)
-// plus events dropped in userspace because CmdEvents or TextEvents was full.
-// Safe to call before Start.
+// Dropped returns commands genuinely lost: fallback command events the
+// kernel could not reserve (cmd ring buffer full) plus those dropped in
+// userspace because CmdEvents was full. Text events dropped on a full
+// TextEvents are not included (see TextDropped). Safe to call before Start.
 func (l *Loader) Dropped() uint64 {
 	total := l.userDropped.Load()
 	var perCPU []uint64
@@ -146,6 +150,21 @@ func (l *Loader) Dropped() uint64 {
 	}
 	return total
 }
+
+// TextDropped returns text events dropped because TextEvents was full. A
+// first-sight text is re-requested from the kernel (its hash's commands are
+// attributed once the resend arrives, or to the "text unavailable"
+// placeholder after one poll); a verification sample is simply skipped. No
+// command is lost, so these are not part of Dropped. Safe to call before
+// Start.
+func (l *Loader) TextDropped() uint64 { return l.textDropped.Load() }
+
+// LiteralSkip reports whether the kernel hashes statement texts with the
+// literal-skipping rule (sqlhash.KernelHash). False after the verifier
+// rejected the skipping loop and the module was loaded with exact-text
+// hashing (plain FNV-1a): digests are still exact, the kernel just keeps one
+// aggregation entry per distinct text instead of per statement shape.
+func (l *Loader) LiteralSkip() bool { return l.literalSkip.Load() }
 
 // NewLoader creates a Loader.
 //   - thresholdNs: minimum query latency in nanoseconds that triggers a ringbuf
@@ -220,9 +239,19 @@ func (l *Loader) Start(ctx context.Context) error {
 			psErr = fmt.Errorf("setting ps_prepare_has_thd: %w", err)
 		}
 	}
-	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
+	skip, err := loadLiteralSkipFallback(
+		func() error { return spec.LoadAndAssign(&l.objs, nil) },
+		func() error {
+			v := spec.Variables["literal_skip"]
+			if v == nil {
+				return errors.New("variable literal_skip not found")
+			}
+			return v.Set(uint8(0))
+		})
+	if err != nil {
 		return fmt.Errorf("mysql_query: loading eBPF objects: %w", err)
 	}
+	l.literalSkip.Store(skip)
 	l.aggActive = 0 // agg_active starts at 0 in every fresh load (also after Stop/Start)
 
 	// Open ringbuf reader before attaching probes to avoid missing early events.
@@ -312,11 +341,40 @@ func (l *Loader) Start(ctx context.Context) error {
 		"mysqld_path", l.mysqldPath,
 		"symbol", symbol,
 		"emit_all", l.emitAll,
+		"literal_skip", skip,
 		"hooks", "uprobe+uretprobe/dispatch_command")
-	go l.consume(ctx)
-	go l.consumeCmd(ctx)
-	go l.consumeText(ctx)
+	// The readers are passed by value: cleanup() nils the fields.
+	go l.consume(ctx, rd)
+	go l.consumeCmd(ctx, cmdRd)
+	go l.consumeText(ctx, textRd)
 	return nil
+}
+
+// loadLiteralSkipFallback runs load. If it fails with a verifier error — the
+// 511-iteration literal-skipping loop in text_hash is the program most likely
+// to exceed an old kernel's verifier budget — it calls disable (sets the
+// read-only literal_skip to 0, so the verifier dead-code-eliminates the loop)
+// and retries once. It reports whether literal skipping is in effect.
+func loadLiteralSkipFallback(load, disable func() error) (literalSkip bool, err error) {
+	err = load()
+	if err == nil {
+		return true, nil
+	}
+	var ve *ebpf.VerifierError
+	if !errors.As(err, &ve) {
+		return false, err
+	}
+	if derr := disable(); derr != nil {
+		return false, fmt.Errorf("%w (exact-text hashing fallback unavailable: %v)", err, derr)
+	}
+	if rerr := load(); rerr != nil {
+		return false, fmt.Errorf("retry with exact-text hashing after verifier rejection (%v): %w", err, rerr)
+	}
+	slog.Warn("mysql_query: the verifier rejected literal-skipping text hashing; loaded with exact-text hashing. "+
+		"Digests and totals stay exact, but the kernel keeps one aggregation entry per distinct text "+
+		"(statements differing only in literals no longer share an entry: more agg map entries, text events and overflow risk)",
+		"verifier_error", err)
+	return false, nil
 }
 
 // Stop detaches all uprobes and releases all kernel resources.
@@ -454,83 +512,99 @@ func (l *Loader) TopSlowPIDs(n int, staleNs uint64) []MySQLPIDStat {
 
 // ─── Ringbuf consumer ─────────────────────────────────────────────────────────
 
-// consume reads slow-query events from the ringbuf and forwards them to
-// SlowEvents.  Exits when ctx is cancelled or the reader is closed (Stop).
-func (l *Loader) consume(ctx context.Context) {
+// recordReader is the subset of *ringbuf.Reader the consumers use.
+type recordReader interface {
+	Read() (ringbuf.Record, error)
+}
+
+// readErrorBackoff is the pause after an unexpected ring buffer read error,
+// so a persistent error does not spin a core.
+const readErrorBackoff = 100 * time.Millisecond
+
+// readLoop calls handle for every record read from rd until ctx is cancelled
+// or rd is closed (Stop). rd is the reader captured when the goroutine was
+// started, never a Loader field (cleanup() nils those). os.ErrDeadlineExceeded
+// is retried at once; any other error is logged and retried after
+// readErrorBackoff.
+func readLoop(ctx context.Context, rd recordReader, name string, handle func([]byte)) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-
-		rec, err := l.rd.Read()
+		rec, err := rd.Read()
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) {
 				return
 			}
-			slog.Warn("mysql_query: ringbuf read error", "err", err)
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
+			}
+			slog.Warn("mysql_query: ring buffer read error", "ringbuf", name, "err", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(readErrorBackoff):
+			}
 			continue
 		}
+		handle(rec.RawSample)
+	}
+}
 
-		var raw MysqlQueryMysqlSlowEventT // bpf2go-generated type
-		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &raw); err != nil {
-			continue
-		}
+// consume reads slow-query events from the ringbuf and forwards them to
+// SlowEvents.  Exits when ctx is cancelled or the reader is closed (Stop).
+func (l *Loader) consume(ctx context.Context, rd recordReader) {
+	readLoop(ctx, rd, "events", l.handleSlow)
+}
 
-		comm := nullTermU8(raw.Comm[:])
-		// Never an anonymous blank row: an execute whose text was not
-		// recovered gets the same placeholder as its digest.
-		query := cmdmap.SlowQueryText(raw.Command, nullTermU8(raw.Query[:]), l.psTracking.Load())
+// handleSlow decodes one slow-query event and forwards it to SlowEvents.
+func (l *Loader) handleSlow(sample []byte) {
+	var raw MysqlQueryMysqlSlowEventT // bpf2go-generated type
+	if err := binary.Read(bytes.NewReader(sample), binary.LittleEndian, &raw); err != nil {
+		return
+	}
 
-		select {
-		case l.SlowEvents <- model.EBPFEvent{
-			Type:      model.EventMySQLQuery,
-			Timestamp: time.Now(),
+	comm := nullTermU8(raw.Comm[:])
+	// Never an anonymous blank row: an execute whose text was not
+	// recovered gets the same placeholder as its digest.
+	query := cmdmap.SlowQueryText(raw.Command, nullTermU8(raw.Query[:]), l.psTracking.Load())
+
+	select {
+	case l.SlowEvents <- model.EBPFEvent{
+		Type:      model.EventMySQLQuery,
+		Timestamp: time.Now(),
+		PID:       raw.Pid,
+		Comm:      comm,
+		Data: model.MySQLSlowEvent{
 			PID:       raw.Pid,
+			TID:       raw.Tid,
+			LatencyMs: float64(raw.LatencyNs) / 1e6,
+			Query:     query,
 			Comm:      comm,
-			Data: model.MySQLSlowEvent{
-				PID:       raw.Pid,
-				TID:       raw.Tid,
-				LatencyMs: float64(raw.LatencyNs) / 1e6,
-				Query:     query,
-				Comm:      comm,
-				Timestamp: time.Now(),
-			},
-		}:
-		default:
-			// Drop rather than block – maintain <2% CPU overhead.
-		}
+			Timestamp: time.Now(),
+		},
+	}:
+	default:
+		// Drop rather than block – maintain <2% CPU overhead.
 	}
 }
 
 // consumeCmd forwards per-command events. Never blocks the reader: a full
 // channel drops the event and counts it in Dropped().
-func (l *Loader) consumeCmd(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		rec, err := l.cmdRd.Read()
-		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
-				return
-			}
-			slog.Warn("mysql_query: cmd ringbuf read error", "err", err)
-			continue
-		}
-		ev, ok := decodeCmdEvent(rec.RawSample)
+func (l *Loader) consumeCmd(ctx context.Context, rd recordReader) {
+	readLoop(ctx, rd, "cmd_events", func(sample []byte) {
+		ev, ok := decodeCmdEvent(sample)
 		if !ok {
-			continue
+			return
 		}
 		select {
 		case l.CmdEvents <- ev:
 		default:
 			l.userDropped.Add(1)
 		}
-	}
+	})
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
