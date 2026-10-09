@@ -404,12 +404,26 @@ enum { ST_CODE, ST_STR, ST_TICK, ST_BLOCK, ST_LINE, ST_DIGITS };
  * NUL-terminated within QUERY_MAX bytes, c1 is only read past c != 0 (so it
  * is the next byte or the terminator), and c2 is only consulted when
  * c1 == '-' (so i + 2 is at most the terminator); index QUERY_MAX itself
- * reads as 0. Bytes after the terminator (stale scratch data) are never used. */
+ * reads as 0. Bytes after the terminator (stale scratch data) are never used.
+ *
+ * Verifier state budget: i must be exact (it indexes memory), so every other
+ * loop-carried value that a branch compares against a known constant becomes
+ * precise and splits states. Each one is therefore kept to a few values:
+ *   st         ST_CODE..ST_DIGITS (6)
+ *   q          0, '\'' or '"'; written on entering ST_STR, read only there
+ *   esc        0/1; reset on entering ST_STR, read only there
+ *   blk        0..3, saturating: bytes since the comment's '/', i.e. Go's
+ *              min(i - blockAt, 3); written on entering ST_BLOCK, read only there
+ *   prev_ident 0/1 = is_ident(prev)  } Go's prev byte, reduced to the two
+ *   prev_star  0/1 = (prev == '*')   } tests Go applies to it
+ * h, keep and skip are unknown scalars (no state split). Same semantics as
+ * Go: blk >= 3 <=> i >= blockAt + 3; the flags are updated wherever Go
+ * assigns prev (the ST_DIGITS continue and the end of the iteration). */
 static __always_inline __u64 text_hash(const __u8 *text)
 {
     __u64 h = FNV_OFFSET, keep = 0, skip = 0;
-    __u32 st = ST_CODE, block_at = 0;
-    __u8 q = 0, prev = 0, esc = 0;
+    __u32 st = ST_CODE;
+    __u8 q = 0, esc = 0, blk = 0, prev_ident = 0, prev_star = 0;
 
     if (!literal_skip) {
         for (__u32 i = 0; i < QUERY_MAX - 1; i++) {
@@ -429,7 +443,8 @@ static __always_inline __u64 text_hash(const __u8 *text)
         if (st == ST_DIGITS) {
             if (is_digit(c)) {
                 keep = fnv1a(keep, c);
-                prev = c;
+                prev_ident = 1;         /* prev = c: a digit is an ident byte, not '*' */
+                prev_star = 0;
                 continue;
             }
             h = is_ident(c) ? keep : skip;
@@ -440,17 +455,18 @@ static __always_inline __u64 text_hash(const __u8 *text)
                 h = fnv1a(h, c);        /* opening quote byte: ' and " must not alias */
                 st = ST_STR;
                 q = c;
+                esc = 0;                /* already 0 here (a string closes only unescaped) */
             } else if (c == '`') {
                 h = fnv1a(h, c);
                 st = ST_TICK;
             } else if (c == '/' && c1 == '*') {
                 h = fnv1a(h, c);
                 st = ST_BLOCK;
-                block_at = i;
+                blk = 0;                /* Go: blockAt = i */
             } else if (c == '#' || (c == '-' && c1 == '-' && (c2 == 0 || is_space(c2)))) {
                 h = fnv1a(h, c);
                 st = ST_LINE;
-            } else if (is_digit(c) && !is_ident(prev)) {
+            } else if (is_digit(c) && !prev_ident) {
                 keep = fnv1a(h, c);
                 skip = fnv1a(h, 0);     /* NUL cannot occur in the clipped text */
                 st = ST_DIGITS;
@@ -472,14 +488,17 @@ static __always_inline __u64 text_hash(const __u8 *text)
                 st = ST_CODE;
         } else if (st == ST_BLOCK) {
             h = fnv1a(h, c);
-            if (c == '/' && prev == '*' && i >= block_at + 3)
+            if (blk < 3)
+                blk++;                  /* blk = min(i - blockAt, 3) */
+            if (c == '/' && prev_star && blk >= 3)
                 st = ST_CODE;
         } else { /* ST_LINE */
             h = fnv1a(h, c);
             if (c == '\n')
                 st = ST_CODE;
         }
-        prev = c;
+        prev_ident = is_ident(c);       /* prev = c */
+        prev_star = c == '*';
     }
     if (st == ST_DIGITS)
         h = skip;
@@ -593,7 +612,8 @@ int uprobe_dispatch_command(struct pt_regs *ctx)
             p->query_len = len;
         }
     }
-    if (p->query[0])
+    /* Legacy mode never aggregates: keep the hashing loop out of it. */
+    if (emit_all_queries && p->query[0])
         p->hash = text_hash(p->query);
     /* A new command starts: no Prepared_statement from an earlier one may
      * linger and block (BPF_NOEXIST) this command's execute_loop. */
@@ -647,7 +667,8 @@ int uprobe_ps_prepare(struct pt_regs *ctx)
     t->text[n] = 0;
     t->len  = len > 0xffffffffULL ? 0xffffffffU : (__u32)len;
     t->_pad = 0;
-    t->hash = text_hash(t->text);
+    /* Only the aggregation path (emit_all_queries) reads the hash. */
+    t->hash = emit_all_queries ? text_hash(t->text) : 0;
     bpf_map_update_elem(&ps_text, &self, t, BPF_ANY);
     return 0;
 }
