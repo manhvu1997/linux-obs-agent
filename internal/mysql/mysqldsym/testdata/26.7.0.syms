@@ -1,0 +1,5 @@
+# mysqld 26.7.0 (mysql-community-server-core 26.7.0-1ubuntu22.04 amd64)
+_ZN18Prepared_statement7prepareEP3THDPKcmPP10Item_param
+_ZN18Prepared_statement12execute_loopEP3THDP6Stringb
+_Z16dispatch_commandP3THDPK8COM_DATA19enum_server_command
+_Z15log_write_up_toR5log_tmb

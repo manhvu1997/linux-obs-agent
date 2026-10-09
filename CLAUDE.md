@@ -198,6 +198,8 @@ linux-obs-agent/
 │   ├── procreport/procreport.go     ← builds process_report
 │   ├── promcollect/                 ← family + MySQL digest Prometheus collectors
 │   ├── mysql/cmdmap/cmdmap.go       ← MySQL command → class + digest
+│   ├── mysql/mysqldsym/             ← mysqld hook symbols + prepare() layout per MySQL
+│   │                                   version (testdata/*.syms, cmd/symdump)
 │   │
 │   ├── process/
 │   │   └── inspector.go             ← /proc/[pid] scanner, top-N CPU/RSS, K8s metadata
@@ -1188,6 +1190,46 @@ mysql:
 
 Environment variable overrides: `MYSQL_TRACING_ENABLED=true`, `MYSQL_SLOW_QUERY_THRESHOLD_MS=50`, `MYSQL_MYSQLD_PATH=/usr/bin/mysqld`.
 
+### MySQL version compatibility
+
+Hook symbols are chosen by `internal/mysql/mysqldsym` from the binary's
+symbol names, by **signature rules, never substrings**: a name that matches
+no rule is refused rather than guessed, because a uprobe on the wrong function
+or arguments read from the wrong registers records garbage silently. Checked
+against real `mysqld` builds (`.dynsym`; fixtures in
+`internal/mysql/mysqldsym/testdata/*.syms`):
+
+| MySQL | `dispatch_command` | `Prepared_statement::prepare` | layout (query, length) | `log_write_up_to` |
+|---|---|---|---|---|
+| 5.7.42 | `_Z16dispatch_commandP3THDPK8COM_DATA19enum_server_command` | `…prepareEPKcm` | `query_first` (RSI, RDX) | `…tomb` |
+| 8.0.11, 8.0.19 | same | `…prepareEPKcm` | `query_first` | `…toR5log_tmb` |
+| 8.0.14 | same | `…prepareEPKcmb` | `query_first` | `…toR5log_tmb` |
+| 8.0.28 | same | `…prepareEPKcmPP10Item_param` | `query_first` | `…toR5log_tmb` |
+| 8.0.36, 8.0.46, 8.4.11, 9.7.2, 26.7.0 | same | `…prepareEP3THDPKcmPP10Item_param` | `thd_first` (RDX, RCX) | `…toR5log_tmb` |
+
+- `dispatch_command` is matched **exactly**. 8.0.11 also exports
+  `xpl::dispatcher::dispatch_command` (X plugin) before it, which the former
+  substring search hooked by mistake. MariaDB (`dispatch_command(enum
+  server_command, THD*, …)`) is refused at start with the candidates listed.
+- `prepare`: the method itself (`_ZN…`, not a nested lambda `_ZZN…`, not a
+  `.cold`/`.isra` part) with an optional leading `THD*` followed by `(const
+  char*, size_t)`. Trailing parameters do not move the registers.
+- `execute_loop`: any arguments (only `this` is read). The arguments differ
+  in every series (5.7 `EbPhS0_`, early 8.0 `EP6Stringb`, 8.0.36+ `EP3THDP6Stringb`).
+- `COM_DATA` (query pointer + `unsigned int` length first) and
+  `enum_server_command` (prepare 22, execute 23) are unchanged through trunk.
+- The start log prints `mysqld hooks: dispatch=ok prepare=<layout> execute_loop=ok`.
+
+**Adding a release** (9.x, 26.x+): extract its `mysqld` (e.g. from the
+`mysql-community-server-core` .deb), run
+`go run ./internal/mysql/mysqldsym/cmd/symdump -label "<version> (<package>)" <mysqld> > internal/mysql/mysqldsym/testdata/<version>.syms`,
+add the expected hooks to `TestCompatMatrix`, run the tests. A changed
+signature fails there, naming the hook. Then run the runtime matrix on a
+Linux x86_64 host: `sudo make test-mysql-matrix` (Docker; images from
+`MYSQL_IMAGES`, default `mysql:5.7 mysql:8.0 mysql:8.4 mysql:9`), which
+attaches through `/proc/<pid>/root/usr/sbin/mysqld` and checks a COM_QUERY and
+a server-side prepared statement's recovered text.
+
 ### GET /api/diagnose — MySQLReport field
 
 ```bash
@@ -1696,7 +1738,7 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 - The eBPF programs are **x86_64 only** (register-level access via a local `pt_regs` layout); on other architectures the netflow and mysql_query loaders refuse to start (`network_source: "unavailable: …"`). The kernel floor is **5.5** (BTF/CO-RE helpers such as `bpf_probe_read_kernel`), not 5.4.
 - The result-bytes kretprobes use `RetprobeMaxActive=2048` via tracefs when available. When tracefs is unavailable the loader falls back to the kernel default instance count, and with the default many concurrent slow-client senders can make the kernel drop kretprobe returns and under-count `bytes_out` / `bytes_tx`. Tracefs-based probes can leave `ebpf_*` events in `/sys/kernel/tracing/kprobe_events` after a crash.
 - Lifetime counters for a family or outbound-peer label that was idle for more than 1 h restart from 0 if it returns (bounded memory; a normal Prometheus counter reset).
-- `COM_QUERY` length is read as a 4-byte `unsigned int` (MySQL 5.7/8.0). `run_delay` needs scheduler stats; on kernels where it reads 0 the report sets `cpu_accounting: run_delay_unavailable`.
+- `COM_QUERY` length is read as a 4-byte `unsigned int` (MySQL 5.7 through 26.x). `run_delay` needs scheduler stats; on kernels where it reads 0 the report sets `cpu_accounting: run_delay_unavailable`.
 - **Not verified at runtime in the development environment** (compile-checked only, on arm64 Linux): verifier acceptance, attach behaviour and byte/connection counts on x86_64. Run the verification commands in the spec/plan before relying on the numbers.
 
 ### Prepared statements and command names
@@ -1716,7 +1758,7 @@ uretprobe dispatch_command (COM_STMT_EXECUTE): text = ps_text[ps_exec[tid]]; ps_
 - `ps_text` holds **16 384** statements (LRU). With more live prepared statements than that across all sessions, the least recently prepared are evicted and their later executes show `prepared before agent start` too. (An entry evicted and re-filled concurrently can in rare cases pair an execute with the wrong text.)
 - `COM_STMT_FETCH` (server-side cursors) runs without `execute_loop`; its cost shows under `<COM_STMT_FETCH>` without text.
 - A prepared `CALL p(?)` whose procedure runs `EXECUTE s` re-enters `execute_loop`; the outermost statement wins, so the whole command is attributed to the `CALL`.
-- Needs `Prepared_statement::prepare` and `Prepared_statement::execute_loop` in mysqld's symbol table (`.symtab`, then `.dynsym`). Supported `prepare` layouts: MySQL **8.4** `prepare(THD*, const char*, size_t, Item_param**)` and **8.0** `prepare(const char*, size_t)`; the layout is chosen from the mangled name. Otherwise (stripped binary, unknown overload, attach error) the agent logs one warning, `PreparedTextTracking` is off and executes keep the placeholder `<COM_STMT_EXECUTE: prepared, text unavailable>`.
+- Needs `Prepared_statement::prepare` and `Prepared_statement::execute_loop` in mysqld's symbol table (`.symtab`, then `.dynsym`). Supported `prepare` layouts: `thd_first` `prepare(THD*, const char*, size_t, …)` (8.0.36+, 8.4, 9.x, 26.x) and `query_first` `prepare(const char*, size_t, …)` (5.7, 8.0 up to at least 8.0.28); the layout is chosen from the mangled name — see *MySQL version compatibility* in §16. Otherwise (stripped binary, unknown overload, attach error) the agent logs one warning, `PreparedTextTracking` is off and executes keep the placeholder `<COM_STMT_EXECUTE: prepared, text unavailable>`.
 - Prepared executes now also feed the legacy per-PID counts (`top_processes`) and `recent_slow_queries`, with the recovered text when available (also with `emit_all_queries: false`). A slow execute without recovered text shows the same placeholder as its digest, never an empty `query`.
 - Other commands get readable placeholders from MySQL 8.x `enum_server_command`: `<COM_PING>`, `<COM_REFRESH>`, `<COM_STMT_CLOSE>`, `<COM_RESET_CONNECTION>`, …; an unknown number stays `<COM command N>` (class `other`).
 - **System-schema folding** (`mysql.fold_system_schemas`, default `true`): every statement that qualifies an object with `information_schema.`, `performance_schema.`, `sys.` or `mysql.` (exporter and monitoring queries) is merged into one digest `<system schemas: information_schema, performance_schema, sys, mysql>` with no `sample_query`; its command class is unchanged. Only a schema *qualifier* counts — `select sys from t` or a column `t.mysql` is not folded. An unqualified query run with `USE mysql` is not folded either. False positives: a user table or alias literally named `sys` or `mysql` used as a qualifier (`sys.col`) is folded too, and ORM-driven `information_schema` introspection is merged into the one sample-less row (its CPU is still counted there). Disable with `fold_system_schemas: false` or `MYSQL_FOLD_SYSTEM_SCHEMAS=false`.

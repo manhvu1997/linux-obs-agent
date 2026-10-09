@@ -12,6 +12,7 @@
 #   make image            – build obs-agent Docker image
 #   make image-inspector  – build db-inspector Docker image
 #   make test-clickhouse  – ClickHouse round-trip integration test (needs Docker)
+#   make test-mysql-matrix – mysql_query eBPF tests vs MySQL 5.7/8.0/8.4/9 (Linux, root, Docker)
 # ──────────────────────────────────────────────────────────────────────────────
 
 BINARY          := obs-agent
@@ -37,7 +38,7 @@ GOOS          := linux
 IMAGE_REPO    ?= ghcr.io/youorg/obs-agent
 IMAGE_TAG     ?= latest
 
-.PHONY: all generate build build-inspector clean lint image image-inspector vmlinux deps test-clickhouse
+.PHONY: all generate build build-inspector clean lint image image-inspector vmlinux deps test-clickhouse test-mysql-matrix
 
 # ─── Default ──────────────────────────────────────────────────────────────────
 
@@ -148,3 +149,6 @@ test-clickhouse:
 	for i in $$(seq 1 30); do curl -sf http://localhost:18123/ping >/dev/null && break; sleep 1; done; \
 	CLICKHOUSE_TEST_URL=http://localhost:18123 $(GO) test -tags integration -run Integration -v ./internal/chsink/; \
 	rc=$$?; docker rm -f obs-ch-test >/dev/null; exit $$rc
+
+test-mysql-matrix: generate
+	GO=$(GO) ./scripts/test-mysql-matrix.sh

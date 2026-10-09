@@ -1,0 +1,5 @@
+# mysqld 5.7.42 (Ubuntu mysql-server-core-5.7 5.7.42-0ubuntu0.18.04.1 amd64)
+_ZN18Prepared_statement12execute_loopEbPhS0_
+_Z16dispatch_commandP3THDPK8COM_DATA19enum_server_command
+_Z15log_write_up_tomb
+_ZN18Prepared_statement7prepareEPKcm

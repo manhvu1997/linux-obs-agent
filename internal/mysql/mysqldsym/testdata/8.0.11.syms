@@ -1,0 +1,6 @@
+# mysqld 8.0.11 (mysql-community-server-core 8.0.11-1ubuntu16.04 amd64)
+_ZN3xpl10dispatcher16dispatch_commandERNS_7SessionERNS_20Crud_command_handlerERNS_17Expectation_stackERN3ngs15Message_requestE
+_ZN18Prepared_statement12execute_loopEP6Stringb
+_Z16dispatch_commandP3THDPK8COM_DATA19enum_server_command
+_ZN18Prepared_statement7prepareEPKcm
+_Z15log_write_up_toR5log_tmb

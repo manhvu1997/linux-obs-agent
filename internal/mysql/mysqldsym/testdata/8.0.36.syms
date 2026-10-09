@@ -1,0 +1,5 @@
+# mysqld 8.0.36 (Ubuntu mysql-server-core-8.0 8.0.36-2ubuntu3 amd64)
+_ZN18Prepared_statement7prepareEP3THDPKcmPP10Item_param
+_ZN18Prepared_statement12execute_loopEP3THDP6Stringb
+_Z16dispatch_commandP3THDPK8COM_DATA19enum_server_command
+_Z15log_write_up_toR5log_tmb
