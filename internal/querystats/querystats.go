@@ -139,18 +139,18 @@ type acc struct {
 	wallMax, in, out               uint64
 }
 
-func (x *acc) add(e Event) {
-	x.calls++
-	x.cpu += e.CPUNs
-	x.runq += e.RunqNs
-	x.wall += e.WallNs
-	x.in += e.BytesIn
-	x.out += e.BytesOut
-	x.cpuMax = max(x.cpuMax, e.CPUNs)
-	x.wallMax = max(x.wallMax, e.WallNs)
-	x.truncated = x.truncated || e.Truncated
+func (x *acc) add(d Delta) {
+	x.calls += d.Calls
+	x.cpu += d.CPUNs
+	x.runq += d.RunqNs
+	x.wall += d.WallNs
+	x.in += d.BytesIn
+	x.out += d.BytesOut
+	x.cpuMax = max(x.cpuMax, d.CPUMaxNs)
+	x.wallMax = max(x.wallMax, d.WallMaxNs)
+	x.truncated = x.truncated || d.Truncated
 	if x.sample == "" {
-		x.sample = e.SampleQuery
+		x.sample = d.SampleQuery
 	}
 }
 
@@ -211,51 +211,56 @@ func New(cfg Config) *Aggregator {
 	}
 }
 
-func addCounters(c *model.QueryCounters, e Event) {
-	c.Calls++
-	c.CPUNs += e.CPUNs
-	c.RunqNs += e.RunqNs
-	c.WallNs += e.WallNs
-	c.BytesIn += e.BytesIn
-	c.BytesOut += e.BytesOut
+func addCounters(c *model.QueryCounters, d Delta) {
+	c.Calls += d.Calls
+	c.CPUNs += d.CPUNs
+	c.RunqNs += d.RunqNs
+	c.WallNs += d.WallNs
+	c.BytesIn += d.BytesIn
+	c.BytesOut += d.BytesOut
 }
 
+// Add records one call; equivalent to AddDeltas with DeltaFromEvent(e).
 func (a *Aggregator) Add(e Event) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.addDeltaLocked(DeltaFromEvent(e), e.At)
+}
 
-	b := a.bucketFor(e.At)
-	k := key{e.PID, e.Digest.ID}
+func (a *Aggregator) addDeltaLocked(d Delta, at time.Time) {
+	b := a.bucketFor(at)
+	k := key{d.PID, d.Digest.ID}
 	x, ok := b.m[k]
 	if !ok {
 		if len(b.m) >= a.cfg.MaxDigests {
-			k = key{e.PID, OtherDigestID}
+			k = key{d.PID, OtherDigestID}
 			if x, ok = b.m[k]; !ok {
 				x = &acc{command: "other", text: OtherDigestText, normalized: true}
 				b.m[k] = x
 			}
 		} else {
-			x = &acc{command: e.Command, text: e.Digest.Text, normalized: e.Digest.Normalized}
+			x = &acc{command: d.Command, text: d.Digest.Text, normalized: d.Digest.Normalized}
 			b.m[k] = x
 		}
 	}
-	x.add(e)
+	x.add(d)
 	if a.drain != nil {
-		a.addDrain(e)
+		a.addDrain(d)
 	}
-
-	a.addLife(k.id, x.text, e)
-	c := a.commands[e.Command]
-	addCounters(&c, e)
-	a.commands[e.Command] = c
-	if e.WallNs > e.CPUNs+waitedGapNs {
-		a.waited++
+	a.addLife(k.id, x.text, d, at)
+	c := a.commands[d.Command]
+	addCounters(&c, d)
+	a.commands[d.Command] = c
+	// Run-delay detection on sums: these calls waited when their average
+	// off-CPU time exceeds waitedGapNs (per-call rule of the event path).
+	if d.WallNs > d.CPUNs+d.Calls*waitedGapNs {
+		a.waited += d.Calls
 	}
-	a.runqSum += e.RunqNs
+	a.runqSum += d.RunqNs
 }
 
 // addLife: life may exceed MaxDigests by at most StickyMax (see markSticky).
-func (a *Aggregator) addLife(id, text string, e Event) {
+func (a *Aggregator) addLife(id, text string, d Delta, at time.Time) {
 	l, ok := a.life[id]
 	if !ok {
 		if len(a.life) >= a.cfg.MaxDigests {
@@ -269,8 +274,8 @@ func (a *Aggregator) addLife(id, text string, e Event) {
 			a.life[id] = l
 		}
 	}
-	addCounters(&l.c, e)
-	l.lastSeen = e.At
+	addCounters(&l.c, d)
+	l.lastSeen = at
 }
 
 func (a *Aggregator) bucketFor(t time.Time) *bucket {

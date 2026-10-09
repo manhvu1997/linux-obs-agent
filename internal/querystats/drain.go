@@ -67,26 +67,26 @@ func (a *Aggregator) DrainDigests() (out []DigestDelta, folded uint64) {
 	return out, folded
 }
 
-// addDrain is called from Add with a.mu held. It keys by the event's own
+// addDrain is called from addDeltaLocked with a.mu held. It keys by the delta's own
 // digest: the bucket map's MaxDigests fold is a Prometheus/report concern.
-func (a *Aggregator) addDrain(e Event) {
-	k := key{e.PID, e.Digest.ID}
+func (a *Aggregator) addDrain(d Delta) {
+	k := key{d.PID, d.Digest.ID}
 	x, ok := a.drain[k]
 	if !ok {
 		if len(a.drain) >= a.drainMax {
-			a.drainFolded++
-			k = key{e.PID, OtherDigestID}
+			a.drainFolded += d.Calls
+			k = key{d.PID, OtherDigestID}
 			x = a.drain[k]
 			if x == nil {
 				x = &acc{command: "other", text: OtherDigestText, normalized: true}
 				a.drain[k] = x
 			}
 		} else {
-			x = &acc{command: e.Command, text: e.Digest.Text, normalized: e.Digest.Normalized}
+			x = &acc{command: d.Command, text: d.Digest.Text, normalized: d.Digest.Normalized}
 			a.drain[k] = x
 		}
 	}
-	x.add(e)
+	x.add(d)
 	if k.id == OtherDigestID {
 		// The overflow bucket mixes unrelated statements; a sample of the
 		// first one would be arbitrary and misleading.
