@@ -10,12 +10,18 @@
 // Rule: FNV-1a 64 over the captured text (stop at NUL, at most MaxText
 // bytes), except
 //   - a quoted string ('…' or "…", backslash escapes, doubled quote) hashes
-//     as a single '?';
+//     as its opening quote byte only (' or "), its content and closing quote
+//     are not hashed;
 //   - a digit run that starts after a non-identifier byte and is followed by
-//     a non-identifier byte (or the end) hashes as a single '?';
+//     a non-identifier byte (or the end) hashes as a single NUL byte, which
+//     cannot occur in clipped text;
+//   - Backtick identifiers and comments (/* */, #, "-- ") are hashed
+//     verbatim, so a quote inside them never starts a string.
 //
-// Backtick identifiers and comments (/* */, #, "-- ") are hashed verbatim,
-// so a quote inside them never starts a string.
+// The markers are chosen so neither can alias a literal '?' placeholder
+// (sqldigest renders both literals as '?', so a literal '?' in the text must
+// stay distinguishable) or each other: a literal quote in code always starts a
+// string, and NUL never survives clipping.
 package sqlhash
 
 const (
@@ -116,7 +122,7 @@ func walk(b []byte, want bool) (uint64, []Region) {
 		case stCode:
 			switch {
 			case c == '\'' || c == '"':
-				h = fnv(h, '?')
+				h = fnv(h, c)
 				st, q, strAt = stStr, c, i+1
 			case c == '`':
 				h = fnv(h, c)
@@ -128,7 +134,7 @@ func walk(b []byte, want bool) (uint64, []Region) {
 				h = fnv(h, c)
 				st = stLine
 			case isDigit(c) && !isIdent(prev):
-				keep, skip = fnv(h, c), fnv(h, '?')
+				keep, skip = fnv(h, c), fnv(h, 0)
 				st, runAt = stDigits, i
 			default:
 				h = fnv(h, c)

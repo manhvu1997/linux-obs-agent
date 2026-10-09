@@ -45,6 +45,12 @@ func TestDifferentHash(t *testing.T) {
 		{"SELECT a FROM t # it's\nWHERE x=1", "SELECT b FROM t # it's\nWHERE x=1"},
 		{"SELECT a -- it's\nFROM t", "SELECT b -- it's\nFROM t"},
 		{"SELECT 1", "SELECT  1"}, // whitespace is hashed (more keys, never fewer)
+		// A skip marker must not alias a literal '?' or another skip kind.
+		{"SELECT * FROM t WHERE id = -1", "SELECT * FROM t WHERE id = -?"},
+		{"SELECT * FROM t WHERE id = -1", "SELECT * FROM t WHERE id = -'a'"},
+		{"SELECT t.5", "SELECT t.?"},
+		{"SELECT 1.5e3", "SELECT ?.5e3"},
+		{"SELECT x'AB'", `SELECT x"AB"`},
 	} {
 		if h(p[0]) == h(p[1]) {
 			t.Errorf("want different hash: %q vs %q", p[0], p[1])
@@ -60,6 +66,48 @@ func TestStopsAtNULAndMaxText(t *testing.T) {
 	if h(long) != KernelHash([]byte(long)[:MaxText]) {
 		t.Error("only the first MaxText bytes are hashed")
 	}
+}
+
+// TestEqualHashImpliesEqualDigest checks the safety property across
+// independent texts (the fuzz test only mutates one text): over every token
+// sequence of length 1..4, joined with "" and with " ", one hash must never
+// map to two different digests.
+func TestEqualHashImpliesEqualDigest(t *testing.T) {
+	tokens := []string{
+		"select", "t", ".", "5", "1", "1.5", "e3", "'a'", "\"a\"", "?", "-", "+",
+		"x", "(", ",", "in", "`c`", "/*c*/", "#c\n", "0x1F", "@v",
+	}
+	type seen struct{ text, digest string }
+	byHash := map[uint64]seen{}
+	var texts int
+	var walk func(parts []string, depth int)
+	check := func(text string) {
+		texts++
+		hv := KernelHash([]byte(text))
+		d := sqldigest.Normalize(text).ID
+		if prev, ok := byHash[hv]; ok {
+			if prev.digest != d {
+				t.Fatalf("equal hash %#x but different digests:\n %q -> %s\n %q -> %s",
+					hv, prev.text, prev.digest, text, d)
+			}
+			return
+		}
+		byHash[hv] = seen{text, d}
+	}
+	walk = func(parts []string, depth int) {
+		if len(parts) > 0 {
+			check(strings.Join(parts, ""))
+			check(strings.Join(parts, " "))
+		}
+		if depth == 4 {
+			return
+		}
+		for _, tok := range tokens {
+			walk(append(parts, tok), depth+1)
+		}
+	}
+	walk(nil, 0)
+	t.Logf("%d texts, %d distinct hashes", texts, len(byHash))
 }
 
 // FuzzEqualHashMeansEqualDigest is the safety property the kernel relies on:
@@ -86,12 +134,6 @@ func FuzzEqualHashMeansEqualDigest(f *testing.F) {
 			}
 		}
 		mutated := mutateSkipped(b, rand.New(rand.NewSource(seed)))
-		if len(mutated) > MaxText {
-			// The kernel would capture only the first MaxText bytes of the
-			// longer text, i.e. a different statement; the property is
-			// about texts the kernel sees whole.
-			t.Skip("mutation exceeds MaxText")
-		}
 		if KernelHash(b) != KernelHash(mutated) {
 			t.Fatalf("mutating skipped literals changed the hash: %q -> %q", b, mutated)
 		}
@@ -109,7 +151,18 @@ func mutateSkipped(b []byte, r *rand.Rand) []byte {
 	last := 0
 	for _, rg := range Regions(b) {
 		out = append(out, b[last:rg.Start]...)
-		n := 1 + r.Intn(4)
+		// Growth is capped so the mutated text still fits MaxText whole: a
+		// replacement is at most as long as the region it replaces, or fits
+		// the budget left once the untouched tail is accounted for.
+		budget := MaxText - len(out) - (len(b) - rg.End)
+		maxN := rg.End - rg.Start
+		if g := min(4, budget); g > maxN {
+			maxN = g
+		}
+		n := r.Intn(maxN + 1)
+		if rg.Number && n == 0 {
+			n = 1
+		}
 		for i := 0; i < n; i++ {
 			if rg.Number {
 				out = append(out, byte('0'+r.Intn(10)))
