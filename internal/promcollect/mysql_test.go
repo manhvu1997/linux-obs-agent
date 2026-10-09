@@ -21,12 +21,12 @@ func snap(text string) *querystats.Snapshot {
 }
 
 func TestMySQLCollector(t *testing.T) {
-	c := NewMySQLCollector(func() *querystats.Snapshot { return snap("select * from t") }, func() uint64 { return 7 }, func() uint64 { return 0 }, func() uint64 { return 0 }, config.DigestsFull, 20)
+	c := NewMySQLCollector(func() *querystats.Snapshot { return snap("select * from t") }, MySQLHealth{Dropped: func() uint64 { return 7 }}, config.DigestsFull, 20)
 	want := `
 # HELP obs_agent_mysql_digest_cpu_seconds_total On-CPU seconds spent executing statements of this digest.
 # TYPE obs_agent_mysql_digest_cpu_seconds_total counter
 obs_agent_mysql_digest_cpu_seconds_total{digest_id="aaa"} 1.5
-# HELP obs_agent_mysql_events_dropped_total Per-statement events lost (ring buffer full or consumer behind); digest totals undercount when this rises.
+# HELP obs_agent_mysql_events_dropped_total Commands lost before reaching the digest aggregator (fallback ring buffer full or consumer behind); digest totals undercount when this rises. Text events are counted separately.
 # TYPE obs_agent_mysql_events_dropped_total counter
 obs_agent_mysql_events_dropped_total 7
 `
@@ -37,7 +37,7 @@ obs_agent_mysql_events_dropped_total 7
 }
 
 func TestMySQLCollectorNilSnapshot(t *testing.T) {
-	c := NewMySQLCollector(func() *querystats.Snapshot { return nil }, func() uint64 { return 0 }, func() uint64 { return 0 }, func() uint64 { return 0 }, config.DigestsFull, 20)
+	c := NewMySQLCollector(func() *querystats.Snapshot { return nil }, MySQLHealth{}, config.DigestsFull, 20)
 	if n := testutil.CollectAndCount(c, "obs_agent_mysql_queries_total"); n != 0 {
 		t.Fatalf("got %d series before any snapshot", n)
 	}
@@ -79,7 +79,7 @@ func TestMySQLCollectorInvalidUTF8Label(t *testing.T) {
 	}
 	for name, text := range cases {
 		t.Run(name, func(t *testing.T) {
-			c := NewMySQLCollector(func() *querystats.Snapshot { return snap(text) }, func() uint64 { return 0 }, func() uint64 { return 0 }, func() uint64 { return 0 }, config.DigestsFull, 20)
+			c := NewMySQLCollector(func() *querystats.Snapshot { return snap(text) }, MySQLHealth{}, config.DigestsFull, 20)
 			vals := gatherOne(t, c, "obs_agent_mysql_digest_info", "digest_text")
 			if len(vals) != 1 {
 				t.Fatalf("digest_info series = %d, want exactly 1", len(vals))
@@ -143,7 +143,7 @@ func modeSnap() *querystats.Snapshot {
 }
 
 func TestMySQLCollectorMinimal(t *testing.T) {
-	c := NewMySQLCollector(func() *querystats.Snapshot { return modeSnap() }, func() uint64 { return 0 }, func() uint64 { return 0 }, func() uint64 { return 0 }, config.DigestsMinimal, 2)
+	c := NewMySQLCollector(func() *querystats.Snapshot { return modeSnap() }, MySQLHealth{}, config.DigestsMinimal, 2)
 	want := `
 # HELP obs_agent_mysql_digest_cpu_seconds_total On-CPU seconds spent executing statements of this digest.
 # TYPE obs_agent_mysql_digest_cpu_seconds_total counter
@@ -174,7 +174,7 @@ obs_agent_mysql_digest_coverage_ratio 0.9
 }
 
 func TestMySQLCollectorOff(t *testing.T) {
-	c := NewMySQLCollector(func() *querystats.Snapshot { return modeSnap() }, func() uint64 { return 0 }, func() uint64 { return 0 }, func() uint64 { return 0 }, config.DigestsOff, 20)
+	c := NewMySQLCollector(func() *querystats.Snapshot { return modeSnap() }, MySQLHealth{}, config.DigestsOff, 20)
 	for _, name := range []string{"obs_agent_mysql_digest_cpu_seconds_total", "obs_agent_mysql_digest_info"} {
 		if n := testutil.CollectAndCount(c, name); n != 0 {
 			t.Errorf("%s has %d series in off mode", name, n)
@@ -187,10 +187,10 @@ func TestMySQLCollectorOff(t *testing.T) {
 }
 
 func TestMySQLCollectorFullCoverage(t *testing.T) {
-	c := NewMySQLCollector(func() *querystats.Snapshot { return modeSnap() }, func() uint64 { return 0 }, func() uint64 { return 0 }, func() uint64 { return 0 }, config.DigestsFull, 20)
+	c := NewMySQLCollector(func() *querystats.Snapshot { return modeSnap() }, MySQLHealth{}, config.DigestsFull, 20)
 	assertCoverage(t, c, "0.95")
 	idle := func() *querystats.Snapshot { s := modeSnap(); s.QueryCPUMsTotal = 0; return s }
-	assertCoverage(t, NewMySQLCollector(idle, func() uint64 { return 0 }, func() uint64 { return 0 }, func() uint64 { return 0 }, config.DigestsFull, 20), "1")
+	assertCoverage(t, NewMySQLCollector(idle, MySQLHealth{}, config.DigestsFull, 20), "1")
 }
 
 func assertCoverage(t *testing.T, c prometheus.Collector, want string) {
@@ -205,9 +205,19 @@ obs_agent_mysql_digest_coverage_ratio ` + want + "\n"
 }
 
 func TestMySQLCollectorHealthCounters(t *testing.T) {
-	c := NewMySQLCollector(func() *querystats.Snapshot { return snap("select 1") }, func() uint64 { return 0 },
-		func() uint64 { return 7 }, func() uint64 { return 2 }, "full", 20)
+	c := NewMySQLCollector(func() *querystats.Snapshot { return snap("select 1") }, MySQLHealth{
+		Dropped:        func() uint64 { return 1 },
+		TextDropped:    func() uint64 { return 3 },
+		AggOverflow:    func() uint64 { return 7 },
+		HashMismatches: func() uint64 { return 2 },
+	}, "full", 20)
 	want := `
+# HELP obs_agent_mysql_events_dropped_total Commands lost before reaching the digest aggregator (fallback ring buffer full or consumer behind); digest totals undercount when this rises. Text events are counted separately.
+# TYPE obs_agent_mysql_events_dropped_total counter
+obs_agent_mysql_events_dropped_total 1
+# HELP obs_agent_mysql_text_events_dropped_total Statement text events dropped because the consumer was behind; first-sight texts are re-requested from the kernel (no command is lost; until the resend the hash's commands may show under a text-unavailable placeholder).
+# TYPE obs_agent_mysql_text_events_dropped_total counter
+obs_agent_mysql_text_events_dropped_total 3
 # HELP obs_agent_mysql_agg_overflow_total Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact).
 # TYPE obs_agent_mysql_agg_overflow_total counter
 obs_agent_mysql_agg_overflow_total 7
@@ -216,6 +226,7 @@ obs_agent_mysql_agg_overflow_total 7
 obs_agent_mysql_hash_mismatch_total 2
 `
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want),
+		"obs_agent_mysql_events_dropped_total", "obs_agent_mysql_text_events_dropped_total",
 		"obs_agent_mysql_agg_overflow_total", "obs_agent_mysql_hash_mismatch_total"); err != nil {
 		t.Fatal(err)
 	}

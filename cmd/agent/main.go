@@ -232,9 +232,12 @@ func main() {
 		}
 		promExp.RegisterCollectors(promcollect.NewFamilyCollector(insp.AllFamilies, netCounters, cfg.Netflow.MaxFamilies))
 		if cfg.MySQL.Enabled {
-			promExp.RegisterCollectors(promcollect.NewMySQLCollector(mysqlAnalyzer.DigestSnapshot, mysqlAnalyzer.Dropped,
-				mysqlAnalyzer.AggOverflow, mysqlAnalyzer.HashMismatches,
-				cfg.MySQL.PrometheusDigests, cfg.MySQL.PrometheusMinimalTopN))
+			promExp.RegisterCollectors(promcollect.NewMySQLCollector(mysqlAnalyzer.DigestSnapshot, promcollect.MySQLHealth{
+				Dropped:        mysqlAnalyzer.Dropped,
+				TextDropped:    mysqlAnalyzer.TextDropped,
+				AggOverflow:    mysqlAnalyzer.AggOverflow,
+				HashMismatches: mysqlAnalyzer.HashMismatches,
+			}, cfg.MySQL.PrometheusDigests, cfg.MySQL.PrometheusMinimalTopN))
 		}
 		go func() {
 			if err := promExp.Run(ctx); err != nil {

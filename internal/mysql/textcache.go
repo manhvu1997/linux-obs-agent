@@ -44,14 +44,38 @@ type parked struct {
 	sums aggSums
 }
 
+// digestRec is one digest shared by every cached hash that maps to it (many
+// hashes — whitespace, comment or literal-shape variants — normalise to one
+// digest): its text and id are stored once, plus the digest's first sample
+// (only with mysql.sample_queries; classify drops samples otherwise). refs
+// counts the hashes referencing it; the record is released at zero.
+type digestRec struct {
+	digest sqldigest.Digest
+	sample string
+	refs   int
+}
+
+// node is one cached hash: per-text fields plus the shared digest record.
+type node struct {
+	key       textKey
+	class     string // a cmdmap constant, no allocation
+	truncated bool
+	rec       *digestRec
+}
+
 // textCache maps kernel text hashes to classified statements. learn/verify
 // run on the text-event goroutine, resolve/endTick on the poll goroutine.
+//
+// Memory: at most max nodes (~130 B each with list element and map slot,
+// ~4 MB at 32 768) plus one digestRec per distinct digest among them (id,
+// normalised text ≤ ~512 B, and with mysql.sample_queries one sample
+// ≤ 511 B).
 type textCache struct {
 	mu       sync.Mutex
 	max      int
-	ll       *list.List // front = most recently used; values are textKey
+	ll       *list.List // front = most recently used; values are *node
 	m        map[textKey]*list.Element
-	entries  map[textKey]textEntry
+	digests  map[string]*digestRec // by digest id
 	hooks    textCacheHooks
 	pending  []parked // parked during the current tick
 	previous []parked // parked during the previous tick
@@ -59,15 +83,21 @@ type textCache struct {
 }
 
 func newTextCache(max int, hooks textCacheHooks) *textCache {
-	return &textCache{max: max, ll: list.New(), m: map[textKey]*list.Element{}, entries: map[textKey]textEntry{}, hooks: hooks}
+	return &textCache{max: max, ll: list.New(), m: map[textKey]*list.Element{}, digests: map[string]*digestRec{}, hooks: hooks}
 }
 
-// learn records the text of a first-sight hash.
+// learn records the text of a first-sight hash. A hash already cached with a
+// different digest (a resend after ForgetText or a kernel text_seen
+// eviction) means one kernel hash covers two digests: like a verify
+// mismatch, the hash is marked unsafe and counted; the latest text is kept.
 func (c *textCache) learn(k textKey, e textEntry) {
 	c.mu.Lock()
-	evicted := c.putLocked(k, e)
+	evicted, changed := c.putLocked(k, e)
 	c.mu.Unlock()
 	c.forgetAll(evicted)
+	if changed {
+		c.flagMismatch(k)
+	}
 }
 
 // verify checks a sampled resend against the cached classification. On a
@@ -75,9 +105,9 @@ func (c *textCache) learn(k textKey, e textEntry) {
 // back to exact per-event processing.
 func (c *textCache) verify(k textKey, e textEntry) bool {
 	c.mu.Lock()
-	old, ok := c.entries[k]
+	old, ok := c.getLocked(k)
 	if !ok {
-		evicted := c.putLocked(k, e)
+		evicted, _ := c.putLocked(k, e)
 		c.mu.Unlock()
 		c.forgetAll(evicted)
 		return false
@@ -86,32 +116,70 @@ func (c *textCache) verify(k textKey, e textEntry) bool {
 	if old.digest.ID == e.digest.ID {
 		return false
 	}
+	c.flagMismatch(k)
+	return true
+}
+
+// flagMismatch counts one hash/digest inconsistency and sends every later
+// command of k through the exact per-event path. Must not be called with
+// c.mu held.
+func (c *textCache) flagMismatch(k textKey) {
 	c.mismatch.Add(1)
 	c.hooks.markUnsafe(k.command, k.hash)
-	return true
 }
 
 func (c *textCache) mismatches() uint64 { return c.mismatch.Load() }
 
-// putLocked stores the entry and returns the keys evicted to stay within max.
-// The caller must forget them in the kernel after releasing c.mu.
-func (c *textCache) putLocked(k textKey, e textEntry) (evicted []textKey) {
+func (c *textCache) getLocked(k textKey) (textEntry, bool) {
+	el, ok := c.m[k]
+	if !ok {
+		return textEntry{}, false
+	}
+	n := el.Value.(*node)
+	return textEntry{class: n.class, digest: n.rec.digest, sample: n.rec.sample, truncated: n.truncated}, true
+}
+
+func (c *textCache) internLocked(e textEntry) *digestRec {
+	r := c.digests[e.digest.ID]
+	if r == nil {
+		r = &digestRec{digest: e.digest, sample: e.sample}
+		c.digests[e.digest.ID] = r
+	} else if r.sample == "" {
+		r.sample = e.sample
+	}
+	r.refs++
+	return r
+}
+
+func (c *textCache) releaseLocked(r *digestRec) {
+	if r.refs--; r.refs <= 0 {
+		delete(c.digests, r.digest.ID)
+	}
+}
+
+// putLocked stores the entry and returns the keys evicted to stay within max,
+// and whether an existing entry for k had a different digest. The caller must
+// forget the evicted keys in the kernel after releasing c.mu.
+func (c *textCache) putLocked(k textKey, e textEntry) (evicted []textKey, changed bool) {
 	if el, ok := c.m[k]; ok {
 		c.ll.MoveToFront(el)
-		c.entries[k] = e
-		return nil
+		n := el.Value.(*node)
+		changed = n.rec.digest.ID != e.digest.ID
+		rec := c.internLocked(e) // before release: the same record may be reused
+		c.releaseLocked(n.rec)
+		n.class, n.truncated, n.rec = e.class, e.truncated, rec
+		return nil, changed
 	}
-	c.m[k] = c.ll.PushFront(k)
-	c.entries[k] = e
+	c.m[k] = c.ll.PushFront(&node{key: k, class: e.class, truncated: e.truncated, rec: c.internLocked(e)})
 	for c.ll.Len() > c.max {
 		el := c.ll.Back()
-		old := el.Value.(textKey)
+		old := el.Value.(*node)
 		c.ll.Remove(el)
-		delete(c.m, old)
-		delete(c.entries, old)
-		evicted = append(evicted, old) // the kernel must resend it
+		delete(c.m, old.key)
+		c.releaseLocked(old.rec)
+		evicted = append(evicted, old.key) // the kernel must resend it
 	}
-	return evicted
+	return evicted, false
 }
 
 func (c *textCache) forgetAll(keys []textKey) {
@@ -138,7 +206,8 @@ func (c *textCache) resolve(k textKey, s aggSums, byCommand func(uint32) textEnt
 	defer c.mu.Unlock()
 	if el, ok := c.m[k]; ok {
 		c.ll.MoveToFront(el)
-		return toDelta(c.entries[k], s), true
+		e, _ := c.getLocked(k)
+		return toDelta(e, s), true
 	}
 	c.pending = append(c.pending, parked{k, s})
 	return querystats.Delta{}, false
@@ -153,7 +222,7 @@ func (c *textCache) endTick(unavailable func(command uint32) textEntry) []querys
 	var forget []textKey
 	var still []parked
 	for _, p := range c.previous {
-		if e, ok := c.entries[p.key]; ok {
+		if e, ok := c.getLocked(p.key); ok {
 			out = append(out, toDelta(e, p.sums))
 			continue
 		}
@@ -161,7 +230,7 @@ func (c *textCache) endTick(unavailable func(command uint32) textEntry) []querys
 		forget = append(forget, p.key)
 	}
 	for _, p := range c.pending {
-		if e, ok := c.entries[p.key]; ok {
+		if e, ok := c.getLocked(p.key); ok {
 			out = append(out, toDelta(e, p.sums))
 			continue
 		}

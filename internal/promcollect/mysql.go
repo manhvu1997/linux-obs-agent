@@ -37,35 +37,50 @@ var (
 	myCoverageDesc = prometheus.NewDesc("obs_agent_mysql_digest_coverage_ratio",
 		"Share (0-1) of the window's query CPU explained by the per-digest series exported in the current mode.", nil, nil)
 	myDroppedDesc = prometheus.NewDesc("obs_agent_mysql_events_dropped_total",
-		"Per-statement events lost (ring buffer full or consumer behind); digest totals undercount when this rises.", nil, nil)
+		"Commands lost before reaching the digest aggregator (fallback ring buffer full or consumer behind); digest totals undercount when this rises. Text events are counted separately.", nil, nil)
+	myTextDroppedDesc = prometheus.NewDesc("obs_agent_mysql_text_events_dropped_total",
+		"Statement text events dropped because the consumer was behind; first-sight texts are re-requested from the kernel (no command is lost; until the resend the hash's commands may show under a text-unavailable placeholder).", nil, nil)
 	myAggOverflowDesc = prometheus.NewDesc("obs_agent_mysql_agg_overflow_total",
 		"Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact).", nil, nil)
 	myHashMismatchDesc = prometheus.NewDesc("obs_agent_mysql_hash_mismatch_total",
 		"Kernel text-hash verification samples whose digest differed from the cached one; the hash is switched to exact per-event processing.", nil, nil)
 )
 
+// MySQLHealth are the tracer's health counters. A nil func reports 0.
+type MySQLHealth struct {
+	Dropped        func() uint64 // commands lost (obs_agent_mysql_events_dropped_total)
+	TextDropped    func() uint64 // text events dropped, re-requested (…_text_events_dropped_total)
+	AggOverflow    func() uint64 // commands that bypassed kernel aggregation (map full)
+	HashMismatches func() uint64 // kernel text hash disagreed with the digest
+}
+
+func (h MySQLHealth) read(f func() uint64) float64 {
+	if f == nil {
+		return 0
+	}
+	return float64(f())
+}
+
 // MySQLCollector exports MySQL command counters and per-digest counters in
 // one of three modes (mysql.prometheus_digests).
 type MySQLCollector struct {
-	snap         func() *querystats.Snapshot
-	dropped      func() uint64
-	aggOverflow  func() uint64
-	hashMismatch func() uint64
-	mode         string
-	minimalTopN  int
+	snap        func() *querystats.Snapshot
+	health      MySQLHealth
+	mode        string
+	minimalTopN int
 }
 
-func NewMySQLCollector(snap func() *querystats.Snapshot, dropped, aggOverflow, hashMismatch func() uint64, mode string, minimalTopN int) *MySQLCollector {
+func NewMySQLCollector(snap func() *querystats.Snapshot, health MySQLHealth, mode string, minimalTopN int) *MySQLCollector {
 	if minimalTopN < 1 {
 		minimalTopN = 20
 	}
-	return &MySQLCollector{snap: snap, dropped: dropped, aggOverflow: aggOverflow, hashMismatch: hashMismatch, mode: mode, minimalTopN: minimalTopN}
+	return &MySQLCollector{snap: snap, health: health, mode: mode, minimalTopN: minimalTopN}
 }
 
 func (c *MySQLCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{myQueriesDesc, myCPUDesc, myRunqDesc, myWallDesc, myBytesDesc,
 		myDigestCPUDesc, myDigestCallsDesc, myDigestOutDesc, myDigestRunqDesc, myDigestInfoDesc, myCoverageDesc, myDroppedDesc,
-		myAggOverflowDesc, myHashMismatchDesc} {
+		myTextDroppedDesc, myAggOverflowDesc, myHashMismatchDesc} {
 		ch <- d
 	}
 }
@@ -116,9 +131,11 @@ func (c *MySQLCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 	emit(ch, myCoverageDesc, prometheus.GaugeValue, coverage(c.mode, exported, s.QueryCPUMsTotal))
-	emit(ch, myDroppedDesc, prometheus.CounterValue, float64(c.dropped()))
-	emit(ch, myAggOverflowDesc, prometheus.CounterValue, float64(c.aggOverflow()))
-	emit(ch, myHashMismatchDesc, prometheus.CounterValue, float64(c.hashMismatch()))
+	h := c.health
+	emit(ch, myDroppedDesc, prometheus.CounterValue, h.read(h.Dropped))
+	emit(ch, myTextDroppedDesc, prometheus.CounterValue, h.read(h.TextDropped))
+	emit(ch, myAggOverflowDesc, prometheus.CounterValue, h.read(h.AggOverflow))
+	emit(ch, myHashMismatchDesc, prometheus.CounterValue, h.read(h.HashMismatches))
 }
 
 func topExported(in []querystats.ExportedDigest, n int) []querystats.ExportedDigest {

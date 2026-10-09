@@ -188,7 +188,7 @@ type Aggregator struct {
 	life     map[string]*life
 	commands map[string]model.QueryCounters
 	sticky   map[string]time.Time
-	waited   uint64 // events with wall − cpu > waitedGapNs
+	waited   uint64 // calls whose average wall − cpu exceeded waitedGapNs (per Delta)
 	runqSum  uint64
 	// drain is the ClickHouse delta accumulator, nil until EnableDrain.
 	drain       map[key]*acc

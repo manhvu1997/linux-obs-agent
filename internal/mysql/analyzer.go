@@ -26,6 +26,7 @@ import (
 	mysqlq "github.com/manhvu1997/linux-obs-agent/internal/ebpf/mysql_query"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
+	"github.com/manhvu1997/linux-obs-agent/internal/mysql/sqlhash"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 	"github.com/manhvu1997/linux-obs-agent/internal/sqldigest"
 )
@@ -127,7 +128,8 @@ func (a *Analyzer) Latest() *model.MySQLAnalysis {
 // poll). Used by the Prometheus collector.
 func (a *Analyzer) DigestSnapshot() *querystats.Snapshot { return a.digests.Load() }
 
-// Dropped returns lost per-command events; 0 when the tracer is not running.
+// Dropped returns commands lost before the digest aggregator (not text
+// events, see TextDropped); 0 when the tracer is not running.
 func (a *Analyzer) Dropped() uint64 {
 	if !a.started.Load() {
 		return 0
@@ -135,7 +137,20 @@ func (a *Analyzer) Dropped() uint64 {
 	return a.loader.Dropped()
 }
 
-// drainCmdEvents feeds every measured command into the digest aggregator.
+// TextDropped returns text events dropped on a full channel (re-requested
+// from the kernel, no command lost); 0 when the tracer is not running.
+func (a *Analyzer) TextDropped() uint64 {
+	if !a.started.Load() {
+		return 0
+	}
+	return a.loader.TextDropped()
+}
+
+// drainCmdEvents feeds the commands the kernel could not aggregate into the
+// digest aggregator: the fallback events of a full aggregation map or of a
+// hash marked unsafe (verify/drift mismatch). Every other command arrives
+// through DrainAgg in poll. With emit_all_queries off the kernel emits no
+// command events at all.
 func (a *Analyzer) drainCmdEvents(ctx context.Context) {
 	for {
 		select {
@@ -200,14 +215,29 @@ func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time, preparedTracking b
 	}
 }
 
-// textUnavailable is the digest of a statement whose text never arrived.
-var textUnavailable = func() sqldigest.Digest {
-	const text = "<text unavailable>"
+// textUnavailable / prepareTextUnavailable are the digests of a COM_QUERY /
+// COM_STMT_PREPARE whose text never arrived; distinct so a lost prepare is
+// not merged into (and mislabelled as) a query digest.
+var (
+	textUnavailable        = unavailableDigest("<text unavailable>")
+	prepareTextUnavailable = unavailableDigest("prepare: <text unavailable>")
+)
+
+func unavailableDigest(text string) sqldigest.Digest {
 	return sqldigest.Digest{ID: sqldigest.HashID(text), Text: text, Normalized: true}
-}()
+}
 
 // learnText records (or, for a verification resend, checks) a text event.
-func (a *Analyzer) learnText(ev mysqlq.TextEvent, preparedTracking bool) {
+// literalSkip is the loader's LiteralSkip() (a parameter for testability).
+//
+// Every first-sight text is also checked against the Go reference of the
+// kernel hash (sqlhash.KernelHash, or ExactHash in the exact-text fallback):
+// the text sent is exactly the bytes the kernel hashed — the NUL-terminated
+// ≤ 511-byte capture for COM_QUERY / COM_STMT_PREPARE, and for
+// COM_STMT_EXECUTE the ps_text entry whose hash was computed over that same
+// text at prepare time — so any difference is a kernel/Go drift (or the
+// ps_text LRU reuse race), and the hash is switched to exact processing.
+func (a *Analyzer) learnText(ev mysqlq.TextEvent, preparedTracking, literalSkip bool) {
 	e := a.classify(ev.Command, ev.Query, ev.QueryLen, preparedTracking)
 	k := textKey{ev.Command, ev.Hash}
 	if ev.Verify {
@@ -218,6 +248,15 @@ func (a *Analyzer) learnText(ev mysqlq.TextEvent, preparedTracking bool) {
 		return
 	}
 	a.text.learn(k, e)
+	want := sqlhash.ExactHash
+	if literalSkip {
+		want = sqlhash.KernelHash
+	}
+	if got := want([]byte(ev.Query)); got != ev.Hash {
+		slog.Warn("mysql: kernel text hash differs from the Go reference; statement switched to exact per-event processing",
+			"command", ev.Command, "kernel_hash", ev.Hash, "go_hash", got, "literal_skip", literalSkip)
+		a.text.flagMismatch(k)
+	}
 }
 
 // applyAgg resolves drained kernel entries and records them at now.
@@ -227,9 +266,14 @@ func (a *Analyzer) applyAgg(entries []mysqlq.AggEntry, now time.Time, preparedTr
 	byCommand := func(cmd uint32) textEntry { return a.classify(cmd, "", 0, preparedTracking) }
 	unavailable := func(cmd uint32) textEntry {
 		e := byCommand(cmd)
-		if cmd == cmdmap.ComQuery || cmd == cmdmap.ComStmtPrepare {
+		switch cmd {
+		case cmdmap.ComQuery:
 			e.digest, e.sample = textUnavailable, ""
+		case cmdmap.ComStmtPrepare:
+			e.digest, e.sample = prepareTextUnavailable, ""
 		}
+		// COM_STMT_EXECUTE keeps cmdmap's execute placeholder ("prepared
+		// before agent start" while prepared-text tracking is on).
 		return e
 	}
 	deltas := make([]querystats.Delta, 0, len(entries))
@@ -256,7 +300,7 @@ func (a *Analyzer) drainText(ctx context.Context) {
 			if !ok {
 				return
 			}
-			a.learnText(ev, a.loader.PreparedTextTracking())
+			a.learnText(ev, a.loader.PreparedTextTracking(), a.loader.LiteralSkip())
 		}
 	}
 }
@@ -269,7 +313,9 @@ func (a *Analyzer) AggOverflow() uint64 {
 	return a.loader.AggOverflow()
 }
 
-// HashMismatches: verification samples whose digest differed from the cache.
+// HashMismatches: kernel text hashes found inconsistent — a verification
+// sample or a resend whose digest differed from the cache, or a first-sight
+// text whose kernel hash differed from the Go reference.
 func (a *Analyzer) HashMismatches() uint64 {
 	if !a.started.Load() || a.text == nil {
 		return 0

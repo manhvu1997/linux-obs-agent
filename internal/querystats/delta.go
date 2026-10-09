@@ -9,6 +9,10 @@ import (
 // Delta is the sum of Calls executions of one statement shape by one PID,
 // as drained from the kernel's aggregation map. A single Event is a Delta of
 // one call (DeltaFromEvent).
+//
+// CPUMaxNs and WallMaxNs must be set whenever Calls > 1: they are folded with
+// max() and are not derived from the sums, so a zero there loses the
+// digest's maximum. For one call they equal CPUNs and WallNs.
 type Delta struct {
 	PID         uint32
 	Command     string
