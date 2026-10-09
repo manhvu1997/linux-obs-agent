@@ -1073,6 +1073,8 @@ All metrics are prefixed with `obs_agent_`.
 | `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes, digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. See §20 |
 | `family_inbound_peer_bytes_total{family,peer_ip,service_port,flow}` | Counter | Inbound client bytes; top `netflow.max_inbound_peers` IPs node-wide, overflow `other`. See §20 |
 | `mysql_digest_coverage_ratio` | Gauge | Share (0–1) of window query CPU explained by the exported digest series. See §20 |
+| `mysql_agg_overflow_total` | Counter | Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact) |
+| `mysql_hash_mismatch_total` | Counter | Kernel text-hash verification samples whose digest differed from the cached one; the hash is switched to exact per-event processing |
 | `clickhouse_{rows_sent_total,rows_dropped_total,buffer_bytes,last_success_timestamp_seconds,snapshots_total,host_info}` | Counter/Gauge | ClickHouse sink health; registered only when `clickhouse.enabled`. See §22 |
 
 ---
@@ -1092,14 +1094,14 @@ All metrics are prefixed with `obs_agent_`.
 | **Fsync analyzer poll (5s)** | **~0.001%** | **< 1 MB** |
 | Go runtime overhead | ~0.02% | ~12 MB |
 | **eBPF netflow (always-on, ~100k hook calls/s)** — estimated, not measured | **~0.4%** | **~6 MB (maps)** |
-| **MySQL per-command events (20k QPS)** — estimated, not measured | **~0.3% kernel + ~1% userspace** | **4 MB ringbuf + ~5 MB digests** |
+| **MySQL in-kernel aggregation (20k QPS)** — estimated, not measured | **~0.2 % kernel + < 0.1 % userspace** | **2 × 16 384-entry agg maps (~3 MB) + 1 MB text ringbuf + ~5 MB digests** |
 | **Family grouping (10s scan)** — estimated, not measured | **~0.02%** | **< 1 MB** |
 | **ClickHouse export (drains + 60 s flush, 20k QPS)** — estimated, not measured | **~0.1–0.2 % (digest drain) + a few ms/min encoding** | **≤ 32 MB buffer + per-interval drain maps** |
 | netinv (per /api/diagnose) — estimated, not measured | 20–50 ms per call | transient |
-| **Total (all eBPF active + fsync + netflow + MySQL events)** — estimated, not measured | **~2.3%** | **~70 MB** |
-| **Total (no trigger-eBPF; fsync + netflow + MySQL events)** — estimated, not measured | **~1.9%** | **~35 MB** |
+| **Total (all eBPF active + fsync + netflow + MySQL events)** — estimated, not measured | **~1.1%** | **~70 MB** |
+| **Total (no trigger-eBPF; fsync + netflow + MySQL events)** — estimated, not measured | **~0.7%** | **~35 MB** |
 
-The totals add the always-on netflow (~0.4 % / ~6 MB) and MySQL per-command events (~1.3 % / ~9 MB, only when `mysql.enabled`) to the previously measured figures. All other measurements are on a 4-core 8GB VM under moderate load. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
+The totals add the always-on netflow (~0.4 % / ~6 MB) and MySQL in-kernel aggregation (~0.3 % / ~9 MB, only when `mysql.enabled`) to the previously measured figures. All other measurements are on a 4-core 8GB VM under moderate load. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
 
 **Fsync overhead detail**: At 10 000 fsync/s with a 5 ms slow threshold, the kprobe/kretprobe pair executes ~20 000 times/s. Each execution does one map lookup + one atomic add (~50 ns each). Total: ~1 ms/s ≈ **0.01% CPU** on a single core. The ringbuf emits zero events at normal latencies.
 
@@ -1170,7 +1172,7 @@ uretprobe: mysqld!dispatch_command
     │         push mysql_slow_event_t {…, query, command} → events RINGBUF
     │         (→ recent_slow_queries; no text → the placeholder of §20)
     │
-    ├── every command: push mysql_cmd_event_t → cmd_events RINGBUF (digests, §20)
+    ├── every command: agg_<active>[{tgid, command, text hash}] += sums; text once per hash → text_events RINGBUF; map full / unsafe hash → full mysql_cmd_event_t on cmd_events (§20)
     │
     └── delete ps_exec[tid], mysql_pending[tid]
 ```
@@ -1655,7 +1657,7 @@ wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
 | Unit | What it does |
 |---|---|
 | `ebpf/netflow` | Always-on. Counts TCP bytes and connections per {tgid, direction, peer, service port} in an LRU map. Owner is recorded at connect/accept (process context); bytes are charged to the current process at `tcp_sendmsg` / `tcp_cleanup_rbuf`. |
-| `ebpf/mysql_query` | Per `dispatch_command`: wall, on-CPU (`se.sum_exec_runtime` Δ), run-queue wait (`sched_info.run_delay` Δ), result bytes (`tcp_sendmsg` / `unix_stream_sendmsg` returns). One ring-buffer event per command. Optional uprobes on `Prepared_statement::prepare` / `execute_loop` recover the SQL text of `COM_STMT_EXECUTE`. |
+| `ebpf/mysql_query` | Per `dispatch_command`: wall, on-CPU (`se.sum_exec_runtime` Δ), run-queue wait (`sched_info.run_delay` Δ), result bytes (`tcp_sendmsg` / `unix_stream_sendmsg` returns). Summed in the kernel per {tgid, command, literal-skipping text hash} (`internal/mysql/sqlhash` is the Go reference); text crosses once per hash; the analyzer drains the map every poll. Optional uprobes on `Prepared_statement::prepare` / `execute_loop` recover the SQL text of `COM_STMT_EXECUTE`. |
 | `sqldigest` + `querystats` | Normalise SQL → digest; aggregate over a 60 s window; rank by **total** CPU; label `culprit` (≥ 20 % of mysqld query CPU **and** ≥ 5 % of one core over the window) or `victim` (run-queue wait > 5 × CPU and slow). |
 | `process` | Groups processes into families by systemd unit (`nginx.service`), falling back to `.scope` / cgroup path. |
 | `netinv` | On demand only: listening ports and live connections (`src → dst`, client → server) from `/proc/net/tcp*` + `/proc/<pid>/fd`. |
@@ -1707,6 +1709,7 @@ Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound p
 | `obs_agent_mysql_digest_info` (=1) | `digest_id, digest_text` |
 | `obs_agent_mysql_digest_coverage_ratio` | — |
 | `obs_agent_mysql_events_dropped_total` | — |
+| `obs_agent_mysql_agg_overflow_total`, `obs_agent_mysql_hash_mismatch_total` | — |
 
 **Inbound peers**: `…_inbound_peer_bytes_total` is the client side (`service_port` is the local listening port). `netflow.max_inbound_peers` (default 100, `NETFLOW_MAX_INBOUND_PEERS`) caps distinct `peer_ip` values node-wide; further peers fold into `peer_ip="other"`; `0` disables the series. Idle labels expire like the outbound ones.
 
@@ -1728,6 +1731,9 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 
 - Per-call CPU is ± one scheduler tick (1–4 ms); per-digest **totals** are accurate. `cpu_ms_avg` is unreliable below 1 ms.
 - Query text is captured up to 511 bytes (`truncated: true` beyond).
+- Digest windows are built from per-poll sums: a command is attributed to the poll that drained it (≤ `poll_interval`, 5 s, later than it ran).
+- `wall_max` / `cpu_ms_max` are best effort: two CPUs updating the same statement at the same instant can lose one maximum (no compare-and-swap before kernel 5.12). Sums are exact.
+- A statement whose text never reached the agent is shown as `<text unavailable>` for one poll and its text is requested again.
 - **Privacy:** `top_digests[].sample_query` is the raw text of the first execution of each digest, **literals included** — potentially secrets (e.g. `CREATE USER … IDENTIFIED BY '…'`). `digest_text` (and the `digest_info` metric) is literal-free. Set `mysql.sample_queries: false` (`MYSQL_SAMPLE_QUERIES=false`) to never store or emit it. `/api/diagnose` and `/metrics` are unauthenticated (with peer IPs and cmdlines): restrict network access to `:9200`.
 - `COM_STMT_EXECUTE` (server-side prepared statements) carries the SQL text recovered from its `COM_STMT_PREPARE` — see *Prepared statements and command names* below for when it cannot be recovered.
 - Process-level network covers TCP only (no UDP, no unix sockets). Pre-existing idle connections are invisible to eBPF until they carry traffic; the `/proc` `connections` list still shows them.
@@ -1781,7 +1787,7 @@ sudo bpftool map show name ps_text; sudo bpftool map show name ps_exec
 | Component | CPU | Memory |
 |---|---|---|
 | netflow eBPF (~100k hook calls/s) | ~0.4 % | ~6 MB maps |
-| mysql per-command events (20k QPS) | ~0.3 % kernel + ~1 % userspace | 4 MB ringbuf + ~5 MB digests |
+| mysql in-kernel aggregation (20k QPS) | ~0.2 % kernel + < 0.1 % userspace | 2 × 16 384-entry agg maps (~3 MB) + 1 MB text ringbuf + ~5 MB digests |
 | mysql prepared-statement text (`ps_text` 16 384 × 520 B, `ps_exec`) | one map update per prepare / execute | ~9 MB maps (preallocated LRU) |
 | family grouping (10 s scan) | ~0.02 % | < 1 MB |
 | netinv (per /api/diagnose) | 20–50 ms per call | transient |

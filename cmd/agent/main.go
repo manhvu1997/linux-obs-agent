@@ -233,6 +233,7 @@ func main() {
 		promExp.RegisterCollectors(promcollect.NewFamilyCollector(insp.AllFamilies, netCounters, cfg.Netflow.MaxFamilies))
 		if cfg.MySQL.Enabled {
 			promExp.RegisterCollectors(promcollect.NewMySQLCollector(mysqlAnalyzer.DigestSnapshot, mysqlAnalyzer.Dropped,
+				mysqlAnalyzer.AggOverflow, mysqlAnalyzer.HashMismatches,
 				cfg.MySQL.PrometheusDigests, cfg.MySQL.PrometheusMinimalTopN))
 		}
 		go func() {

@@ -37,6 +37,7 @@ type Analyzer struct {
 	loader *mysqlq.Loader
 
 	agg     *querystats.Aggregator
+	text    *textCache // set in Start, before started is published
 	digests atomic.Pointer[querystats.Snapshot]
 	started atomic.Bool
 
@@ -94,12 +95,14 @@ func (a *Analyzer) Start(ctx context.Context) error {
 		return err
 	}
 	defer a.loader.Stop()
+	a.text = newTextCache(32768, textCacheHooks{forget: a.loader.ForgetText, markUnsafe: a.loader.MarkUnsafe})
 	a.started.Store(true)
 	defer a.started.Store(false)
 
 	// Drain slow-event ringbuf in background (only outliers, low volume).
 	go a.drainSlowEvents(ctx)
 	go a.drainCmdEvents(ctx)
+	go a.drainText(ctx)
 
 	tick := time.NewTicker(a.cfg.PollInterval)
 	defer tick.Stop()
@@ -169,23 +172,109 @@ func (a *Analyzer) slowDigestID(text string) string {
 	return d.ID
 }
 
-// toEvent classifies one command. With mysql.sample_queries off the raw
-// statement text (which carries literals) is never stored. preparedTracking
-// is the loader's PreparedTextTracking(), a parameter so this stays testable
-// without a loaded eBPF module.
-func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time, preparedTracking bool) querystats.Event {
-	class, d, sample, trunc := cmdmap.Classify(ev.Command, ev.Query, ev.QueryLen, preparedTracking)
+// classify turns one statement text into its digest, applying system-schema
+// folding and the sample-query privacy rule. It must stay a pure function of
+// its arguments and the config: the text cache calls it (via applyAgg's
+// callbacks) while holding its lock.
+func (a *Analyzer) classify(command uint32, query string, queryLen uint32, preparedTracking bool) textEntry {
+	class, d, sample, trunc := cmdmap.Classify(command, query, queryLen, preparedTracking)
 	if folded, ok := a.foldSystem(d); ok {
 		d, sample, trunc = folded, "", false
 	}
 	if !a.cfg.SampleQueries {
 		sample = ""
 	}
+	return textEntry{class: class, digest: d, sample: sample, truncated: trunc}
+}
+
+// toEvent classifies one command. With mysql.sample_queries off the raw
+// statement text (which carries literals) is never stored. preparedTracking
+// is the loader's PreparedTextTracking(), a parameter so this stays testable
+// without a loaded eBPF module.
+func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time, preparedTracking bool) querystats.Event {
+	e := a.classify(ev.Command, ev.Query, ev.QueryLen, preparedTracking)
 	return querystats.Event{
-		PID: ev.PID, Command: class, Digest: d, SampleQuery: sample, Truncated: trunc,
+		PID: ev.PID, Command: e.class, Digest: e.digest, SampleQuery: e.sample, Truncated: e.truncated,
 		WallNs: ev.WallNs, CPUNs: ev.CPUNs, RunqNs: ev.RunqNs,
 		BytesIn: ev.BytesIn, BytesOut: ev.BytesOut, At: now,
 	}
+}
+
+// textUnavailable is the digest of a statement whose text never arrived.
+var textUnavailable = func() sqldigest.Digest {
+	const text = "<text unavailable>"
+	return sqldigest.Digest{ID: sqldigest.HashID(text), Text: text, Normalized: true}
+}()
+
+// learnText records (or, for a verification resend, checks) a text event.
+func (a *Analyzer) learnText(ev mysqlq.TextEvent, preparedTracking bool) {
+	e := a.classify(ev.Command, ev.Query, ev.QueryLen, preparedTracking)
+	k := textKey{ev.Command, ev.Hash}
+	if ev.Verify {
+		if a.text.verify(k, e) {
+			slog.Warn("mysql: kernel text hash disagrees with the digest; statement switched to exact per-event processing",
+				"command", ev.Command, "hash", ev.Hash, "digest", e.digest.Text)
+		}
+		return
+	}
+	a.text.learn(k, e)
+}
+
+// applyAgg resolves drained kernel entries and records them at now.
+func (a *Analyzer) applyAgg(entries []mysqlq.AggEntry, now time.Time, preparedTracking bool) {
+	// Both callbacks are pure (classify by command only): endTick invokes
+	// unavailable with the cache lock held.
+	byCommand := func(cmd uint32) textEntry { return a.classify(cmd, "", 0, preparedTracking) }
+	unavailable := func(cmd uint32) textEntry {
+		e := byCommand(cmd)
+		if cmd == cmdmap.ComQuery || cmd == cmdmap.ComStmtPrepare {
+			e.digest, e.sample = textUnavailable, ""
+		}
+		return e
+	}
+	deltas := make([]querystats.Delta, 0, len(entries))
+	for _, en := range entries {
+		d, ok := a.text.resolve(textKey{en.Command, en.Hash}, aggSums{
+			PID: en.PID, Calls: en.Calls, WallNs: en.WallNs, WallMaxNs: en.WallMaxNs, CPUNs: en.CPUNs,
+			CPUMaxNs: en.CPUMaxNs, RunqNs: en.RunqNs, BytesIn: en.BytesIn, BytesOut: en.BytesOut,
+		}, byCommand)
+		if ok {
+			deltas = append(deltas, d)
+		}
+	}
+	deltas = append(deltas, a.text.endTick(unavailable)...)
+	a.agg.AddDeltas(deltas, now)
+}
+
+// drainText feeds the kernel's text events into the text cache.
+func (a *Analyzer) drainText(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-a.loader.TextEvents:
+			if !ok {
+				return
+			}
+			a.learnText(ev, a.loader.PreparedTextTracking())
+		}
+	}
+}
+
+// AggOverflow: commands that bypassed kernel aggregation (map full).
+func (a *Analyzer) AggOverflow() uint64 {
+	if !a.started.Load() {
+		return 0
+	}
+	return a.loader.AggOverflow()
+}
+
+// HashMismatches: verification samples whose digest differed from the cache.
+func (a *Analyzer) HashMismatches() uint64 {
+	if !a.started.Load() || a.text == nil {
+		return 0
+	}
+	return a.text.mismatches()
 }
 
 // ─── Internal ─────────────────────────────────────────────────────────────────
@@ -193,7 +282,13 @@ func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time, preparedTracking b
 // poll reads the LRU map, enriches each PID, and publishes a new snapshot.
 // Always publishes when there is data (no CPU/mem pressure gate).
 func (a *Analyzer) poll() {
-	snap := a.agg.Snapshot(time.Now())
+	now := time.Now()
+	if entries, err := a.loader.DrainAgg(); err != nil {
+		slog.Warn("mysql: draining kernel aggregation", "err", err)
+	} else {
+		a.applyAgg(entries, now, a.loader.PreparedTextTracking())
+	}
+	snap := a.agg.Snapshot(now)
 	a.digests.Store(&snap)
 
 	staleNs := uint64(a.cfg.StaleSeconds) * uint64(time.Second)
