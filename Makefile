@@ -150,5 +150,13 @@ test-clickhouse:
 	CLICKHOUSE_TEST_URL=http://localhost:18123 $(GO) test -tags integration -run Integration -v ./internal/chsink/; \
 	rc=$$?; docker rm -f obs-ch-test >/dev/null; exit $$rc
 
-test-mysql-matrix: generate
+# Runs as root (uprobes) but must not generate as root (root's toolchain,
+# root-owned files): run `make generate` first as your user, then
+#   sudo make test-mysql-matrix GO=$$(command -v go)
+# (GO only if root's PATH has no Go toolchain).
+test-mysql-matrix:
+	@if [ ! -f internal/ebpf/mysql_query/mysqlquery_bpfel.go ]; then \
+		echo "test-mysql-matrix: generated eBPF code missing; run 'make generate' as your user first (not under sudo)" >&2; \
+		exit 1; \
+	fi
 	GO=$(GO) ./scripts/test-mysql-matrix.sh
