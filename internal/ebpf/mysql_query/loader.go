@@ -37,7 +37,8 @@
 //	l := NewLoader(100_000_000, "/usr/sbin/mysqld", true) // 100ms threshold
 //	err := l.Start(ctx)                                    // attach probes, start consumers
 //	stats := l.TopSlowPIDs(10, 0)                         // poll every 5 s
-//	ev := <-l.CmdEvents                                   // one per command
+//	rows, _ := l.DrainAgg()                               // per-interval sums, every command
+//	ev := <-l.CmdEvents                                   // only commands that could not be aggregated
 //	l.Stop()
 package mysql_query
 
@@ -85,8 +86,11 @@ type Loader struct {
 	// Buffered to 256 so the consume goroutine never blocks the ringbuf reader.
 	SlowEvents chan model.EBPFEvent
 
-	// CmdEvents receives one record per dispatch_command call when emitAll
-	// is set. Buffered; when full, events are dropped and counted.
+	// CmdEvents receives the commands that could not be aggregated in the
+	// kernel (aggregation map full, or the statement hash marked unsafe via
+	// MarkUnsafe), one record per command; every other command is only
+	// visible through DrainAgg. Buffered; when full, events are dropped and
+	// counted.
 	CmdEvents chan CmdEvent
 
 	// TextEvents receives statement texts (first sight and verification
@@ -127,8 +131,9 @@ func decodeCmdEvent(b []byte) (CmdEvent, bool) {
 // the statement was prepared before the agent attached.
 func (l *Loader) PreparedTextTracking() bool { return l.psTracking.Load() }
 
-// Dropped returns command events lost in the kernel (ring buffer full) plus
-// events dropped because CmdEvents was full. Safe to call before Start.
+// Dropped returns command events lost in the kernel (cmd ring buffer full)
+// plus events dropped in userspace because CmdEvents or TextEvents was full.
+// Safe to call before Start.
 func (l *Loader) Dropped() uint64 {
 	total := l.userDropped.Load()
 	var perCPU []uint64
@@ -146,8 +151,9 @@ func (l *Loader) Dropped() uint64 {
 //   - thresholdNs: minimum query latency in nanoseconds that triggers a ringbuf
 //     event (0 → default 100 000 000 ns = 100 ms).
 //   - mysqldPath: absolute path to the mysqld binary (0 → "/usr/sbin/mysqld").
-//   - emitAll: measure every command and emit it on CmdEvents; false keeps the
-//     legacy COM_QUERY-only stats + slow events.
+//   - emitAll: measure every command (aggregated in the kernel, read with
+//     DrainAgg; CmdEvents only carries commands that could not be
+//     aggregated); false keeps the legacy COM_QUERY-only stats + slow events.
 func NewLoader(thresholdNs uint64, mysqldPath string, emitAll bool) *Loader {
 	if thresholdNs == 0 {
 		thresholdNs = 100_000_000 // 100 ms

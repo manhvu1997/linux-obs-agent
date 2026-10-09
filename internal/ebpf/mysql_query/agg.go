@@ -56,7 +56,15 @@ func decodeTextEvent(b []byte) (TextEvent, bool) {
 // DrainAgg flips the active aggregation buffer and returns (and clears) the
 // one the programs were writing. Not safe for concurrent use; call it from
 // one goroutine (the analyzer's poll loop).
+//
+// Contract: every entry is returned exactly once. On error, the entries
+// returned (possibly none) were removed from the kernel map; all others stay
+// in it and are returned by a later drain of the same buffer. An iteration
+// error returns no entries at all.
 func (l *Loader) DrainAgg() ([]AggEntry, error) {
+	if l.objs.AggActive == nil || l.objs.Agg0 == nil || l.objs.Agg1 == nil {
+		return nil, errors.New("mysql_query: DrainAgg called before Start")
+	}
 	old := l.aggActive
 	next := 1 - old
 	if err := l.objs.AggActive.Set(next); err != nil {
@@ -68,34 +76,64 @@ func (l *Loader) DrainAgg() ([]AggEntry, error) {
 	if old == 1 {
 		m = l.objs.Agg1
 	}
-	var (
-		out  []AggEntry
-		keys []MysqlQueryAggKeyT
-		k    MysqlQueryAggKeyT
-		v    MysqlQueryAggValT
-	)
-	it := m.Iterate()
-	for it.Next(&k, &v) {
-		out = append(out, AggEntry{
+	return drainRows(func(yield func(MysqlQueryAggKeyT, MysqlQueryAggValT)) error {
+		var (
+			k MysqlQueryAggKeyT
+			v MysqlQueryAggValT
+		)
+		it := m.Iterate()
+		for it.Next(&k, &v) {
+			yield(k, v)
+		}
+		return it.Err()
+	}, func(k MysqlQueryAggKeyT) error { return m.Delete(&k) })
+}
+
+// drainRows collects every entry via iterate, then deletes each key and
+// returns only the entries whose delete succeeded (or found the key already
+// gone). An iteration error returns (nil, err) and deletes nothing. A delete
+// error does not stop the sweep; the first one is returned with the entries
+// that were removed, the others stay in the map for a later drain.
+func drainRows(
+	iterate func(yield func(MysqlQueryAggKeyT, MysqlQueryAggValT)) error,
+	del func(MysqlQueryAggKeyT) error,
+) ([]AggEntry, error) {
+	type row struct {
+		key MysqlQueryAggKeyT
+		e   AggEntry
+	}
+	var rows []row
+	if err := iterate(func(k MysqlQueryAggKeyT, v MysqlQueryAggValT) {
+		rows = append(rows, row{k, AggEntry{
 			PID: k.Tgid, Command: k.Command, Hash: k.Hash,
 			Calls: v.Calls, WallNs: v.WallNs, WallMaxNs: v.WallMaxNs, CPUNs: v.CpuNs, CPUMaxNs: v.CpuMaxNs,
 			RunqNs: v.RunqNs, BytesIn: v.BytesIn, BytesOut: v.BytesOut,
-		})
-		keys = append(keys, k)
+		}})
+	}); err != nil {
+		return nil, fmt.Errorf("mysql_query: iterating agg map: %w", err)
 	}
-	if err := it.Err(); err != nil {
-		return out, fmt.Errorf("mysql_query: iterating agg map: %w", err)
-	}
-	for i := range keys {
-		if err := m.Delete(&keys[i]); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return out, fmt.Errorf("mysql_query: clearing agg map: %w", err)
+	out := make([]AggEntry, 0, len(rows))
+	var firstErr error
+	for _, r := range rows {
+		if err := del(r.key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("mysql_query: clearing agg map: %w", err)
+			}
+			continue
 		}
+		out = append(out, r.e)
 	}
-	return out, nil
+	if len(out) == 0 {
+		out = nil
+	}
+	return out, firstErr
 }
 
 // ForgetText makes the kernel resend the text of (command, hash).
 func (l *Loader) ForgetText(command uint32, hash uint64) {
+	if l.objs.TextSeen == nil {
+		return
+	}
 	k := MysqlQueryTextKeyT{Hash: hash, Command: command}
 	if err := l.objs.TextSeen.Delete(&k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		slog.Debug("mysql_query: text_seen delete", "err", err)
@@ -124,8 +162,7 @@ func (l *Loader) AggOverflow() uint64 {
 	return total
 }
 
-// consumeText forwards text events; a full channel drops the event and
-// counts it in Dropped() (the hash is then resent after ForgetText).
+// consumeText forwards text events from the ring buffer to TextEvents.
 func (l *Loader) consumeText(ctx context.Context) {
 	for {
 		select {
@@ -145,10 +182,23 @@ func (l *Loader) consumeText(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		select {
-		case l.TextEvents <- ev:
-		default:
-			l.userDropped.Add(1)
+		l.forwardText(ev, l.ForgetText)
+	}
+}
+
+// forwardText delivers ev without blocking. When TextEvents is full the event
+// is dropped and counted in Dropped(). A dropped first-sight event has already
+// marked (command, hash) in the kernel's text_seen map and no consumer will
+// ever see it, so forget re-requests it; the kernel then resends the text with
+// the hash's next command. A dropped verification resend never touched
+// text_seen, so only the drop is counted.
+func (l *Loader) forwardText(ev TextEvent, forget func(command uint32, hash uint64)) {
+	select {
+	case l.TextEvents <- ev:
+	default:
+		l.userDropped.Add(1)
+		if !ev.Verify {
+			forget(ev.Command, ev.Hash)
 		}
 	}
 }

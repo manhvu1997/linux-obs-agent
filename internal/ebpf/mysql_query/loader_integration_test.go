@@ -171,20 +171,27 @@ func TestKernelHashMatchesGo(t *testing.T) {
 		}
 		rows.Close()
 	}
+	// Only the statements issued above count; text events from other clients
+	// of the same mysqld are ignored.
+	want := make(map[string]bool, len(stmts))
+	for _, s := range stmts {
+		want[s] = true
+	}
 	seen := 0
 	deadline := time.After(5 * time.Second)
 	for seen < len(stmts) {
 		select {
 		case ev := <-l.TextEvents:
-			if ev.Command != 3 {
+			if ev.Command != 3 || !want[ev.Query] {
 				continue
 			}
 			if got := sqlhash.KernelHash([]byte(ev.Query)); got != ev.Hash {
 				t.Fatalf("kernel hash %#x != Go %#x for %q", ev.Hash, got, ev.Query)
 			}
+			delete(want, ev.Query) // each statement counts once (verify resends)
 			seen++
 		case <-deadline:
-			t.Fatalf("saw %d of %d text events", seen, len(stmts))
+			t.Fatalf("saw %d of %d expected text events", seen, len(stmts))
 		}
 	}
 }
