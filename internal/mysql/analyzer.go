@@ -247,7 +247,9 @@ func (a *Analyzer) learnText(ev mysqlq.TextEvent, preparedTracking, literalSkip 
 		}
 		return
 	}
-	a.text.learn(k, e)
+	if a.text.learn(k, e) {
+		return // already flagged; counting the drift check too would double count
+	}
 	want := sqlhash.ExactHash
 	if literalSkip {
 		want = sqlhash.KernelHash

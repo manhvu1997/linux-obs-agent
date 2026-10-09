@@ -66,8 +66,8 @@ type node struct {
 // textCache maps kernel text hashes to classified statements. learn/verify
 // run on the text-event goroutine, resolve/endTick on the poll goroutine.
 //
-// Memory: at most max nodes (~130 B each with list element and map slot,
-// ~4 MB at 32 768) plus one digestRec per distinct digest among them (id,
+// Memory: at most max nodes (~150 B each with list element and map slot,
+// measured; ~5 MB at 32 768) plus one digestRec per distinct digest among them (id,
 // normalised text ≤ ~512 B, and with mysql.sample_queries one sample
 // ≤ 511 B).
 type textCache struct {
@@ -90,7 +90,8 @@ func newTextCache(max int, hooks textCacheHooks) *textCache {
 // different digest (a resend after ForgetText or a kernel text_seen
 // eviction) means one kernel hash covers two digests: like a verify
 // mismatch, the hash is marked unsafe and counted; the latest text is kept.
-func (c *textCache) learn(k textKey, e textEntry) {
+// It reports whether that happened.
+func (c *textCache) learn(k textKey, e textEntry) bool {
 	c.mu.Lock()
 	evicted, changed := c.putLocked(k, e)
 	c.mu.Unlock()
@@ -98,6 +99,7 @@ func (c *textCache) learn(k textKey, e textEntry) {
 	if changed {
 		c.flagMismatch(k)
 	}
+	return changed
 }
 
 // verify checks a sampled resend against the cached classification. On a

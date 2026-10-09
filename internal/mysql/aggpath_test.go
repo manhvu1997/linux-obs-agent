@@ -98,6 +98,21 @@ func TestLearnTextKernelHashDriftCheck(t *testing.T) {
 	}
 }
 
+// A resend whose digest changed and whose hash also fails the drift check
+// counts one mismatch, not two.
+func TestLearnTextChangedDigestCountsOnce(t *testing.T) {
+	a := testAnalyzer()
+	var u unsafeLog
+	a.text = newTextCache(16, u.hooks())
+	const qa, qb = "SELECT a FROM t", "SELECT b FROM t"
+	h := sqlhash.KernelHash([]byte(qa))
+	a.learnText(mysqlq.TextEvent{Command: 3, Hash: h, Query: qa, QueryLen: uint32(len(qa))}, true, true)
+	a.learnText(mysqlq.TextEvent{Command: 3, Hash: h, Query: qb, QueryLen: uint32(len(qb))}, true, true)
+	if a.text.mismatches() != 1 || len(u) != 1 {
+		t.Fatalf("mismatches = %d, unsafe = %v; want 1 each", a.text.mismatches(), u)
+	}
+}
+
 // Lost texts: COM_QUERY and COM_STMT_PREPARE get distinct placeholders (and
 // digest ids); a lost COM_STMT_EXECUTE text shows the execute placeholder.
 func TestLostTextPlaceholdersPerCommand(t *testing.T) {

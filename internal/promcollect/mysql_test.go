@@ -221,7 +221,7 @@ obs_agent_mysql_text_events_dropped_total 3
 # HELP obs_agent_mysql_agg_overflow_total Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact).
 # TYPE obs_agent_mysql_agg_overflow_total counter
 obs_agent_mysql_agg_overflow_total 7
-# HELP obs_agent_mysql_hash_mismatch_total Kernel text-hash verification samples whose digest differed from the cached one; the hash is switched to exact per-event processing.
+# HELP obs_agent_mysql_hash_mismatch_total Kernel text hashes found inconsistent: a verification sample or resend whose digest differed from the cached one, or a first-sight text whose kernel hash differed from the Go reference; the hash is switched to exact per-event processing.
 # TYPE obs_agent_mysql_hash_mismatch_total counter
 obs_agent_mysql_hash_mismatch_total 2
 `

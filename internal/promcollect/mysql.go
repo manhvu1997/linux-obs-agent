@@ -43,7 +43,7 @@ var (
 	myAggOverflowDesc = prometheus.NewDesc("obs_agent_mysql_agg_overflow_total",
 		"Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact).", nil, nil)
 	myHashMismatchDesc = prometheus.NewDesc("obs_agent_mysql_hash_mismatch_total",
-		"Kernel text-hash verification samples whose digest differed from the cached one; the hash is switched to exact per-event processing.", nil, nil)
+		"Kernel text hashes found inconsistent: a verification sample or resend whose digest differed from the cached one, or a first-sight text whose kernel hash differed from the Go reference; the hash is switched to exact per-event processing.", nil, nil)
 )
 
 // MySQLHealth are the tracer's health counters. A nil func reports 0.
