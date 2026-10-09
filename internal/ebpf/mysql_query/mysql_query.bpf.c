@@ -9,9 +9,16 @@
 //     inside the running mysqld binary.
 //   - Measure every command; COM_QUERY and COM_STMT_EXECUTE also feed the
 //     legacy per-PID stats and slow events. Per command: wall time, on-CPU
-//     time, run-queue wait and result bytes, emitted once on the cmd_events
-//     ring buffer. With emit_all_queries == 0 only COM_QUERY and
-//     COM_STMT_EXECUTE are tracked (legacy behaviour).
+//     time, run-queue wait and result bytes, summed in the kernel into
+//     agg_<agg_active> keyed by {tgid, command, text hash}. The hash
+//     (text_hash, mirroring sqlhash.KernelHash) skips numeric and string
+//     literals, so a statement's executions share one entry; its text is
+//     sent once on text_events (first sight of a (command, hash), plus a
+//     1/1024 verification resend). Userspace flips agg_active and drains the
+//     idle buffer. cmd_events carries a full per-command record only as the
+//     fallback (agg_* full, or a hash userspace marked unsafe).
+//     With emit_all_queries == 0 only COM_QUERY and COM_STMT_EXECUTE are
+//     tracked (legacy behaviour, no aggregation).
 //   - Read the SQL query text directly from the COM_DATA argument at function
 //     entry — no wire-protocol parsing required, works with TLS connections.
 //   - Filter early (in kernel) to reduce overhead: only emit ringbuf events when
@@ -89,10 +96,15 @@ struct x86_regs {
 #define COM_STMT_PREPARE 22
 #define COM_STMT_EXECUTE 23
 #define PS_TEXT_ENTRIES 16384 /* live prepared statements across all sessions */
+#define AGG_ENTRIES       16384
+#define TEXT_SEEN_ENTRIES 32768
+#define UNSAFE_ENTRIES    1024
+#define FNV_OFFSET 0xcbf29ce484222325ULL
+#define FNV_PRIME  0x100000001b3ULL
 
 // ─── Value structs ────────────────────────────────────────────────────────────
 
-/* In-flight command state, keyed by TID. 576 bytes: built in pending_scratch
+/* In-flight command state, keyed by TID. 584 bytes: built in pending_scratch
  * because it does not fit the 512-byte BPF stack. */
 struct mysql_pending_t {
     __u64 start_ts;
@@ -100,12 +112,13 @@ struct mysql_pending_t {
     __u64 rq_start;    /* task->sched_info.run_delay at entry */
     __u64 bytes_in;    /* COM_QUERY length (u32 in mysqld)    */
     __u64 bytes_out;   /* tcp/unix sendmsg bytes during call   */
+    __u64 hash;        /* text_hash(query) for COM_QUERY / COM_STMT_PREPARE */
     __u32 command;
     __u32 query_len;
     __u8  query[QUERY_MAX];
     __u8  comm[TASK_COMM_LEN];
 };
-_Static_assert(sizeof(struct mysql_pending_t) == 576, "pending layout");
+_Static_assert(sizeof(struct mysql_pending_t) == 584, "pending layout");
 _Static_assert(__builtin_offsetof(struct mysql_pending_t, query) % 8 == 0, "query alignment");
 
 struct mysql_pid_stats_t {
@@ -153,14 +166,58 @@ struct mysql_cmd_event_t *__mysql_cmd_event_t_unused __attribute__((unused));
 
 /* SQL text of one prepared statement, keyed by its Prepared_statement*.
  * len = original length (clamped to u32); text is NUL-terminated and holds
- * at most QUERY_MAX-1 bytes. 520 bytes: built in ps_scratch, never on the stack. */
+ * at most QUERY_MAX-1 bytes; hash = text_hash(text), computed once at
+ * prepare time so an execute needs no text pass. 528 bytes: built in
+ * ps_scratch, never on the stack. */
 struct ps_text_t {
     __u32 len;
     __u32 _pad;
+    __u64 hash;
     __u8  text[QUERY_MAX];
 };
-_Static_assert(sizeof(struct ps_text_t) == 8 + QUERY_MAX, "ps_text layout");
+_Static_assert(sizeof(struct ps_text_t) == 16 + QUERY_MAX, "ps_text layout");
 _Static_assert(__builtin_offsetof(struct ps_text_t, text) % 8 == 0, "text alignment");
+
+/* In-kernel aggregation (see internal/mysql/sqlhash/sqlhash.go for the hash rule). */
+struct agg_key_t {
+    __u32 tgid;
+    __u32 command;
+    __u64 hash;     /* 0: no text (other commands, execute without text) */
+};
+struct agg_val_t {
+    __u64 calls;
+    __u64 wall_ns;
+    __u64 wall_max_ns;  /* best effort: concurrent updates may lose a max */
+    __u64 cpu_ns;
+    __u64 cpu_max_ns;
+    __u64 runq_ns;
+    __u64 bytes_in;
+    __u64 bytes_out;
+};
+struct text_key_t {
+    __u64 hash;
+    __u32 command;
+    __u32 _pad;
+};
+/* First sight of a (command, hash), or a 1/1024 verification resend. */
+struct text_event_t {
+    __u64 hash;
+    __u32 command;
+    __u32 query_len;
+    __u32 verify;
+    __u32 _pad;
+    __u8  query[QUERY_MAX];
+};
+_Static_assert(sizeof(struct agg_key_t) == 16, "agg key layout");
+_Static_assert(sizeof(struct agg_val_t) == 64, "agg value layout");
+_Static_assert(sizeof(struct text_key_t) == 16, "text key layout");
+_Static_assert(sizeof(struct text_event_t) == 24 + QUERY_MAX, "text event layout");
+_Static_assert(__builtin_offsetof(struct text_event_t, query) % 8 == 0, "text event query alignment");
+/* Force BTF emission for bpf2go -type. */
+struct agg_key_t *__agg_key_t_unused __attribute__((unused));
+struct agg_val_t *__agg_val_t_unused __attribute__((unused));
+struct text_key_t *__text_key_t_unused __attribute__((unused));
+struct text_event_t *__text_event_t_unused __attribute__((unused));
 
 // ─── Maps ─────────────────────────────────────────────────────────────────────
 
@@ -174,7 +231,7 @@ struct {
     __uint(max_entries, MAX_ENTRIES);
 } mysql_pending SEC(".maps");
 
-/* Per-CPU scratch slot: mysql_pending_t (576 B) exceeds the 512-B stack. */
+/* Per-CPU scratch slot: mysql_pending_t (584 B) exceeds the 512-B stack. */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __type(key, __u32);
@@ -199,7 +256,7 @@ struct {
     __uint(max_entries, PS_TEXT_ENTRIES);
 } ps_text SEC(".maps");
 
-/* Per-CPU scratch slot for ps_text_t (520 B > 512-B stack). */
+/* Per-CPU scratch slot for ps_text_t (528 B > 512-B stack). */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __type(key, __u32);
@@ -222,7 +279,7 @@ struct {
     __uint(max_entries, 1 << 18); /* 256 KB */
 } events SEC(".maps");
 
-/* Every command: < 20k QPS × 584 B ≈ 12 MB/s; 4 MB absorbs ~7k-event bursts. */
+/* Fallback only: commands that could not be aggregated (agg_* full, or an unsafe hash). */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 22); /* 4 MB */
@@ -236,6 +293,57 @@ struct {
     __uint(max_entries, 1);
 } dropped SEC(".maps");
 
+/* Two aggregation buffers: programs write agg_<agg_active>; userspace flips
+ * agg_active, waits a grace period and drains the other one with no
+ * concurrent writer (exact sums, no lookup-and-delete race). Two separate
+ * definitions (not one shared anonymous struct type) so each map has its own
+ * BTF type, the conservative form for libbpf/cilium-ebpf map parsing. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct agg_key_t);
+    __type(value, struct agg_val_t);
+    __uint(max_entries, AGG_ENTRIES);
+} agg_0 SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct agg_key_t);
+    __type(value, struct agg_val_t);
+    __uint(max_entries, AGG_ENTRIES);
+} agg_1 SEC(".maps");
+
+/* (command, hash) whose text userspace has. LRU: userspace deletes a key
+ * when it evicts or never received the text, so the kernel resends it. */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, struct text_key_t);
+    __type(value, __u8);
+    __uint(max_entries, TEXT_SEEN_ENTRIES);
+} text_seen SEC(".maps");
+
+/* Hashes userspace found inconsistent with its digest (verification
+ * sample): always processed as full per-command events. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct text_key_t);
+    __type(value, __u8);
+    __uint(max_entries, UNSAFE_ENTRIES);
+} unsafe_hash SEC(".maps");
+
+/* Statement text, once per (command, hash) plus verification resends. */
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 20); /* 1 MB */
+} text_events SEC(".maps");
+
+/* Commands that fell back to cmd_events because agg_* was full, per CPU. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, 1);
+} agg_overflow SEC(".maps");
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const volatile __u64 slow_query_threshold_ns = 100000000ULL;
@@ -248,6 +356,11 @@ const volatile __u8 emit_all_queries = 1;
  * 0 = MySQL 8.0 prepare(this, const char *query, size_t length)
  *     → query = RSI, length = RDX */
 const volatile __u8 ps_prepare_has_thd = 1;
+/* 1: literal-skipping hash (sqlhash.KernelHash). 0: plain FNV-1a of the text
+ * — the fallback if a kernel's verifier rejects the skipping loop. */
+const volatile __u8 literal_skip = 1;
+/* Written by userspace at every drain (0 or 1). */
+volatile __u32 agg_active = 0;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -263,6 +376,172 @@ static __always_inline __u64 task_runq_ns(struct task_struct *t)
     if (bpf_core_field_exists(t->sched_info.run_delay))
         return BPF_CORE_READ(t, sched_info.run_delay);
     return 0;
+}
+
+static __always_inline __u64 fnv1a(__u64 h, __u8 c) { return (h ^ c) * FNV_PRIME; }
+static __always_inline int is_digit(__u8 c) { return c >= '0' && c <= '9'; }
+/* sqldigest's identifier bytes (start or part). */
+static __always_inline int is_ident(__u8 c)
+{
+    __u8 l = c | 0x20;
+    return (l >= 'a' && l <= 'z') || is_digit(c) || c == '_' || c == '$' || c == '@' || c >= 0x80;
+}
+static __always_inline int is_space(__u8 c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+enum { ST_CODE, ST_STR, ST_TICK, ST_BLOCK, ST_LINE, ST_DIGITS };
+
+/* text: a NUL-terminated QUERY_MAX-byte map value (pending.query or
+ * ps_text_t.text). Mirrors sqlhash.KernelHash statement for statement
+ * (internal/mysql/sqlhash/sqlhash.go is the source of truth; change both
+ * together): FNV-1a 64 over at most QUERY_MAX-1 bytes, stopping at NUL,
+ * except that a quoted string ('…' / "…") hashes as its opening quote byte
+ * only and a digit run at a token boundary hashes as one NUL byte.
+ *
+ * Reading text[i + 1] / text[i + 2] where Go uses at(b, i+1/2): the text is
+ * NUL-terminated within QUERY_MAX bytes, c1 is only read past c != 0 (so it
+ * is the next byte or the terminator), and c2 is only consulted when
+ * c1 == '-' (so i + 2 is at most the terminator); index QUERY_MAX itself
+ * reads as 0. Bytes after the terminator (stale scratch data) are never used. */
+static __always_inline __u64 text_hash(const __u8 *text)
+{
+    __u64 h = FNV_OFFSET, keep = 0, skip = 0;
+    __u32 st = ST_CODE, block_at = 0;
+    __u8 q = 0, prev = 0, esc = 0;
+
+    if (!literal_skip) {
+        for (__u32 i = 0; i < QUERY_MAX - 1; i++) {
+            __u8 c = text[i];
+            if (!c)
+                break;
+            h = fnv1a(h, c);
+        }
+        return h;
+    }
+    for (__u32 i = 0; i < QUERY_MAX - 1; i++) {
+        __u8 c = text[i];
+        if (!c)
+            break;
+        __u8 c1 = text[i + 1];                       /* i + 1 <= QUERY_MAX - 1 */
+        __u8 c2 = i + 2 < QUERY_MAX ? text[(i + 2) & (QUERY_MAX - 1)] : 0;
+        if (st == ST_DIGITS) {
+            if (is_digit(c)) {
+                keep = fnv1a(keep, c);
+                prev = c;
+                continue;
+            }
+            h = is_ident(c) ? keep : skip;
+            st = ST_CODE;
+        }
+        if (st == ST_CODE) {
+            if (c == '\'' || c == '"') {
+                h = fnv1a(h, c);        /* opening quote byte: ' and " must not alias */
+                st = ST_STR;
+                q = c;
+            } else if (c == '`') {
+                h = fnv1a(h, c);
+                st = ST_TICK;
+            } else if (c == '/' && c1 == '*') {
+                h = fnv1a(h, c);
+                st = ST_BLOCK;
+                block_at = i;
+            } else if (c == '#' || (c == '-' && c1 == '-' && (c2 == 0 || is_space(c2)))) {
+                h = fnv1a(h, c);
+                st = ST_LINE;
+            } else if (is_digit(c) && !is_ident(prev)) {
+                keep = fnv1a(h, c);
+                skip = fnv1a(h, 0);     /* NUL cannot occur in the clipped text */
+                st = ST_DIGITS;
+            } else {
+                h = fnv1a(h, c);
+            }
+        } else if (st == ST_STR) {
+            if (esc)
+                esc = 0;
+            else if (c == '\\')
+                esc = 1;
+            else if (c == q && c1 == q)
+                esc = 1;                /* doubled quote: the next byte is part of the string */
+            else if (c == q)
+                st = ST_CODE;
+        } else if (st == ST_TICK) {
+            h = fnv1a(h, c);
+            if (c == '`')
+                st = ST_CODE;
+        } else if (st == ST_BLOCK) {
+            h = fnv1a(h, c);
+            if (c == '/' && prev == '*' && i >= block_at + 3)
+                st = ST_CODE;
+        } else { /* ST_LINE */
+            h = fnv1a(h, c);
+            if (c == '\n')
+                st = ST_CODE;
+        }
+        prev = c;
+    }
+    if (st == ST_DIGITS)
+        h = skip;
+    return h;
+}
+
+/* Adds one command to an aggregation map. Returns 0, or -1 when the map is
+ * full (the caller falls back to a full cmd_events record). */
+static __always_inline int agg_add_to(void *map, struct agg_key_t *k, __u64 wall, __u64 cpu,
+                                      __u64 runq, __u64 in, __u64 out)
+{
+    struct agg_val_t *v = bpf_map_lookup_elem(map, k);
+    if (!v) {
+        struct agg_val_t zero = {};
+        /* EEXIST: another CPU inserted it first — fine, look it up again. */
+        bpf_map_update_elem(map, k, &zero, BPF_NOEXIST);
+        v = bpf_map_lookup_elem(map, k);
+        if (!v)
+            return -1;
+    }
+    __sync_fetch_and_add(&v->calls, 1);
+    __sync_fetch_and_add(&v->wall_ns, wall);
+    __sync_fetch_and_add(&v->cpu_ns, cpu);
+    __sync_fetch_and_add(&v->runq_ns, runq);
+    __sync_fetch_and_add(&v->bytes_in, in);
+    __sync_fetch_and_add(&v->bytes_out, out);
+    if (wall > v->wall_max_ns)
+        v->wall_max_ns = wall;
+    if (cpu > v->cpu_max_ns)
+        v->cpu_max_ns = cpu;
+    return 0;
+}
+
+/* Adds one command to agg_<agg_active>. */
+static __always_inline int agg_add(struct agg_key_t *k, __u64 wall, __u64 cpu, __u64 runq,
+                                   __u64 in, __u64 out)
+{
+    if (agg_active)
+        return agg_add_to(&agg_1, k, wall, cpu, runq, in, out);
+    return agg_add_to(&agg_0, k, wall, cpu, runq, in, out);
+}
+
+/* text: a QUERY_MAX-byte map value at an 8-byte aligned offset. verify = 0
+ * marks (command, hash) seen once the event is submitted; verify = 1 is a
+ * resend for userspace's hash-vs-digest check and leaves text_seen alone. */
+static __always_inline void emit_text(__u64 hash, __u32 command, __u32 len, const __u8 *text, __u32 verify)
+{
+    struct text_event_t *ev = bpf_ringbuf_reserve(&text_events, sizeof(*ev), 0);
+    if (!ev)
+        return; /* not marked seen: retried on the next call */
+    ev->hash = hash;
+    ev->command = command;
+    ev->query_len = len;
+    ev->verify = verify;
+    ev->_pad = 0;
+    __builtin_memcpy(ev->query, __builtin_assume_aligned(text, 8), sizeof(ev->query));
+    bpf_ringbuf_submit(ev, 0);
+    if (!verify) {
+        struct text_key_t tk = { .hash = hash, .command = command };
+        __u8 one = 1;
+        bpf_map_update_elem(&text_seen, &tk, &one, BPF_ANY);
+    }
 }
 
 // ─── Programs ─────────────────────────────────────────────────────────────────
@@ -295,6 +574,7 @@ int uprobe_dispatch_command(struct pt_regs *ctx)
     p->bytes_out = 0;
     p->command   = command;
     p->query_len = 0;
+    p->hash      = 0;
     p->query[0]  = 0;
     bpf_get_current_comm(&p->comm, sizeof(p->comm));
 
@@ -313,6 +593,8 @@ int uprobe_dispatch_command(struct pt_regs *ctx)
             p->query_len = len;
         }
     }
+    if (p->query[0])
+        p->hash = text_hash(p->query);
     /* A new command starts: no Prepared_statement from an earlier one may
      * linger and block (BPF_NOEXIST) this command's execute_loop. */
     bpf_map_delete_elem(&ps_exec, &tid);
@@ -365,6 +647,7 @@ int uprobe_ps_prepare(struct pt_regs *ctx)
     t->text[n] = 0;
     t->len  = len > 0xffffffffULL ? 0xffffffffU : (__u32)len;
     t->_pad = 0;
+    t->hash = text_hash(t->text);
     bpf_map_update_elem(&ps_text, &self, t, BPF_ANY);
     return 0;
 }
@@ -414,7 +697,7 @@ int kretprobe_unix_stream_sendmsg(struct pt_regs *ctx) { return add_bytes_out(ct
 
 /*
  * Return: everything is read through the mysql_pending map-value pointer (no
- * 576-byte local); the entry is deleted on every path after a successful lookup.
+ * 584-byte local); the entry is deleted on every path after a successful lookup.
  */
 SEC("uretprobe/dispatch_command")
 int uretprobe_dispatch_command(struct pt_regs *ctx)
@@ -442,10 +725,12 @@ int uretprobe_dispatch_command(struct pt_regs *ctx)
     /* Statement text: the captured COM_QUERY/COM_STMT_PREPARE text, or for
      * COM_STMT_EXECUTE the text recovered from its Prepared_statement*. Both
      * sources are QUERY_MAX-byte, NUL-terminated map values at 8-byte
-     * aligned offsets (pending.query @48, ps_text_t.text @8); the alignment
+     * aligned offsets (pending.query @56, ps_text_t.text @16); the alignment
      * hint at the copies keeps them 8-byte wide instead of byte-by-byte. */
     const __u8 *text = p->query;
     __u32 text_len   = p->query_len;
+    /* An execute without recovered text aggregates under hash 0. */
+    __u64 hash       = p->command == COM_STMT_EXECUTE ? 0 : p->hash;
     if (p->command == COM_STMT_EXECUTE) {
         __u64 *ps = bpf_map_lookup_elem(&ps_exec, &tid);
         if (ps) {
@@ -454,6 +739,7 @@ int uretprobe_dispatch_command(struct pt_regs *ctx)
             if (t) {
                 text     = t->text;
                 text_len = t->len;
+                hash     = t->hash;
             }
         }
     }
@@ -497,25 +783,46 @@ int uretprobe_dispatch_command(struct pt_regs *ctx)
     }
 
     if (emit_all_queries) {
-        struct mysql_cmd_event_t *ev = bpf_ringbuf_reserve(&cmd_events, sizeof(*ev), 0);
-        if (ev) {
-            ev->pid       = tgid;
-            ev->tid       = tid;
-            ev->command   = p->command;
-            ev->query_len = text_len;
-            ev->wall_ns   = latency_ns;
-            ev->cpu_ns    = cpu_ns;
-            ev->runq_ns   = runq_ns;
-            ev->bytes_in  = p->bytes_in;
-            ev->bytes_out = p->bytes_out;
-            __builtin_memcpy(ev->comm, p->comm, sizeof(ev->comm));
-            __builtin_memcpy(ev->query, __builtin_assume_aligned(text, 8), sizeof(ev->query));
-            bpf_ringbuf_submit(ev, 0);
-        } else {
-            __u32 zero = 0;
-            __u64 *d = bpf_map_lookup_elem(&dropped, &zero);
-            if (d)
-                *d += 1; /* per-CPU slot: no atomic needed */
+        int full = 1;
+        struct text_key_t tk = { .hash = hash, .command = p->command };
+        if (!(hash && bpf_map_lookup_elem(&unsafe_hash, &tk))) {
+            struct agg_key_t ak = { .tgid = tgid, .command = p->command, .hash = hash };
+            if (agg_add(&ak, latency_ns, cpu_ns, runq_ns, p->bytes_in, p->bytes_out) == 0) {
+                full = 0;
+                if (hash) {
+                    if (!bpf_map_lookup_elem(&text_seen, &tk))
+                        emit_text(hash, p->command, text_len, text, 0);
+                    else if ((bpf_get_prandom_u32() & 1023) == 0)
+                        emit_text(hash, p->command, text_len, text, 1);
+                }
+            } else {
+                __u32 zero = 0;
+                __u64 *o = bpf_map_lookup_elem(&agg_overflow, &zero);
+                if (o)
+                    *o += 1; /* per-CPU slot */
+            }
+        }
+        if (full) {
+            struct mysql_cmd_event_t *ev = bpf_ringbuf_reserve(&cmd_events, sizeof(*ev), 0);
+            if (ev) {
+                ev->pid       = tgid;
+                ev->tid       = tid;
+                ev->command   = p->command;
+                ev->query_len = text_len;
+                ev->wall_ns   = latency_ns;
+                ev->cpu_ns    = cpu_ns;
+                ev->runq_ns   = runq_ns;
+                ev->bytes_in  = p->bytes_in;
+                ev->bytes_out = p->bytes_out;
+                __builtin_memcpy(ev->comm, p->comm, sizeof(ev->comm));
+                __builtin_memcpy(ev->query, __builtin_assume_aligned(text, 8), sizeof(ev->query));
+                bpf_ringbuf_submit(ev, 0);
+            } else {
+                __u32 zero = 0;
+                __u64 *d = bpf_map_lookup_elem(&dropped, &zero);
+                if (d)
+                    *d += 1; /* per-CPU slot: no atomic needed */
+            }
         }
     }
 
