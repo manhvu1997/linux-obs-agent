@@ -408,7 +408,7 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 		if r.severity != ar.Severity {
 			t.Errorf("%s: severity %q in gen, %q in rules", ar.Name, ar.Severity, r.severity)
 		}
-		if !strings.Contains(r.expr, ar.Literal) {
+		if !ruleHasLiteral(r.expr, ar.Literal) {
 			t.Errorf("%s: threshold literal %q not in the rule expression", ar.Name, ar.Literal)
 		}
 	}
@@ -428,14 +428,6 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 			if style["mode"] != "dashed" {
 				t.Errorf("panel %q: threshold style %v, want dashed", p.Title, style["mode"])
 			}
-			// The side of the line where the alert fires is red.
-			wantLow, wantHigh := "green", "red"
-			if ar.Below {
-				wantLow, wantHigh = "red", "green"
-			}
-			if lo, hi := thresholdColors(p); lo != wantLow || hi != wantHigh {
-				t.Errorf("panel %q: colours %s below / %s above the line, want %s / %s", p.Title, lo, hi, wantLow, wantHigh)
-			}
 			// The line is the rule's literal in the panel's unit.
 			want, ok := literalThreshold(ar.Literal)
 			if !ok {
@@ -444,6 +436,23 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 			}
 			if u, _ := d["unit"].(string); u == "percent" {
 				want *= 100
+			}
+			// The side of the line where the alert fires is red: read from the
+			// literal's operator, not from ar.Below (the input withAlert used).
+			below, ok := literalFiresBelow(ar.Literal, want, ar.Threshold)
+			if !ok {
+				t.Errorf("%s: cannot tell from literal %q on which side of %v it fires", ar.Name, ar.Literal, ar.Threshold)
+				continue
+			}
+			wantLow, wantHigh := "green", "red"
+			if below {
+				wantLow, wantHigh = "red", "green"
+			}
+			if lo, hi := thresholdColors(p); lo != wantLow || hi != wantHigh {
+				t.Errorf("panel %q: colours %s below / %s above the line, want %s / %s", p.Title, lo, hi, wantLow, wantHigh)
+			}
+			if below != ar.Below {
+				t.Errorf("%s: Below = %v, but literal %q fires below the line = %v", ar.Name, ar.Below, ar.Literal, below)
 			}
 			if strings.HasPrefix(strings.TrimSpace(ar.Literal), "==") {
 				// A 0/1 gauge compared for equality: the line sits half-way to the other state.
@@ -462,7 +471,36 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 	}
 }
 
-var literalRe = regexp.MustCompile(`(?:>=|<=|==|!=|>|<)\s*([0-9.e+]+(?:\s*\*\s*[0-9.e+]+)*)\s*$`)
+var literalRe = regexp.MustCompile(`(>=|<=|==|!=|>|<)\s*([0-9.e+]+(?:\s*\*\s*[0-9.e+]+)*)\s*$`)
+
+// ruleHasLiteral reports whether lit occurs in expr as a whole token: "> 0.2"
+// must not match "> 0.25" or "> 10.2".
+func ruleHasLiteral(expr, lit string) bool {
+	return regexp.MustCompile(`(^|[^0-9.])` + regexp.QuoteMeta(lit) + `([^0-9.]|$)`).MatchString(expr)
+}
+
+// literalFiresBelow reports whether the rule literal fires below the panel's
+// line at threshold. v is the literal's number in the panel unit. > and >=
+// fire above, < and <= below; == v fires on the side of the line where v
+// sits. ok is false when the side cannot be told (!=, or == on the line).
+func literalFiresBelow(lit string, v, threshold float64) (below, ok bool) {
+	m := literalRe.FindStringSubmatch(strings.TrimSpace(lit))
+	if m == nil {
+		return false, false
+	}
+	switch m[1] {
+	case ">", ">=":
+		return false, true
+	case "<", "<=":
+		return true, true
+	case "==":
+		if v == threshold {
+			return false, false
+		}
+		return v < threshold, true
+	}
+	return false, false
+}
 
 // literalThreshold evaluates the number of a rule literal such as "> 0.3",
 // "== 0" or "> 10 * 1048576" (a product of numbers after the last comparison).
@@ -472,7 +510,7 @@ func literalThreshold(lit string) (float64, bool) {
 		return 0, false
 	}
 	v := 1.0
-	for _, f := range strings.Split(m[1], "*") {
+	for _, f := range strings.Split(m[2], "*") {
 		x, err := strconv.ParseFloat(strings.TrimSpace(f), 64)
 		if err != nil {
 			return 0, false
@@ -884,4 +922,61 @@ func TestTopDigestsRolesSkipFoldedRows(t *testing.T) {
 		return
 	}
 	t.Fatal("Analysis has no 'Top digests' panel")
+}
+
+func TestRuleHasLiteral(t *testing.T) {
+	for _, c := range []struct {
+		expr, lit string
+		want      bool
+	}{
+		{"rate(x[5m]) > 0.2\n  and on (instance) y >= 85", "> 0.2", true},
+		{"rate(x[5m]) > 0.25\n  and on (instance) y >= 85", "> 0.2", false}, // the mutated rule
+		{"rate(x[5m]) > 10.2", "> 0.2", false},
+		{"x > 0.2", "> 0.2", true},
+		{"x == 0", "== 0", true},
+		{"x == 0.5", "== 0", false},
+		{"x > 10 * 1048576", "> 10 * 1048576", true},
+		{"x > 10 * 10485760", "> 10 * 1048576", false},
+	} {
+		if got := ruleHasLiteral(c.expr, c.lit); got != c.want {
+			t.Errorf("ruleHasLiteral(%q, %q) = %v, want %v", c.expr, c.lit, got, c.want)
+		}
+	}
+}
+
+func TestLiteralFiresBelow(t *testing.T) {
+	for _, c := range []struct {
+		lit          string
+		v, threshold float64
+		below, ok    bool
+	}{
+		{"> 0.3", 30, 30, false, true},
+		{">= 85", 85, 85, false, true},
+		{"< 0.5", 0.5, 0.5, true, true},
+		{"<= 1", 1, 1, true, true},
+		{"== 0", 0, 0.5, true, true},
+		{"== 1", 1, 0.5, false, true},
+		{"== 0", 0, 0, false, false},
+		{"!= 0", 0, 0.5, false, false},
+	} {
+		below, ok := literalFiresBelow(c.lit, c.v, c.threshold)
+		if below != c.below || ok != c.ok {
+			t.Errorf("literalFiresBelow(%q, %v, %v) = %v %v, want %v %v", c.lit, c.v, c.threshold, below, ok, c.below, c.ok)
+		}
+	}
+}
+
+// The description names the side the alert fires on and the rule's literal:
+// a Below rule must not read "fires at 0.5".
+func TestAlertDescriptionNamesSideAndLiteral(t *testing.T) {
+	for _, c := range []struct {
+		name, want string
+	}{
+		{"ObsAgentMySQLIOWaitUnavailable", "Alert: ObsAgentMySQLIOWaitUnavailable (info) fires below 0.5 (== 0)."},
+		{"MySQLQueriesStarvedForCPU", "Alert: MySQLQueriesStarvedForCPU (critical) fires above 30 (> 0.3)."},
+	} {
+		if d := withAlert(Panel{}, rule(c.name)).Description; !strings.Contains(d, c.want) {
+			t.Errorf("description %q, want it to contain %q", d, c.want)
+		}
+	}
 }

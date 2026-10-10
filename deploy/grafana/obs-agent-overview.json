@@ -194,7 +194,7 @@
         },
         "textMode": "value_and_name"
       },
-      "description": "Formula: the heaviest digest's on-CPU seconds per second ÷ node CPU cores in use (avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m, per instance.\nReading: share of all CPU work on the server done by the heaviest statement; red (above the line) means a CPU culprit — the alert also needs node CPU ≥ 85%. Needs the digest in the exported set (prometheus_digests minimal or full).\nAlert: MySQLDigestCPUHog (warning) fires at 20."
+      "description": "Formula: the heaviest digest's on-CPU seconds per second ÷ node CPU cores in use (avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m, per instance.\nReading: share of all CPU work on the server done by the heaviest statement; red (above the line) means a CPU culprit — the alert also needs node CPU ≥ 85%. Needs the digest in the exported set (prometheus_digests minimal or full).\nAlert: MySQLDigestCPUHog (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 4,
@@ -255,7 +255,7 @@
         },
         "textMode": "value_and_name"
       },
-      "description": "Formula: the heaviest digest's disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m, per instance.\nReading: share of the disk's reads caused by one statement; red means a disk culprit — the alert also needs node disk reads > 5 MiB/s. No value when the disk read nothing (the denominator is filtered with > 0).\nAlert: MySQLDigestDiskReadHog (warning) fires at 20."
+      "description": "Formula: the heaviest digest's disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m, per instance.\nReading: share of the disk's reads caused by one statement; red means a disk culprit — the alert also needs node disk reads > 5 MiB/s. No value when the disk read nothing (the denominator is filtered with > 0).\nAlert: MySQLDigestDiskReadHog (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 5,
@@ -400,7 +400,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: per digest: on-CPU seconds per second ÷ node CPU cores in use (avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m (the alert's window); top 10.\nReading: a line above the dashed 20% line is a statement doing a fifth of all CPU work on the server; the alert also needs node CPU ≥ 85%. Digest text: obs_agent_mysql_digest_info or the Top digests table.\nAlert: MySQLDigestCPUHog (warning) fires at 20."
+      "description": "Formula: per digest: on-CPU seconds per second ÷ node CPU cores in use (avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m (the alert's window); top 10.\nReading: a line above the dashed 20% line is a statement doing a fifth of all CPU work on the server; the alert also needs node CPU ≥ 85%. Digest text: obs_agent_mysql_digest_info or the Top digests table.\nAlert: MySQLDigestCPUHog (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 9,
@@ -451,7 +451,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: per digest: disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m (the alert's window); top 10.\nReading: a line above the dashed 20% line is a statement causing a fifth of the disk's reads; the alert also needs node disk reads > 5 MiB/s.\nAlert: MySQLDigestDiskReadHog (warning) fires at 20."
+      "description": "Formula: per digest: disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m (the alert's window); top 10.\nReading: a line above the dashed 20% line is a statement causing a fifth of the disk's reads; the alert also needs node disk reads > 5 MiB/s.\nAlert: MySQLDigestDiskReadHog (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 10,
@@ -731,7 +731,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: each part's seconds per second ÷ statement wall seconds per second × 100, over 5m (the alerts' window), stacked: waiting for CPU (run-queue), on CPU, disk wait (block I/O), commit wait (redo log), other = 100 − the rest (locks, network, and any wait that is not measured).\nReading: waiting for CPU is the bottom band, so its top edge reads directly against the dashed 30% line (MySQLQueriesStarvedForCPU, also needs node CPU ≥ 85%). For MySQLQueriesStalledOnDisk add the disk and commit bands (also needs PSI io full > 10). Victims of CPU overload show mostly 'waiting for CPU': do not tune them, find the culprit in the row above. Missing disk/commit bands = not measured (see Accounting availability).\nAlert: MySQLQueriesStarvedForCPU (critical) fires at 30.\nAlert: MySQLQueriesStalledOnDisk (critical) fires at 30."
+      "description": "Formula: each part's seconds per second ÷ statement wall seconds per second × 100, over 5m (the alerts' window), stacked: waiting for CPU (run-queue), on CPU, disk wait (block I/O), commit wait (redo log), other = 100 − the rest (locks, network, and any wait that is not measured).\nReading: waiting for CPU is the bottom band, so its top edge reads directly against the dashed 30% line (MySQLQueriesStarvedForCPU, also needs node CPU ≥ 85%). For MySQLQueriesStalledOnDisk add the disk and commit bands (also needs PSI io full > 10). Victims of CPU overload show mostly 'waiting for CPU': do not tune them, find the culprit in the row above. Missing disk/commit bands = not measured (see Accounting availability).\nAlert: MySQLQueriesStarvedForCPU (critical) fires above 30 (> 0.3).\nAlert: MySQLQueriesStalledOnDisk (critical) fires above 30 (> 0.3)."
     },
     {
       "id": 14,
@@ -782,7 +782,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: redo-log wait seconds per second ÷ statement wall seconds per second × 100, over 5m.\nReading: above the dashed line statements spend more than a fifth of their time waiting for the redo log fsync: check the log device (Disk average wait, Disk utilisation), batch small transactions, or innodb_flush_log_at_trx_commit.\nAlert: MySQLCommitsStalledOnRedo (warning) fires at 20."
+      "description": "Formula: redo-log wait seconds per second ÷ statement wall seconds per second × 100, over 5m.\nReading: above the dashed line statements spend more than a fifth of their time waiting for the redo log fsync: check the log device (Disk average wait, Disk utilisation), batch small transactions, or innodb_flush_log_at_trx_commit.\nAlert: MySQLCommitsStalledOnRedo (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 15,
@@ -842,7 +842,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: bytes per second written to disk by mysqld threads while running statements, by command, over 5m; plus query + stmt_execute summed, which is what the alert compares.\nReading: SELECTs writing to disk are on-disk temporary tables or sorts: the 'query + stmt_execute' line above the dashed 10 MiB/s line fires the alert. Add an index for the ORDER BY / GROUP BY or raise tmp_table_size / sort_buffer_size.\nAlert: MySQLQueriesSpillingToDisk (info) fires at 1.048576e+07."
+      "description": "Formula: bytes per second written to disk by mysqld threads while running statements, by command, over 5m; plus query + stmt_execute summed, which is what the alert compares.\nReading: SELECTs writing to disk are on-disk temporary tables or sorts: the 'query + stmt_execute' line above the dashed 10 MiB/s line fires the alert. Add an index for the ORDER BY / GROUP BY or raise tmp_table_size / sort_buffer_size.\nAlert: MySQLQueriesSpillingToDisk (info) fires above 10485760 (> 10 * 1048576)."
     },
     {
       "id": 16,
@@ -1698,7 +1698,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: 1 when the agent can measure per-statement disk wait (task delay accounting) or commit wait (redo-log hooks), 0 when not.\nReading: below the dashed line the disk or commit band of 'Where query time goes' is missing and its time is counted as 'other'; mysql_report.accounting says why. The alert covers disk wait (for 30m).\nAlert: ObsAgentMySQLIOWaitUnavailable (info) fires at 0.5."
+      "description": "Formula: 1 when the agent can measure per-statement disk wait (task delay accounting) or commit wait (redo-log hooks), 0 when not.\nReading: below the dashed line the disk or commit band of 'Where query time goes' is missing and its time is counted as 'other'; mysql_report.accounting says why. The alert covers disk wait (for 30m).\nAlert: ObsAgentMySQLIOWaitUnavailable (info) fires below 0.5 (== 0)."
     },
     {
       "id": 39,

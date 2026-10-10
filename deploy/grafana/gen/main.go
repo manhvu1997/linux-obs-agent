@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/chsink"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
@@ -180,7 +181,11 @@ func rule(name string) alertRule {
 // withAlert draws r's threshold as a dashed red line and names the alert.
 func withAlert(p Panel, r alertRule) Panel {
 	p = dashedLine(p, r.Threshold, r.Below)
-	p.Description += fmt.Sprintf("\nAlert: %s (%s) fires at %v.", r.Name, r.Severity, r.Threshold)
+	side := "above"
+	if r.Below {
+		side = "below"
+	}
+	p.Description += fmt.Sprintf("\nAlert: %s (%s) fires %s %s (%s).", r.Name, r.Severity, side, strconv.FormatFloat(r.Threshold, 'f', -1, 64), r.Literal)
 	return p
 }
 
