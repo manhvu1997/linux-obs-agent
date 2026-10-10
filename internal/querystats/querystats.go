@@ -125,6 +125,12 @@ type Snapshot struct {
 	TopByBytesOut []model.QueryDigestStats
 	Exported      []ExportedDigest
 	Commands      map[string]model.QueryCounters
+	// Node is the node CPU over the window; nil when the window has no host
+	// sample or a poll in it had no valid node delta.
+	Node *model.MySQLNodeWindow
+	// QueryCPUCoveragePercent: Σ digest CPU ÷ traced mysqld CPU × 100; nil
+	// when a poll in the window was partial or mysqld CPU is 0.
+	QueryCPUCoveragePercent *float64
 }
 
 type key struct {
@@ -172,6 +178,7 @@ func (x *acc) merge(y *acc) {
 type bucket struct {
 	epoch int64
 	m     map[key]*acc
+	host  hostAcc
 }
 
 type life struct {
@@ -284,10 +291,26 @@ func (a *Aggregator) bucketFor(t time.Time) *bucket {
 	if epoch > b.epoch || b.m == nil {
 		b.epoch = epoch
 		b.m = make(map[key]*acc)
+		b.host = hostAcc{}
 	}
 	// epoch < b.epoch: a late event; count it into the newer bucket rather
 	// than wiping fresher data.
 	return b
+}
+
+// inWindow returns the buckets inside the window ending at now.
+func (a *Aggregator) inWindow(now time.Time) []*bucket {
+	cur := now.UnixNano() / a.cfg.BucketWidth.Nanoseconds()
+	n := int64(len(a.buckets))
+	out := make([]*bucket, 0, len(a.buckets))
+	for i := range a.buckets {
+		b := &a.buckets[i]
+		if b.m == nil || b.epoch <= cur-n || b.epoch > cur {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 // Snapshot merges the buckets inside the window, ranks digests, updates the
@@ -297,14 +320,9 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	cur := now.UnixNano() / a.cfg.BucketWidth.Nanoseconds()
-	n := int64(len(a.buckets))
+	bs := a.inWindow(now)
 	merged := make(map[key]*acc)
-	for i := range a.buckets {
-		b := &a.buckets[i]
-		if b.m == nil || b.epoch <= cur-n || b.epoch > cur {
-			continue
-		}
+	for _, b := range bs {
 		for k, x := range b.m {
 			m, ok := merged[k]
 			if !ok {
@@ -364,6 +382,15 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 	for k, v := range a.commands {
 		cmds[k] = v
 	}
+
+	hw := a.hostTotals(bs)
+	node := hw.node(a.cfg.Window)
+	var coverage *float64
+	if hw.samples > 0 && !hw.mysqldPartial && hw.mysqld > 0 {
+		v := 100 * float64(cpuAll) / float64(hw.mysqld)
+		coverage = &v
+	}
+
 	return Snapshot{
 		WindowSeconds:   int(a.cfg.Window / time.Second),
 		CPUAccounting:   acct,
@@ -373,11 +400,13 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 			CulpritMinCPUPercent:   a.cfg.CulpritMinCPUPercent,
 			VictimRunqRatio:        a.cfg.VictimRunqRatio,
 		},
-		VictimDigests: victims,
-		TopByCPU:      byCPU,
-		TopByBytesOut: byOut,
-		Exported:      exported,
-		Commands:      cmds,
+		VictimDigests:           victims,
+		TopByCPU:                byCPU,
+		TopByBytesOut:           byOut,
+		Exported:                exported,
+		Commands:                cmds,
+		Node:                    node,
+		QueryCPUCoveragePercent: coverage,
 	}
 }
 

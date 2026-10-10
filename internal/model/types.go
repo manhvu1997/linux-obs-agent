@@ -999,6 +999,14 @@ type MySQLAnalysis struct {
 	// the window, not only those listed in top_digests.
 	VictimDigests int `json:"victim_digests"`
 
+	// Node is the node CPU over the window (absent when a poll in the window
+	// had no valid /proc/stat delta).
+	Node *MySQLNodeWindow `json:"node,omitempty"`
+	// QueryCPUCoveragePercent = Σ digest CPU ÷ mysqld process CPU × 100: how
+	// much of mysqld's CPU the digests explain (absent while a traced PID's
+	// first poll is in the window).
+	QueryCPUCoveragePercent *float64 `json:"query_cpu_coverage_percent,omitempty"`
+
 	// OverloadCause answers "is one query pattern overloading this node?".
 	// Built per GET /api/diagnose from the node metrics and process families
 	// of that call; never set on the analyzer's cached snapshot.
@@ -1073,6 +1081,14 @@ type QueryRoleThresholds struct {
 	CulpritCPUSharePercent float64 `json:"culprit_cpu_share_percent"`
 	CulpritMinCPUPercent   float64 `json:"culprit_min_cpu_percent"`
 	VictimRunqRatio        float64 `json:"victim_runq_ratio"`
+}
+
+// MySQLNodeWindow is the node's CPU over the digest window, built from the
+// same polls as the digests so shares compare like with like.
+type MySQLNodeWindow struct {
+	NumCPU         int     `json:"num_cpu"`
+	CPUUsedCores   float64 `json:"cpu_used_cores"`   // node CPU used ÷ window
+	CPUUsedPercent float64 `json:"cpu_used_percent"` // node CPU used ÷ capacity × 100
 }
 
 // ─── Process families ─────────────────────────────────────────────────────────
