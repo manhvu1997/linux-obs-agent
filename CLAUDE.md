@@ -196,7 +196,7 @@ linux-obs-agent/
 │   ├── netinv/netinv.go             ← on-demand /proc TCP inventory (listen ports, connections)
 │   ├── netflow/                     ← windowed per-process/family flow accounting
 │   ├── procreport/procreport.go     ← builds process_report
-│   ├── promcollect/                 ← family + MySQL digest Prometheus collectors
+│   ├── promcollect/                 ← family, MySQL and node (disk, PSI) Prometheus collectors
 │   ├── mysql/cmdmap/cmdmap.go       ← MySQL command → class + digest
 │   ├── mysql/mysqldsym/             ← mysqld hook symbols + prepare() layout per MySQL
 │   │                                   version (testdata/*.syms, cmd/symdump)
@@ -1070,7 +1070,16 @@ All metrics are prefixed with `obs_agent_`.
 | `ebpf_events_total{module}` | Counter | eBPF events emitted per module |
 | `ebpf_events_total{module="fsync"}` | Counter | Fsync outlier events (latency > threshold) |
 | `family_*` (cpu_percent, mem_rss_bytes, processes, net_*, inbound/outbound bytes) | Gauge/Counter | Per process family; never per PID. See §20 |
-| `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes (`flow="out"` only: result bytes), digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. `events_dropped` counts commands genuinely lost (fallback ring buffer full or consumer behind). See §20 |
+| `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes (`flow="out"` only: result bytes), query_disk_read/write bytes, query_io_wait/redo_wait seconds, digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. Per command: disk bytes always, `io_wait` / `redo_wait` only while measured over the whole digest window. Per digest (`mysql.prometheus_digests`, default `minimal`): cpu, calls, disk reads; `full` adds runq wait, bytes out, io wait. `events_dropped` counts commands genuinely lost (fallback ring buffer full or consumer behind). See §20 |
+| `mysql_query_disk_read_bytes_total{command}` / `mysql_query_disk_write_bytes_total{command}` | Counter | Bytes MySQL statements caused to be read from / written to storage (task I/O accounting) |
+| `mysql_query_io_wait_seconds_total{command}` / `mysql_query_redo_wait_seconds_total{command}` | Counter | Block-I/O wait (delay accounting) / commit wait in `log_write_up_to`; absent while not measured |
+| `mysql_digest_disk_read_bytes_total{digest_id}` | Counter | Disk-read bytes per digest (`minimal` and `full`) |
+| `mysql_digest_io_wait_seconds_total{digest_id}` | Counter | Block-I/O wait per digest (`full` only, while measured) |
+| `mysql_query_cpu_coverage_ratio` | Gauge | CPU inside `dispatch_command` ÷ the traced mysqld processes' CPU over the digest window; absent while unknown; not clamped, can read slightly above 1 |
+| `mysql_io_wait_available` / `mysql_redo_wait_available` | Gauge | 1 when per-statement block-I/O / commit wait is measured over the whole digest window, else 0 |
+| `node_disk_read_bytes_total` / `node_disk_write_bytes_total` | Counter | Bytes read / written by the node's physical disks (whole devices without slaves; no loop, zram, dm, md); absent when `/proc/diskstats` is unreadable |
+| `node_physical_disks` | Gauge | Number of disks counted in `node_disk_*_bytes_total` |
+| `pressure_io_full_avg10` / `pressure_io_some_avg10` / `pressure_cpu_some_avg10` | Gauge | PSI avg10 in percent; only when PSI is available |
 | `family_inbound_peer_bytes_total{family,peer_ip,service_port,flow}` | Counter | Inbound client bytes; top `netflow.max_inbound_peers` IPs node-wide, overflow `other`. See §20 |
 | `mysql_digest_coverage_ratio` | Gauge | Share (0–1) of window query CPU explained by the exported digest series. See §20 |
 | `mysql_agg_overflow_total` | Counter | Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact) |
@@ -1099,7 +1108,7 @@ All metrics are prefixed with `obs_agent_`.
 | **MySQL commit-wait uprobes** (uprobe + uretprobe on `log_write_up_to`; they trap on **every** call by any mysqld thread — the "inside `dispatch_command`" filter runs in BPF after the trap, and the uretprobe hijacks every return. On MySQL 5.7 the page cleaners call it once per flushed page; 8.0 guards that call) — estimated, not measured | **~2–5 µs per call** on the calling mysqld thread (≈ 0.2–0.5 % of one core at 1 000 commits/s; on 5.7 with heavy flushing, add one call per flushed page). `mysql.commit_wait: false` removes it | — (state lives in `mysql_pending`) |
 | **Kernel delay accounting** (`enable_delayacct` / `kernel.task_delayacct=1`; needed for per-statement disk wait) — estimated, not measured | **kernel-wide, typically < 1 %** (paid by every task, not the agent) | — |
 | **Family grouping (10s scan)** — estimated, not measured | **~0.02%** | **< 1 MB** |
-| **ClickHouse export (drains + 60 s flush, 20k QPS)** — estimated, not measured | **~0.1–0.2 % (digest drain) + a few ms/min encoding** | **≤ 32 MB buffer + per-interval drain maps** |
+| **ClickHouse export (drains + 60 s flush, 20k QPS)** — estimated, not measured; `host_stats` adds one row per host per flush (negligible) | **~0.1–0.2 % (digest drain) + a few ms/min encoding** | **≤ 32 MB buffer + per-interval drain maps** |
 | netinv (per /api/diagnose) — estimated, not measured | 20–50 ms per call | transient |
 | **Total (all eBPF active + fsync + netflow + MySQL)** — estimated, not measured | **~1.4%** | **~98 MB** |
 | **Total (no trigger-eBPF; fsync + netflow + MySQL)** — estimated, not measured | **~0.9%** | **~63 MB** |
@@ -1721,7 +1730,7 @@ The same split names the query that **reads** the disk (`io_role: culprit`) apar
 
   Only measured waits count: a wait whose `accounting` entry (`cpu_wait`, `disk_wait`, `commit_wait`) is not `ok` is listed in `missing`, its victim count is omitted from `evidence`, and the victims check detail says so (e.g. `disk waits not measured (accounting.disk_wait = delayacct_disabled)`).
 
-  `verdict`: `query_cpu_overload` / `query_disk_overload` (checks 1–3; confidence high with victims, medium without — or when no relevant wait is measured (CPU: `cpu_wait`; disk: neither `disk_wait` nor `commit_wait`), with a summary clause saying victims could not be measured — low without process families — for the disk, without per-family read bytes, `missing: family_disk_io`, e.g. `process.include_io: false`), `node_not_saturated`, `not_mysql`, `no_dominant_query`, `no_data`. CPU `no_dominant_query` has confidence low when a culprit is impossible by construction: no `mysql_report.node`, so no `percent_of_node_cpu_used`, or the node saturated by load while its window CPU used is below `cpu_culprit_min_node_cpu_used_percent` — then check `io_diagnosis`. Disk `no_dominant_query` has confidence low without per-family read bytes or without `percent_of_disk_read`; disk `no_data` (`missing: query_disk_reads`: no statement read from disk, or `accounting.disk_bytes` is not `ok`) becomes `node_not_saturated` when the disk is not saturated. Which assessment is reported: the saturated one; with neither saturated, the CPU one; with **both** saturated, a `query_*_overload` verdict wins over any other, otherwise the one whose top digest has the larger share (`percent_of_node_cpu_used` vs `percent_of_disk_read`), and the other assessment is in `secondary` (same shape, never nested further). `digest` {`digest_id`, `digest_text`, `calls_per_sec`, `bytes_out_per_call`, plus `cpu_cores`, `percent_of_node_cpu_used`, `cpu_role` (cpu) or `disk_read_mb_per_sec`, `percent_of_disk_read`, `disk_read_pages_per_call`, `io_role` (disk)}; a `query_disk_overload` summary adds the pages-per-call reading (≤ 4: buffer-pool misses; ≥ 100: a scan). `evidence` (disk: `io_verdict`, `node_disk_read_mb_per_sec`, `query_disk_read_coverage_percent`, `disk_victims`, `commit_victims`, `top_disk_family`, `top_disk_family_read_mb_per_sec`, `mysql_family_disk_read_mb_per_sec`; cpu: `cpu_victims`, the node CPU, load and PSI fields, `top_family*`, `mysql_family_cpu_percent`, `query_cpu_coverage_percent` — the victim counts are the `victims` values above, present (0 included) exactly when that wait is measured) and `thresholds` carry every number used. Each assessment carries only its own resource's `evidence` and `thresholds` fields and `digest.cpu_cores` only for the CPU: the other resource's fields are omitted, never 0 (also in `secondary`). When the reported verdict is `query_disk_overload`, or `secondary` is one, `io_diagnosis.next_steps` starts with a pointer to `mysql_report.overload_cause` (or `mysql_report.overload_cause.secondary`) and the digest (a copy; the cached diagnosis is untouched).
+  `verdict`: `query_cpu_overload` / `query_disk_overload` (checks 1–3; confidence high with victims, medium without — or when no relevant wait is measured (CPU: `cpu_wait`; disk: neither `disk_wait` nor `commit_wait`), with a summary clause saying victims could not be measured — low without process families — for the disk, without per-family read bytes, `missing: family_disk_io`, e.g. `process.include_io: false`), `node_not_saturated`, `not_mysql`, `no_dominant_query`, `no_data`. CPU `no_dominant_query` has confidence low when a culprit is impossible by construction: no `mysql_report.node`, so no `percent_of_node_cpu_used`, or the node saturated by load while its window CPU used is below `cpu_culprit_min_node_cpu_used_percent` — then check `io_diagnosis`. Disk `no_dominant_query` has confidence low without per-family read bytes or without `percent_of_disk_read`; disk `no_data` (`missing: query_disk_reads`: no statement read from disk, or `accounting.disk_bytes` is not `ok`) becomes `node_not_saturated` when the disk is not saturated. Which assessment is reported: the saturated one; with neither saturated, the CPU one; with **both** saturated, a `query_*_overload` verdict wins over any other, otherwise the one whose top digest has the larger share (`percent_of_node_cpu_used` vs `percent_of_disk_read`), and the other assessment is in `secondary` (same shape, never nested further). `digest` {`digest_id`, `digest_text`, `calls_per_sec`, `bytes_out_per_call`, plus `cpu_cores`, `percent_of_node_cpu_used`, `cpu_role` (cpu) or `disk_read_mb_per_sec`, `percent_of_disk_read`, `disk_read_pages_per_call`, `io_role` (disk)}; a `query_disk_overload` summary adds the pages-per-call reading (≤ 4: buffer-pool misses; ≥ 100: a scan). `evidence` (disk: `io_verdict`, `node_disk_read_mb_per_sec`, `query_disk_read_coverage_percent`, `disk_victims`, `commit_victims`, `top_disk_family`, `top_disk_family_read_mb_per_sec`, `mysql_family_disk_read_mb_per_sec`; cpu: `cpu_victims`, the node CPU, load and PSI fields (`psi_cpu_some_avg10` omitted when PSI is unavailable, `load_normalised` when the CPU count is unknown), `top_family*`, `mysql_family_cpu_percent`, `query_cpu_coverage_percent` — the victim counts are the `victims` values above, present (0 included) exactly when that wait is measured) and `thresholds` carry every number used. Each assessment carries only its own resource's `evidence` and `thresholds` fields and `digest.cpu_cores` only for the CPU: the other resource's fields are omitted, never 0 (also in `secondary`). When the reported verdict is `query_disk_overload`, or `secondary` is one, `io_diagnosis.next_steps` starts with a pointer to `mysql_report.overload_cause` (or `mysql_report.overload_cause.secondary`) and the digest (a copy; the cached diagnosis is untouched).
 
 ```bash
 curl -s localhost:9200/api/diagnose | jq '.mysql_report.top_digests[] | {digest_text, cpu_role, victim_of, cpu_cores, percent_of_node_cpu_used, time_breakdown_percent}'
@@ -1750,9 +1759,15 @@ Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound p
 | `obs_agent_family_inbound_peer_bytes_total` | `family, peer_ip, service_port, flow` |
 | `obs_agent_mysql_queries_total`, `_query_cpu_seconds_total`, `_query_runq_wait_seconds_total`, `_query_wall_seconds_total` | `command` |
 | `obs_agent_mysql_query_bytes_total` (result bytes; `flow="out"` only) | `command, flow` |
-| `obs_agent_mysql_digest_{cpu_seconds,calls,bytes_out,runq_wait_seconds}_total` | `digest_id` |
+| `obs_agent_mysql_query_disk_read_bytes_total`, `_query_disk_write_bytes_total` (always) | `command` |
+| `obs_agent_mysql_query_io_wait_seconds_total`, `_query_redo_wait_seconds_total` (absent while not measured over the whole digest window: a counter stuck at 0 would read as "no wait") | `command` |
+| `obs_agent_mysql_digest_{cpu_seconds,calls,disk_read_bytes}_total` (`minimal`, `full`); `…_{runq_wait_seconds,bytes_out,io_wait_seconds}_total` (`full`; `io_wait` only while measured) | `digest_id` |
 | `obs_agent_mysql_digest_info` (=1) | `digest_id, digest_text` |
 | `obs_agent_mysql_digest_coverage_ratio` | — |
+| `obs_agent_mysql_query_cpu_coverage_ratio` (0–1, absent while unknown) | — |
+| `obs_agent_mysql_io_wait_available`, `obs_agent_mysql_redo_wait_available` (1/0) | — |
+| `obs_agent_node_disk_read_bytes_total`, `obs_agent_node_disk_write_bytes_total` (counters), `obs_agent_node_physical_disks` (gauge) | — |
+| `obs_agent_pressure_io_full_avg10`, `_io_some_avg10`, `_cpu_some_avg10` (gauges, percent; only when PSI is available) | — |
 | `obs_agent_mysql_events_dropped_total` (commands lost), `obs_agent_mysql_text_events_dropped_total` (texts re-requested) | — |
 | `obs_agent_mysql_agg_overflow_total`, `obs_agent_mysql_hash_mismatch_total` | — |
 
@@ -1762,15 +1777,31 @@ Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound p
 
 | Mode | Per-digest series |
 |---|---|
-| `full` (default) | Sticky set (`sticky_digests_max`), all four counters + `digest_info` — unchanged behaviour |
-| `minimal` | Top `prometheus_minimal_top_n` (20) digests by lifetime CPU: only `…digest_cpu_seconds_total` and `…digest_calls_total` + `digest_info`, plus one `digest_id="other"` series per counter (all digests not exported; may reset when a digest enters the exported set — use `rate()`) |
-| `off` | None, no `digest_info`; per-command metrics, `events_dropped_total` and the coverage ratio remain |
+| `minimal` (default) | Top `prometheus_minimal_top_n` (20) digests by lifetime CPU ∪ top 20 by lifetime disk read (a ranking admits only digests with a non-zero value, so a server without disk reads exports the CPU top only): `…digest_cpu_seconds_total`, `…digest_calls_total`, `…digest_disk_read_bytes_total` + `digest_info`, plus one `digest_id="other"` series per counter (everything not exported; it drops when a digest joins the set — a counter reset, read it with `rate()`) |
+| `full` | Sticky set (`sticky_digests_max`): the three `minimal` counters plus `…digest_runq_wait_seconds_total`, `…digest_bytes_out_total`, `…digest_io_wait_seconds_total` (while measured) + `digest_info`; no `other` |
+| `off` | None, no `digest_info`; per-command metrics, `events_dropped_total` and the coverage ratios remain |
 
-`obs_agent_mysql_digest_coverage_ratio` = window CPU of the digests exported in the current mode ÷ the window's total query CPU (0 in `off`, 1 when there is no query CPU). For fleets set `minimal` (or `off`) and use ClickHouse (§22) for the long tail — series grow as servers × digests × series-per-digest.
+`obs_agent_mysql_digest_coverage_ratio` = window CPU of the digests exported in the current mode ÷ the window's total query CPU (0 in `off`, 1 when there is no query CPU; clamped to 1). `obs_agent_mysql_query_cpu_coverage_ratio` = `query_cpu_coverage_percent` ÷ 100 (statement CPU ÷ the traced mysqld processes' CPU over the digest window); absent while unknown and **not clamped** (tick granularity), so it can read slightly above 1. The `*_available` gauges are 1 when the per-statement block-I/O / commit wait is measured over the whole digest window (`accounting.disk_wait` / `commit_wait` = `ok`). `minimal` keeps the series count bounded on fleets; `full` is needed only for the per-digest runq / bytes out / io wait series (and `MySQLDigestResultSizeSpike`). ClickHouse (§22) keeps the long tail — series grow as servers × digests × series-per-digest.
+
+Node series (`internal/promcollect/node.go`): `obs_agent_node_disk_{read,write}_bytes_total` are read from `/proc/diskstats` at scrape time over the physical disks (the same selection as `mysql_report.node.disk_*`); an unreadable file yields no series, never a 0. The PSI gauges come from the collector's latest sample and are absent without `/proc/pressure`.
 
 Join digest text in Grafana: `topk(10, rate(obs_agent_mysql_digest_cpu_seconds_total[5m])) * on(instance, digest_id) group_left(digest_text) obs_agent_mysql_digest_info`.
 
-Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test rules deploy/prometheus/obs-agent-alerts_test.yaml`).
+Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test rules deploy/prometheus/obs-agent-alerts_test.yaml`). Policy: page (critical) on symptoms users feel, ticket (warning/info) on causes. Every MySQL `description` is a numbered runbook, and the Overview dashboard draws each threshold on the panel it names. Ratios are over `[5m]`, per `instance`:
+
+| Alert | Severity | Condition (`for`) | Overview panel |
+|---|---|---|---|
+| `MySQLQueriesStarvedForCPU` | critical | query runq wait ÷ query wall > 0.3 **and** avg node CPU ≥ 85 % (5m) | Where query time goes |
+| `MySQLQueriesStalledOnDisk` | critical | (query io wait + redo wait) ÷ query wall > 0.3 **and** PSI io.full avg10 > 10 (5m); an absent wait counts as 0 | Where query time goes |
+| `MySQLDigestCPUHog` | warning | one digest's CPU ÷ node CPU cores in use > 0.2 **and** node CPU ≥ 85 % (5m) | % of node CPU used by top digests; Top CPU digest stat |
+| `MySQLDigestDiskReadHog` | warning | one digest's disk reads ÷ node physical-disk reads > 0.2 **and** node reads > 5 MiB/s (5m) | % of node disk reads by top digests; Top disk-read digest stat |
+| `MySQLCommitsStalledOnRedo` | warning | query redo wait ÷ query wall > 0.2 (5m) | Commit wait share |
+| `MySQLDigestResultSizeSpike` | warning | bytes out per call over `[10m]` > 5 × the same a day earlier **and** > 5 MB/s (10m); needs `prometheus_digests: full` | — |
+| `MySQLQueriesSpillingToDisk` | info | `query` + `stmt_execute` disk writes > 10 MiB/s (5m) | Query disk writes by command |
+| `ObsAgentMySQLIOWaitUnavailable` | info | `obs_agent_mysql_io_wait_available == 0` (30m) — fires on every host with `kernel.task_delayacct=0` and `mysql.enable_delayacct` off (the default on most modern kernels) | Accounting availability |
+| `ObsAgentMySQLAccountingDegraded` | info | events dropped, agg overflow or hash mismatches rising over `[10m]` (10m) | Dropped, overflow and hash mismatches (no threshold line) |
+
+The digest alerts exclude `digest_id="other"` and need the digest in the exported set.
 
 ### Accuracy and limits
 
@@ -1805,7 +1836,7 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 - Node disk bytes may double count on stacked devices that still look physical (`zd*` ZFS zvols, `drbd*`, `rbd*`: whole devices with an empty `slaves/`) — their I/O can also be counted on the local disks beneath (for `rbd*`, when Ceph OSDs run on the same node). `percent_of_disk_read` (and the coverage) can exceed 100 % when statements read through NFS or swap in from zram: those reads are charged to the thread's `ioac` but are not in the physical-disk count.
 - Without PSI (`/proc/pressure` absent), `io_diagnosis` relies on iowait, which accrues only on idle CPUs: on a CPU-saturated node it can read `healthy` while the disk is saturated, so a disk overload may not appear as `secondary` of a CPU verdict.
 - The disk `mysqld_top_consumer` check needs per-process I/O (`process.include_io`, default true); without per-family read bytes the disk verdict has low confidence and `missing: family_disk_io`.
-- `bytes_in` (it was the SQL text length, not network bytes) is removed from digests, commands and Prometheus (`obs_agent_mysql_query_bytes_total{flow="in"}` is gone). The ClickHouse `mysql_digest_stats.bytes_in` column stays until the schema migration of the next plan; new rows carry its default 0.
+- `bytes_in` (it was the SQL text length, not network bytes) is removed from digests, commands, Prometheus (`obs_agent_mysql_query_bytes_total{flow="in"}` is gone) and ClickHouse (`clickhouse-schema -alter` drops the column, §22).
 - **Not verified at runtime in the development environment** (compile-checked only, on arm64 Linux): verifier acceptance, attach behaviour and byte/connection counts on x86_64. Run the verification commands in the spec/plan before relying on the numbers.
 
 ### Prepared statements and command names
@@ -1877,22 +1908,30 @@ chsink.Snapshotter (check_interval) ── BuildDiagnoseReport ─────�
                                                                        ▼
                                          POST {url}/?query=INSERT INTO db.table FORMAT JSONEachRow
                                               &async_insert=1&wait_for_async_insert=1
+                                              &input_format_skip_unknown_fields=1
 ```
+
+`input_format_skip_unknown_fields=1` lets a newer agent insert into a not-yet-migrated table: columns the table lacks are skipped (their data is lost until the migration) instead of rejecting the batch.
 
 Each producer's `Drain*` swaps its accumulator out in O(1) under its lock; rows are built outside the lock. A window is "everything since the previous drain", so rows never overlap.
 
 ### Tables
 
-All in database `clickhouse.database` (default `obs`), `MergeTree` partitioned by day with `ttl_only_drop_parts = 1`, every row carries `host`, all times UTC. Interval tables carry `window_start`/`window_end`; values are **deltas** for that interval, so `sum()` over any range is exact (`family_stats` holds avg/max gauges instead).
+All in database `clickhouse.database` (default `obs`), `MergeTree` partitioned by day with `ttl_only_drop_parts = 1`, every row carries `host`, all times UTC. Interval tables carry `window_start`/`window_end`; values are **deltas** for that interval, so `sum()` over any range is exact (`family_stats` holds avg/max gauges instead). Derived values (shares, rates, per call) are computed in SQL, never stored; NULL means "not measured"; no row is written without signal.
 
 | Table | One row per |
 |---|---|
-| `mysql_digest_stats` | host, pid, digest, interval — calls, cpu/runq/wall/wall_max ns, bytes out (`bytes_in` is no longer filled: default 0 until the next schema migration, §20) |
+| `mysql_digest_stats` | host, pid, digest, interval — calls, cpu/runq/wall/wall_max ns, `bytes_out`, `disk_read_bytes`, `disk_write_bytes` (always measured), `io_wait_ns`, `redo_wait_ns` (`Nullable`: NULL unless every poll of the interval measured that wait — `accounting.disk_wait` / `commit_wait` — and a host window exists) |
+| `host_stats` | host, interval — the denominators: `cpu_count`, `node_cpu_used_ns`, `mysqld_cpu_ns`, `disk_read_bytes`, `disk_write_bytes` (physical disks). Value columns are `Nullable`: NULL unless every poll of the interval had a valid delta, so `sum()` skips them instead of mixing in a partial value. `cpu_count` is not nullable: 0 when no poll had a valid node CPU delta (`node_cpu_used_ns` is then NULL). No row when no poll ran or nothing moved |
 | `mysql_digest_text` | digest (`ReplacingMergeTree`, no TTL) — `digest_text`, `sample_query` (NULL unless both privacy flags below) |
 | `mysql_slow_queries` | slow query — latency, `digest_id` computed from the event text, `query` |
 | `netflow_peer_stats` | host, family, pid, direction, peer (`IPv6`; IPv4 as `::ffff:a.b.c.d`), service port, interval — bytes rx/tx, conns opened/closed |
 | `family_stats` | host, family, interval — `cpu_percent_avg/max`, `rss_bytes_max`, `processes_max` |
 | `diagnose_snapshots` | captured snapshot — `reason`, `verdict`, `report` (exact `/api/diagnose` JSON, ZSTD) |
+
+**Shares over a range** join the two on the same hosts and the same range: % of node CPU used = `sum(mysql_digest_stats.cpu_ns) / sum(host_stats.node_cpu_used_ns) × 100`, % of disk reads = `sum(disk_read_bytes) / sum(host_stats.disk_read_bytes) × 100`, node CPU used % = `sum(node_cpu_used_ns) / sum(cpu_count × window seconds × 1e9) × 100` (queries in `deploy/clickhouse/queries.sql`). Divide through `nullIf(x, 0)`, not `greatest(x, 1)` (which ignores NULL on ClickHouse ≥ 24.12).
+
+**Minor folding** (`clickhouse.min_digest_share_percent`, default `0.1`, `0` disables, valid `0 ≤ x < 100`): per interval and per (pid, command), digests under that % of the interval's query CPU **and** under that % of its query disk reads **and** with no execution at or above `mysql.slow_query_threshold_ms` are merged into one row `digest_id = '<minor>'` (text `<minor digests: …>`, sent once). Sums stay exact; one-off cheap statements stop producing rows. When an interval's total of a signal is 0, every digest counts as under the share for it. Folding happens after the `max_digest_keys` cap (`<other>`).
 
 The `host` column is `agent.node_name`, else `os.Hostname()`. (The `hostname` field inside the diagnose JSON is always `os.Hostname()`.) `obs_agent_clickhouse_host_info{host}` exposes the value so Prometheus `instance` can be joined to it.
 
@@ -1903,10 +1942,12 @@ The agent **never runs DDL**; its user needs only `INSERT`.
 ```bash
 obs-agent clickhouse-schema [-database obs] [-retention 30d] [-snapshot-retention 14d] [-alter]
 obs-agent clickhouse-schema -retention 30d | clickhouse-client --multiquery   # create
-obs-agent clickhouse-schema -alter -retention 60d | clickhouse-client --multiquery   # change TTL in place
+obs-agent clickhouse-schema -alter -retention 60d | clickhouse-client --multiquery   # migrate + set TTL
 ```
 
-Without `-alter` it prints `CREATE DATABASE/TABLE IF NOT EXISTS` plus a commented `CREATE USER … GRANT INSERT`; with `-alter`, `ALTER TABLE … MODIFY TTL`. Retention accepts whole days only (`Nd`, ≥ 1). `deploy/clickhouse/schema.sql` is the default output (a test keeps them equal). Defaults: 30 d, snapshots 14 d.
+Without `-alter` it prints `CREATE DATABASE/TABLE IF NOT EXISTS` plus a commented `CREATE USER … GRANT INSERT`. With `-alter` it prints the migration of an existing database — `ALTER TABLE mysql_digest_stats ADD COLUMN IF NOT EXISTS` the disk and wait columns, `DROP COLUMN IF EXISTS bytes_in`, `CREATE TABLE IF NOT EXISTS host_stats` — followed by `ALTER TABLE … MODIFY TTL` for every table, so one command both migrates and sets retention; every statement is idempotent (running it twice is safe). Retention accepts whole days only (`Nd`, ≥ 1). `deploy/clickhouse/schema.sql` is the default output (a test keeps them equal). Defaults: 30 d, snapshots 14 d.
+
+**Rollout order:** upgrade the agents **first**, then run `obs-agent clickhouse-schema -alter | clickhouse-client --multiquery`. Older agents still send `bytes_in` without `input_format_skip_unknown_fields`, so their batches are rejected once the column is dropped. Upgraded agents writing to an unmigrated database lose only the new columns (skipped) and the `host_stats` batches (unknown table: rejected, counted in `rows_dropped_total{reason="rejected"}`, so `ObsAgentClickHouseDropping` can fire) until the migration. Rows written before the migration read `disk_read_bytes` / `disk_write_bytes` = 0 (non-Nullable defaults) and `io_wait_ns` / `redo_wait_ns` = NULL: disk shares are meaningful only for ranges after the migration time.
 
 ### Delivery
 
@@ -1929,11 +1970,16 @@ Every `snapshots.check_interval` (30 s) the Snapshotter looks for a **reason**: 
 
 ### Dashboards
 
-`deploy/grafana/obs-agent-overview.json` (Prometheus) and `obs-agent-analysis.json` (ClickHouse, official `grafana-clickhouse-datasource`, read-only user). "Top digests by CPU" adds `cpuCores` (average cores over the selected range, which dilutes a short burst), `peakCores` (highest rate of one flush interval on one host — sort by it to find bursts), `cpuSharePct` (share of the selected hosts' query CPU), `wallMsMax` and `bytesOutAvg`; there is no node-relative column because ClickHouse rows carry no CPU count. The Snapshots table shows `overload_cause.verdict` / `digest_id` extracted from each snapshot. Each picks its data source at view time with a picker variable (`ds_prometheus` / `ds_clickhouse`, no import-time inputs) and both are **generated**: edit `deploy/grafana/gen/main.go`, then `go run ./deploy/grafana/gen`. Setup and import steps: `deploy/grafana/README.md`. The Overview → Analysis link carries `host`, `family` and the time range. ClickHouse time series bucket by `greatest($__interval_s, ${flush_s})`: rows are one per `flush_interval`, and a narrower Grafana bucket holds a whole row or none, which overstated rates by `flush_interval / $__interval` (≈3× on a 6 h range). `flush_s` is a hidden constant variable (60) that must equal the agents' `clickhouse.flush_interval`. `window_end` is the agent host's wall clock: an unsynchronised host clock shifts every ClickHouse panel against Prometheus. The Overview's "MySQL query CPU vs mysqld CPU (cores)" panel compares query CPU (inside `dispatch_command`, what digests can explain) with the mysqld family's CPU (`family_cpu_percent / 100 × cpu_count`, family picked by the `mysql_family` variable); the gap is mysqld CPU outside any query. Ad-hoc SQL: `deploy/clickhouse/queries.sql`.
+`deploy/grafana/obs-agent-overview.json` (Prometheus) and `obs-agent-analysis.json` (ClickHouse, official `grafana-clickhouse-datasource`, read-only user).
+
+- **Overview**: a "Firing obs-agent alerts" list (needs Grafana unified alerting evaluating the Prometheus rules, or an Alertmanager data source; filtered with `{instance=~"${instance:regex}"}`); "What is overloading this server?" (top CPU digest — % of node CPU used, top disk-read digest — % of node disk reads, query CPU coverage); "MySQL — who uses the server" (% of node CPU used / % of node disk reads by top digests, MySQL query CPU vs mysqld CPU, Top digests (last 5m) — a merged table of cores, % node CPU, disk MB/s, % disk read, pages/call); "MySQL — who is waiting" (Where query time goes, Commit wait share, Query disk writes by command, queries per second); Node, Disk & network (physical-disk throughput, PSI io full / some), Process families, Agent health (coverage, dropped/overflow/mismatches, accounting availability, ClickHouse sink). Panels behind an alert draw its threshold as a dashed line and name the alert (§20 alert table).
+- **Analysis**: "Top digests" — `cpuCores` (average over the range; dilutes a burst), `peakCores` (highest rate of one flush interval on one host), `pctNodeCpu` / `pctDiskRead` (÷ `host_stats` totals of the same hosts and range), `readMBs`, `writeMBs`, `pagesPerCall`, `cpuWaitPct` / `diskWaitPct` / `commitWaitPct`, `latencyMsAvg` / `latencyMsMax`, and the role columns `cpuRole` (pctNodeCpu ≥ 20 and node CPU ≥ 50 % used), `ioRole` (pctDiskRead ≥ 20 and node reads ≥ 5 MiB/s), `victimOf` (latencyMsAvg ≥ `slow_ms` and waits ≥ 50 % of wall). The role columns pool all selected hosts over the whole dashboard range with the default thresholds hard-coded, so they are indicative; `mysql_report.overload_cause` in `/api/diagnose` is the per-node verdict. Also: % of node CPU used / % of node disk reads — top 10 digests, Node CPU used and disk reads, CPU of the top 10 digests, CPU regression vs 7 days earlier, a digest drill-down (calls and latency, Where the digest's time goes, per host), slow queries, families, network, and Snapshots (with `overload_cause.verdict` / `digest_id` extracted from each report).
+
+Each picks its data source at view time with a picker variable (`ds_prometheus` / `ds_clickhouse`, no import-time inputs) and both are **generated**: edit `deploy/grafana/gen/main.go`, then `go run ./deploy/grafana/gen`. Setup and import steps: `deploy/grafana/README.md`. The Overview → Analysis link carries `host`, `family` and the time range. ClickHouse time series bucket by `greatest($__interval_s, ${flush_s})`: rows are one per `flush_interval`, and a narrower Grafana bucket holds a whole row or none, which overstated rates by `flush_interval / $__interval` (≈3× on a 6 h range). The hidden constants `flush_s` (60) and `slow_ms` (100) must equal the agents' `clickhouse.flush_interval` and `mysql.slow_query_threshold_ms`. `window_end` is the agent host's wall clock: an unsynchronised host clock shifts every ClickHouse panel against Prometheus. The Overview's "MySQL query CPU vs mysqld CPU (cores)" panel compares query CPU (inside `dispatch_command`, what digests can explain) with the mysqld family's CPU (`family_cpu_percent / 100 × cpu_count`, family picked by the `mysql_family` variable); the gap is mysqld CPU outside any query. Ad-hoc SQL: `deploy/clickhouse/queries.sql`.
 
 ### Configuration
 
-`clickhouse:` in `deploy/config.yaml.example` (url, database, username, password / password_file, timeout, tls_insecure_skip_verify, flush_interval, max_buffer_bytes, max_batches_per_flush, max_digest_keys, max_flow_keys, max_slow_queries_per_flush, include_sample_queries, `snapshots.{enabled,check_interval,min_interval}`), plus `mysql.prometheus_digests`, `mysql.prometheus_minimal_top_n`, `netflow.max_inbound_peers`. Environment overrides: `CLICKHOUSE_ENABLED`, `CLICKHOUSE_URL`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_USERNAME`, `CLICKHOUSE_PASSWORD`, `MYSQL_PROMETHEUS_DIGESTS`, `NETFLOW_MAX_INBOUND_PEERS`. Validation runs only when enabled: http(s) `url`; `database` matches `^[A-Za-z_][A-Za-z0-9_]*$`; `flush_interval` ≥ 10 s; 0 < `timeout` < `flush_interval`; `snapshots.min_interval` ≥ `check_interval`; all `max_*` > 0; `password_file` readable (content trimmed). Always validated: `prometheus_digests` ∈ {full, minimal, off}, `prometheus_minimal_top_n` ≥ 1, `max_inbound_peers` ≥ 0.
+`clickhouse:` in `deploy/config.yaml.example` (url, database, username, password / password_file, timeout, tls_insecure_skip_verify, flush_interval, max_buffer_bytes, max_batches_per_flush, max_digest_keys, max_flow_keys, max_slow_queries_per_flush, min_digest_share_percent, include_sample_queries, `snapshots.{enabled,check_interval,min_interval}`), plus `mysql.prometheus_digests`, `mysql.prometheus_minimal_top_n`, `netflow.max_inbound_peers`. Environment overrides: `CLICKHOUSE_ENABLED`, `CLICKHOUSE_URL`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_USERNAME`, `CLICKHOUSE_PASSWORD`, `MYSQL_PROMETHEUS_DIGESTS`, `NETFLOW_MAX_INBOUND_PEERS`. Validation runs only when enabled: http(s) `url`; `database` matches `^[A-Za-z_][A-Za-z0-9_]*$`; `flush_interval` ≥ 10 s; 0 < `timeout` < `flush_interval`; `snapshots.min_interval` ≥ `check_interval`; all `max_*` > 0; `password_file` readable (content trimmed); 0 ≤ `min_digest_share_percent` < 100. Always validated: `prometheus_digests` ∈ {full, minimal, off}, `prometheus_minimal_top_n` ≥ 1, `max_inbound_peers` ≥ 0.
 
 ### Test
 
@@ -1946,17 +1992,25 @@ go test ./internal/chsink/ ./internal/querystats/ ./internal/netflow/ ./internal
 curl -s localhost:9200/metrics | grep obs_agent_clickhouse
 clickhouse-client -q "SELECT table, count() FROM system.parts WHERE database='obs' AND active GROUP BY table"
 clickhouse-client -q "SELECT digest_id, sum(calls), sum(cpu_ns)/1e9 FROM obs.mysql_digest_stats WHERE window_end > now() - INTERVAL 10 MINUTE GROUP BY digest_id ORDER BY 3 DESC LIMIT 10"
+clickhouse-client -q "SELECT host, count(), sum(node_cpu_used_ns)/1e9 FROM obs.host_stats WHERE window_end > now() - INTERVAL 10 MINUTE GROUP BY host"
+
+# Existing database: upgrade the agents, then migrate twice (the second run must be a no-op) and confirm inserts continue
+obs-agent clickhouse-schema -alter | clickhouse-client --multiquery
+obs-agent clickhouse-schema -alter | clickhouse-client --multiquery
 ```
 
-**Verification status.** Unit tests for chsink, querystats, netflow, process, promcollect, config, drain and the dashboard generator run anywhere with Go 1.26. `internal/mysql`, `internal/exporter` and `cmd/agent` import generated eBPF code and need `make generate` on Linux. `make test-clickhouse` (Docker) and `promtool test rules` have **not been run** in the development environment, and nothing was checked against a real ClickHouse cluster or a real mysqld. Overhead figures (§14) are **estimated, not measured**.
+Then import both dashboards and check the Overview alert list and the merged "Top digests (last 5m)" table.
+
+**Verification status.** Unit tests for chsink, querystats, netflow, process, promcollect, config, drain and the dashboard generator run anywhere with Go 1.26. `internal/mysql`, `internal/exporter` and `cmd/agent` import generated eBPF code and need `make generate` on Linux. `promtool test rules` runs in devbox. `make test-clickhouse` (Docker), the `-alter` migration and the dashboard import have **not been run** in the development environment, and nothing was checked against a real ClickHouse cluster, a real Grafana or a real mysqld. Overhead figures (§14) are **estimated, not measured**.
 
 ### Limits
 
 - Rows are at `flush_interval` grain; sub-minute analysis uses Prometheus.
 - Netflow window jitter up to one `netflow.poll_interval` (5 s): the accumulator sees deltas only per poll.
 - Family stats fold the family scans that complete inside the window; a window with no scan yields no rows.
-- Digests beyond `max_digest_keys` per interval fold into `<other>` per pid; peers beyond `max_flow_keys` into `::`/0; slow queries beyond `max_slow_queries_per_flush` are dropped (counted).
+- Digests beyond `max_digest_keys` per interval fold into `<other>` per pid; minor digests into `<minor>` per (pid, command) (`min_digest_share_percent`); peers beyond `max_flow_keys` into `::`/0; slow queries beyond `max_slow_queries_per_flush` are dropped (counted). A digest that is minor in most intervals has most of its cost under `<minor>`.
+- Shares need `host_stats` rows for the same hosts and range as the digest rows; `host_stats` NULL values are skipped by `sum()`, so a range with unmeasured intervals divides by a smaller total (the share reads high). Disk columns of rows written before the migration read 0.
 - `MySQLSlowEvent` has no CPU / run-queue / bytes, so `mysql_slow_queries` lacks those columns; use `mysql_digest_stats`.
 - `mysql_slow_queries.digest_id` is computed from the event text: statements folded by `fold_system_schemas`, and prepared executes without recovered text, may not join to `mysql_digest_stats`.
-- Dashboards: per-cell data links, a Snapshots link column, PSI panels and a load ÷ CPUs panel are **not implemented** — no PSI metric is exported, and `cpu_count` exists only in Prometheus (ClickHouse rows carry no CPU count). Snapshots are read with the SQL in `deploy/grafana/README.md`.
+- Dashboards: per-cell data links, a Snapshots link column and a load ÷ CPUs panel are **not implemented**. Snapshots are read with the SQL in `deploy/grafana/README.md`.
 - MongoDB digests, Kafka/collector transports and agent-managed schema migrations are not covered.

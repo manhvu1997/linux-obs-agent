@@ -401,12 +401,14 @@ mysql:
   # disk reads io_role culprit (see io_culprit_* above).
   overload_node_cpu_percent: 85
   overload_node_load: 1.5
-  # Per-digest series in Prometheus. full = sticky set with cpu/calls/bytes_out/runq
-  # (today's behaviour); minimal = top prometheus_minimal_top_n by CPU with cpu+calls
-  # plus digest_id="other" (use on fleets); off = per-command metrics only.
+  # Per-digest series in Prometheus. minimal (default) = top prometheus_minimal_top_n
+  # by lifetime CPU UNION top prometheus_minimal_top_n by lifetime disk read, with
+  # cpu + calls + disk_read plus digest_id="other" (read with rate()); full = sticky
+  # set (sticky_digests_max) adding runq_wait, bytes_out and io_wait (needed by the
+  # MySQLDigestResultSizeSpike alert); off = per-command metrics only.
   # obs_agent_mysql_digest_coverage_ratio shows how much query CPU the series explain.
   # ClickHouse (below) keeps every digest regardless. Env MYSQL_PROMETHEUS_DIGESTS.
-  prometheus_digests: full
+  prometheus_digests: minimal
   prometheus_minimal_top_n: 20
 
 # Always-on per-process TCP flow accounting (eBPF). Feeds
