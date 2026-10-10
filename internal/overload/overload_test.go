@@ -201,3 +201,103 @@ func TestDigestBlockEvidenceAndSummary(t *testing.T) {
 		}
 	}
 }
+
+var (
+	mysqlDiskTop  = []model.FamilyStats{{Family: "mysql.service", CPUPercent: 70, ReadBytesPerSec: 40 << 20}, {Family: "backup.service", CPUPercent: 5, ReadBytesPerSec: 1 << 20}}
+	backupDiskTop = []model.FamilyStats{{Family: "mysql.service", CPUPercent: 70, ReadBytesPerSec: 2 << 20}, {Family: "backup.service", CPUPercent: 5, ReadBytesPerSec: 80 << 20}}
+)
+
+// diskReport: the top disk-read digest reads pct % of the node's disk reads.
+func diskReport(ioRole string, pct float64, victims, commit int) *model.MySQLAnalysis {
+	r := report("", 5, 40, 0) // CPU side quiet
+	rd := 30.0
+	r.Node.DiskReadMBPerSec = &rd
+	r.Victims = map[string]int{"cpu": 0, "disk": victims, "commit": commit}
+	r.Thresholds.IOCulpritPercentOfDiskRead, r.Thresholds.IOCulpritMinNodeDiskReadMBPerSec = 20, 5
+	r.TopDigestsByDiskRead = []model.QueryDigestStats{{PID: 42, DigestID: "scan", DigestText: "select * from big", Command: "query",
+		DiskReadMBPerSec: f(pct / 100 * rd), PercentOfDiskRead: f(pct), DiskReadPagesPerCall: f(640), IORole: ioRole}}
+	return r
+}
+
+func TestDiskVerdicts(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		io       model.IOVerdict
+		r        *model.MySQLAnalysis
+		fams     []model.FamilyStats
+		want     model.OverloadVerdict
+		wantConf model.IOConfidence
+	}{
+		{"scan saturates the disk, victims", model.VerdictHighDiskThroughput, diskReport("culprit", 70, 2, 0), mysqlDiskTop, model.OverloadQueryDisk, model.ConfidenceHigh},
+		{"commit victims count for disk", model.VerdictStorageLatencyStall, diskReport("culprit", 70, 0, 3), mysqlDiskTop, model.OverloadQueryDisk, model.ConfidenceHigh},
+		{"no victims", model.VerdictHighDiskThroughput, diskReport("culprit", 70, 0, 0), mysqlDiskTop, model.OverloadQueryDisk, model.ConfidenceMedium},
+		{"reads spread out", model.VerdictHighDiskThroughput, diskReport("", 8, 1, 0), mysqlDiskTop, model.OverloadNoDominantQuery, model.ConfidenceHigh},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: c.r, Families: c.fams, PIDFamilies: pidFam, IOVerdict: c.io}, Thresholds{}, time.Unix(0, 0))
+			if got.Resource != "disk" || got.Verdict != c.want || got.Confidence != c.wantConf {
+				t.Fatalf("%s/%s/%s; summary %s", got.Resource, got.Verdict, got.Confidence, got.Summary)
+			}
+			if len(got.Checks) != 4 || got.Secondary != nil {
+				t.Fatalf("checks %d secondary %+v", len(got.Checks), got.Secondary)
+			}
+		})
+	}
+}
+
+func TestDiskNotMySQL(t *testing.T) {
+	got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: diskReport("culprit", 70, 1, 0), Families: backupDiskTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHighDiskThroughput}, Thresholds{}, time.Unix(0, 0))
+	if got.Verdict != model.OverloadNotMySQL || got.Resource != "disk" || !strings.Contains(got.Summary, "backup.service") {
+		t.Fatalf("%s/%s: %s", got.Resource, got.Verdict, got.Summary)
+	}
+}
+
+func TestDiskSummaryExplainsPagesPerCall(t *testing.T) {
+	got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: diskReport("culprit", 70, 1, 0), Families: mysqlDiskTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHighDiskThroughput}, Thresholds{}, time.Unix(0, 0))
+	for _, want := range []string{"scan", "70% of the disk's reads", "640 pages per call", "EXPLAIN"} {
+		if !strings.Contains(got.Summary, want) {
+			t.Fatalf("summary %q lacks %q", got.Summary, want)
+		}
+	}
+}
+
+func TestBothResourcesSecondary(t *testing.T) {
+	r := diskReport("culprit", 40, 1, 0)
+	cpu := report("culprit", 27, 90, 1)
+	r.Node.CPUUsedPercent, r.Node.CPUUsedCores = 90, 7.2
+	r.TopDigests, r.Victims["cpu"] = cpu.TopDigests, 1
+	got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: r, Families: mysqlDiskTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHighDiskThroughput}, Thresholds{}, time.Unix(0, 0))
+	// disk share 40 % > cpu share 27 %: disk is the verdict, cpu the secondary.
+	if got.Verdict != model.OverloadQueryDisk || got.Secondary == nil || got.Secondary.Verdict != model.OverloadQueryCPU || got.Secondary.Secondary != nil {
+		t.Fatalf("primary %s/%s secondary %+v", got.Resource, got.Verdict, got.Secondary)
+	}
+}
+
+func TestOnlyCPUSaturatedNoSecondary(t *testing.T) {
+	got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: report("culprit", 27, 90, 1), Families: mysqlTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHealthy}, Thresholds{}, time.Unix(0, 0))
+	if got.Resource != "cpu" || got.Verdict != model.OverloadQueryCPU || got.Secondary != nil {
+		t.Fatalf("%s/%s secondary %+v", got.Resource, got.Verdict, got.Secondary)
+	}
+}
+
+func TestAnnotateIODiagnosis(t *testing.T) {
+	io := &model.IODiagnosis{Verdict: model.VerdictHighDiskThroughput, NextSteps: []string{"existing step"}}
+	oc := &model.QueryOverload{Verdict: model.OverloadQueryDisk, Digest: &model.OverloadDigest{DigestID: "scan"}}
+	out := AnnotateIODiagnosis(io, oc)
+	if len(out.NextSteps) != 2 || !strings.Contains(out.NextSteps[0], "overload_cause") || !strings.Contains(out.NextSteps[0], "scan") {
+		t.Fatalf("next_steps = %v", out.NextSteps)
+	}
+	if len(io.NextSteps) != 1 {
+		t.Fatal("the input diagnosis was mutated")
+	}
+	if got := AnnotateIODiagnosis(io, &model.QueryOverload{Verdict: model.OverloadQueryCPU}); got != io {
+		t.Fatal("non-disk verdict must return the input unchanged")
+	}
+	if AnnotateIODiagnosis(nil, oc) != nil {
+		t.Fatal("nil diagnosis stays nil")
+	}
+}

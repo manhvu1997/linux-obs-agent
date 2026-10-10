@@ -85,6 +85,8 @@ func BuildFamilies(procs []model.ProcessStats, topMembers int) []model.FamilySta
 		}
 		a.f.ProcessCount++
 		a.f.CPUPercent += p.CPUPercent
+		a.f.ReadBytesPerSec += p.ReadBytesPerSec
+		a.f.WriteBytesPerSec += p.WriteBytesPerSec
 		a.f.MemRSSBytes += p.MemRSSBytes
 		a.f.MemPercent += p.MemPercent
 		a.members = append(a.members, p)

@@ -420,20 +420,27 @@ func (p *PrometheusExporter) BuildDiagnoseReport(n, topPIDsN int) model.Diagnose
 	// MySQL slow-query analysis: latest snapshot from the server-side uprobe tracer.
 	// Only non-nil when MySQL tracing is enabled and queries have been observed.
 	if p.mysqlAnalyzer != nil {
-		report.MySQLReport = p.withOverloadCause(p.mysqlAnalyzer.Latest(), report.Metrics)
+		report.MySQLReport = p.withOverloadCause(p.mysqlAnalyzer.Latest(), report.Metrics, report.IODiagnosis)
+		if report.MySQLReport != nil {
+			report.IODiagnosis = overload.AnnotateIODiagnosis(report.IODiagnosis, report.MySQLReport.OverloadCause)
+		}
 	}
 
 	return report
 }
 
 // withOverloadCause returns a copy of a with OverloadCause assessed against
-// this call's node metrics and process families. The analyzer's cached
-// snapshot is shared across calls and must never be mutated.
-func (p *PrometheusExporter) withOverloadCause(a *model.MySQLAnalysis, m model.NodeMetrics) *model.MySQLAnalysis {
+// this call's node metrics, I/O diagnosis (nil: none) and process families.
+// The analyzer's cached snapshot is shared across calls and must never be
+// mutated.
+func (p *PrometheusExporter) withOverloadCause(a *model.MySQLAnalysis, m model.NodeMetrics, io *model.IODiagnosis) *model.MySQLAnalysis {
 	if a == nil {
 		return nil
 	}
 	in := overload.Inputs{Metrics: m, MySQL: a}
+	if io != nil {
+		in.IOVerdict = io.Verdict
+	}
 	if p.insp != nil {
 		in.Families = p.insp.AllFamilies()
 		in.PIDFamilies = p.insp.PIDFamilies()

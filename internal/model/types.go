@@ -1012,7 +1012,8 @@ type MySQLAnalysis struct {
 	// Accounting reports which per-statement signals every poll in the window
 	// measured ("unknown" for the last three before the first host sample):
 	//   "cpu_wait"    → "ok" | "run_delay_unavailable" (no run-queue time;
-	//                   cpu_wait and victim_of are then omitted)
+	//                   cpu_wait and victim kind "cpu" are then omitted —
+	//                   victim_of can still be "disk" or "commit")
 	//   "disk_bytes"  → "ok" | "io_accounting_unavailable" (no task I/O accounting)
 	//   "disk_wait"   → "ok" | "blkio_delay_unavailable" (kernel lacks
 	//                   task_struct.delays) | "delayacct_disabled"
@@ -1162,14 +1163,18 @@ type FamilyMember struct {
 
 // FamilyStats aggregates every process in one family (systemd unit).
 type FamilyStats struct {
-	Family       string         `json:"family"`
-	RootPID      uint32         `json:"root_pid"`
-	RootCmdline  string         `json:"root_cmdline"`
-	ProcessCount int            `json:"process_count"`
-	CPUPercent   float64        `json:"cpu_percent"`
-	MemRSSBytes  uint64         `json:"mem_rss_bytes"`
-	MemPercent   float64        `json:"mem_percent"`
-	TopMembers   []FamilyMember `json:"top_members"`
+	Family       string  `json:"family"`
+	RootPID      uint32  `json:"root_pid"`
+	RootCmdline  string  `json:"root_cmdline"`
+	ProcessCount int     `json:"process_count"`
+	CPUPercent   float64 `json:"cpu_percent"`
+	MemRSSBytes  uint64  `json:"mem_rss_bytes"`
+	MemPercent   float64 `json:"mem_percent"`
+	// Storage bytes per second summed over members (/proc/<pid>/io
+	// read_bytes/write_bytes; 0 when process.include_io is off).
+	ReadBytesPerSec  float64        `json:"read_bytes_per_sec"`
+	WriteBytesPerSec float64        `json:"write_bytes_per_sec"`
+	TopMembers       []FamilyMember `json:"top_members"`
 }
 
 // ─── Connection inventory ─────────────────────────────────────────────────────

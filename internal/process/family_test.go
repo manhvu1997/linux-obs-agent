@@ -60,3 +60,14 @@ func TestBuildFamilies(t *testing.T) {
 		t.Fatalf("top members by CPU wrong: %+v", php.TopMembers)
 	}
 }
+
+func TestBuildFamiliesSumsStorageIO(t *testing.T) {
+	procs := []model.ProcessStats{
+		{PID: 10, Family: "mysql.service", StartTime: 1, ReadBytesPerSec: 10, WriteBytesPerSec: 3},
+		{PID: 11, Family: "mysql.service", StartTime: 2, ReadBytesPerSec: 5, WriteBytesPerSec: 4},
+	}
+	fams := BuildFamilies(procs, 2)
+	if len(fams) != 1 || fams[0].ReadBytesPerSec != 15 || fams[0].WriteBytesPerSec != 7 {
+		t.Fatalf("families = %+v", fams)
+	}
+}
