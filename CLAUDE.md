@@ -1681,17 +1681,17 @@ wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
   | `victim_of: cpu` | `cpu_wait` ≥ `victim_wait_percent` (50) **and** `latency_ms_avg` ≥ `slow_query_threshold_ms` | slow because it waited for a CPU |
 
   A value whose input is unavailable is omitted, never 0.
-- Report level: `node` {`num_cpu`, `cpu_used_cores`, `cpu_used_percent`} over W (from `/proc/stat`, same polls); `query_cpu_coverage_percent` = Σ digest CPU ÷ CPU of the traced mysqld processes × 100 — how much of mysqld's CPU the digests explain (the rest: connection handling outside `dispatch_command`, InnoDB background threads); omitted while a mysqld PID's first poll is in the window (restart). `victims` {`cpu`: n} over all digests; `accounting` {`cpu_wait`: `ok` | `run_delay_unavailable`}; `thresholds` echoes the role cut-offs.
+- Report level: `node` {`num_cpu`, `cpu_used_cores`, `cpu_used_percent`} over W (from `/proc/stat`, same polls); `query_cpu_coverage_percent` = Σ digest CPU ÷ CPU of the traced mysqld processes × 100 — how much of mysqld's CPU the digests explain (the rest: connection handling outside `dispatch_command`, InnoDB background threads); omitted while any poll in the window lacked a mysqld baseline: for the first window after the agent starts, after a mysqld restart, and whenever a mysqld PID comes back after a quiet window (with several mysqld instances, one quiet-then-active instance omits it node-wide for one window). `victims` {`cpu`: n} over all digests (`{"cpu": 0}` when none; the key is absent when `accounting.cpu_wait` is unavailable); `accounting` {`cpu_wait`: `ok` | `run_delay_unavailable`}; `thresholds` echoes the role cut-offs.
 - `mysql_report.overload_cause` (built per `/api/diagnose` call by `internal/overload`, on a copy) — four checks, always all reported:
 
   | Check | Passes when |
   |---|---|
-  | `node_saturated` | node CPU used over W (`mysql_report.node`; the latest 5 s sample when unavailable, `missing: node_cpu_window`) ≥ `overload_node_cpu_percent` (85) **or** load1 ÷ NumCPU ≥ `overload_node_load` (1.5) |
+  | `node_saturated` | node CPU used over W (`mysql_report.node`; the latest collector sample when unavailable, `missing: node_cpu_window`) ≥ `overload_node_cpu_percent` (85) **or** load1 ÷ NumCPU ≥ `overload_node_load` (1.5) |
   | `mysqld_top_consumer` | the top digest's mysqld PID belongs to the #1 process family by CPU |
   | `dominant_digest` | the top digest by CPU has `cpu_role: culprit` |
   | `victims` | ≥ 1 digest with `victim_of: cpu` |
 
-  `verdict`: `query_cpu_overload` (checks 1–3; confidence high with victims, medium without, low without process families), `node_not_saturated`, `not_mysql`, `no_dominant_query`, `no_data`; `resource: "cpu"`; `digest` {`digest_id`, `digest_text`, `cpu_cores`, `percent_of_node_cpu_used`, `calls_per_sec`, `bytes_out_per_call`, `cpu_role`}; `evidence` and `thresholds` carry every number used. Disk attribution is not implemented yet.
+  `verdict`: `query_cpu_overload` (checks 1–3; confidence high with victims, medium without, low without process families), `node_not_saturated`, `not_mysql`, `no_dominant_query` (confidence low when a culprit is impossible by construction: no `mysql_report.node`, so no `percent_of_node_cpu_used`, or the node saturated by load while its window CPU used is below `cpu_culprit_min_node_cpu_used_percent` — then check `io_diagnosis`), `no_data`; `resource: "cpu"`; `digest` {`digest_id`, `digest_text`, `cpu_cores`, `percent_of_node_cpu_used`, `calls_per_sec`, `bytes_out_per_call`, `cpu_role`}; `evidence` and `thresholds` carry every number used. Disk attribution is not implemented yet.
 
 ```bash
 curl -s localhost:9200/api/diagnose | jq '.mysql_report.top_digests[] | {digest_text, cpu_role, victim_of, cpu_cores, percent_of_node_cpu_used, time_breakdown_percent}'
@@ -1742,10 +1742,11 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 ### Accuracy and limits
 
 - Per-call CPU is ± one scheduler tick (1–4 ms); per-digest **totals** are accurate, and so are `cpu_cores` and `percent_of_node_cpu_used`. A digest whose calls each use well under 1 ms of CPU has an unreliable `time_breakdown_percent.cpu`.
-- `cpu_cores` and `node.cpu_used_cores` divide by the full window, so they are understated during the agent's first window; percentages are not (numerator and denominator cover the same polls).
+- `cpu_cores` and `node.cpu_used_cores` divide by the full window, so they are understated during the agent's first window; percentages are not (numerator and denominator cover the same polls). They also divide by the configured `digest_window`, not by the span the window's 5 s buckets actually cover: with a `poll_interval` that does not divide 5 s, or a `digest_window` that is not a multiple of 5 s, they can be off by up to one poll's worth (percentages are unaffected).
 - `query_cpu_coverage_percent` compares in-kernel on-CPU time with `/proc` utime+stime (different tick granularity) and is not clamped: a value slightly above 100 means the digests explain all of mysqld's CPU.
 - Query text is captured up to 511 bytes (`truncated: true` beyond).
 - Digest windows are built from per-poll sums: a command is attributed to the poll that drained it (≤ `poll_interval`, 5 s, later than it ran).
+- A statement's whole CPU is charged to the poll in which it completes, while node and mysqld CPU accrue poll by poll. A statement longer than the window, or a failed drain whose entries arrive with the next poll, can therefore push `percent_of_node_cpu_used`, `cpu_cores` and `query_cpu_coverage_percent` above their nominal maxima (100 %, NumCPU, 100 %) for one window.
 - `latency_ms_max` is best effort: two CPUs updating the same statement at the same instant can lose one maximum (no compare-and-swap before kernel 5.12). Sums are exact.
 - A statement whose text never reached the agent (text event dropped, see `text_events_dropped_total`) is attributed for one poll to a placeholder and its text is requested again: `<text unavailable>` for COM_QUERY, `prepare: <text unavailable>` (its own digest) for COM_STMT_PREPARE, and for COM_STMT_EXECUTE the execute placeholder `<COM_STMT_EXECUTE: prepared before agent start, text unavailable>` — the same row as statements prepared before the agent attached.
 - Kernel/Go hash consistency is checked continuously: every first-sight text is re-hashed in Go (`sqlhash.KernelHash`, or `ExactHash` in the fallback below) and every 1/1024 verification resend and text resend is compared with the cached digest. Any disagreement marks that hash unsafe (its commands then arrive as exact full events) and counts in `hash_mismatch_total`.
