@@ -235,6 +235,12 @@ func TestRedoWaitMeasured(t *testing.T) {
 	if !l.RedoTracking() {
 		t.Skip("log_write_up_to probes not attached for this mysqld")
 	}
+	// Registered after startLoader's cleanups, so it runs before db is closed.
+	t.Cleanup(func() {
+		if _, err := db.Exec("DROP DATABASE IF EXISTS obs_t"); err != nil {
+			t.Logf("dropping obs_t: %v", err)
+		}
+	})
 	for _, q := range []string{"CREATE DATABASE IF NOT EXISTS obs_t", "CREATE TABLE IF NOT EXISTS obs_t.r (id INT) ENGINE=InnoDB"} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
