@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
+	"github.com/manhvu1997/linux-obs-agent/internal/sqldigest"
 )
 
 func metrics(cpu, load1 float64, ncpu int) model.NodeMetrics {
@@ -82,11 +84,79 @@ func TestWindowValueWinsOverLatestSample(t *testing.T) {
 }
 
 func TestNoWindowFallsBackToSample(t *testing.T) {
-	r := report("culprit", 27, 90, 1)
+	// Without mysql_report.node no digest can have percent_of_node_cpu_used or
+	// a cpu_role (querystats needs the node window for both).
+	r := report("", 27, 90, 1)
 	r.Node = nil
+	r.TopDigests[0].PercentOfNodeCPUUsed = nil
 	got := Assess(Inputs{Metrics: metrics(92, 1, 8), MySQL: r, Families: mysqlTop, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
 	if got.Evidence.NodeCPUSource != "sample" || !got.Checks[0].Passed || !contains(got.Missing, "node_cpu_window") {
 		t.Fatalf("source %s node check %v missing %v", got.Evidence.NodeCPUSource, got.Checks[0].Passed, got.Missing)
+	}
+	if got.Verdict != model.OverloadNoDominantQuery || got.Confidence != model.ConfidenceLow {
+		t.Fatalf("verdict %s/%s, want no_dominant_query/low; summary %s", got.Verdict, got.Confidence, got.Summary)
+	}
+	if !strings.Contains(got.Checks[0].Detail, "latest collector sample") {
+		t.Fatalf("node detail %q", got.Checks[0].Detail)
+	}
+}
+
+// Built from real querystats output: no AddHost, so no node block, no
+// percent_of_node_cpu_used and no cpu_role on any digest.
+func TestNoNodeBlockFromRealQuerystats(t *testing.T) {
+	a := querystats.New(querystats.Config{SlowWallNs: 10_000_000})
+	at := time.Unix(1_800_000_000, 0)
+	a.AddDeltas([]querystats.Delta{
+		{PID: 42, Command: "query", Digest: sqldigest.Normalize("SELECT * FROM t WHERE id = 1"), Calls: 1000, CPUNs: 400e9, WallNs: 420e9, WallMaxNs: 1e9},
+		{PID: 42, Command: "query", Digest: sqldigest.Normalize("SELECT * FROM u WHERE id = 1"), Calls: 10, CPUNs: 1e9, WallNs: 2e9, WallMaxNs: 300e6},
+	}, at)
+	snap := a.Snapshot(at.Add(time.Second))
+	if snap.Node != nil || snap.TopByCPU[0].PercentOfNodeCPUUsed != nil || snap.TopByCPU[0].CPURole != "" {
+		t.Fatalf("precondition: node %+v top %+v", snap.Node, snap.TopByCPU[0])
+	}
+	r := &model.MySQLAnalysis{WindowSeconds: snap.WindowSeconds, Node: snap.Node, QueryCPUCoveragePercent: snap.QueryCPUCoveragePercent,
+		Thresholds: &snap.Thresholds, TopDigests: snap.TopByCPU, TopDigestsByWait: snap.TopByWait,
+		Victims: snap.Victims, Accounting: snap.Accounting}
+	got := Assess(Inputs{Metrics: metrics(92, 1, 8), MySQL: r, Families: mysqlTop, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
+	if got.Verdict != model.OverloadNoDominantQuery || got.Confidence != model.ConfidenceLow {
+		t.Fatalf("verdict %s/%s, want no_dominant_query/low; summary %s", got.Verdict, got.Confidence, got.Summary)
+	}
+	for _, want := range []string{"Node is saturated (CPU used 92.0%", "unavailable", "mysql_report.node"} {
+		if !strings.Contains(got.Summary, want) {
+			t.Fatalf("summary %q lacks %q", got.Summary, want)
+		}
+	}
+}
+
+// load/cpu 2.0 saturates the node while it used only 30 % of its CPU over the
+// window: below the culprit floor (50 %), no digest can be a CPU culprit.
+func TestLoadOnlySaturationBelowCulpritFloor(t *testing.T) {
+	got := Assess(Inputs{Metrics: metrics(20, 16, 8), MySQL: report("", 60, 30, 0), Families: mysqlTop, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
+	if !got.Checks[0].Passed {
+		t.Fatalf("node check must pass on load: %s", got.Checks[0].Detail)
+	}
+	if got.Verdict != model.OverloadNoDominantQuery || got.Confidence != model.ConfidenceLow {
+		t.Fatalf("verdict %s/%s, want no_dominant_query/low; summary %s", got.Verdict, got.Confidence, got.Summary)
+	}
+	for _, want := range []string{"saturated by load (load/cpu 2.00)", "not CPU (CPU used 30.0%", "io_diagnosis"} {
+		if !strings.Contains(got.Summary, want) {
+			t.Fatalf("summary %q lacks %q", got.Summary, want)
+		}
+	}
+	if strings.Contains(got.Summary, "Node CPU is saturated") {
+		t.Fatalf("summary %q claims CPU saturation", got.Summary)
+	}
+}
+
+func TestSaturatedSummaryWording(t *testing.T) {
+	for _, c := range []struct {
+		r    *model.MySQLAnalysis
+		fams []model.FamilyStats
+	}{{report("", 9, 90, 1), mysqlTop}, {report("culprit", 27, 90, 1), nginxTop}} {
+		got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: c.r, Families: c.fams, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
+		if !strings.Contains(got.Summary, "Node is saturated (CPU used 90.0%, load/cpu 0.12)") {
+			t.Fatalf("%s summary %q", got.Verdict, got.Summary)
+		}
 	}
 }
 

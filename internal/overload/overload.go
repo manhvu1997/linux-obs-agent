@@ -147,15 +147,36 @@ func Assess(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 			ev.NodeCPUUsedPercent, ev.LoadNormalised, pct)
 	case mysqldKnown && !mysqldOK:
 		r.Verdict, r.Confidence = model.OverloadNotMySQL, model.ConfidenceHigh
-		r.Summary = fmt.Sprintf("Node CPU is saturated but the top CPU family is %s (%.1f%%), not mysqld's %s (%.1f%%). Look at process_report.top_families_cpu.",
-			ev.TopFamily, ev.TopFamilyCPUPercent, ev.MySQLFamily, ev.MySQLFamilyCPUPercent)
+		r.Summary = fmt.Sprintf("%s but the top CPU family is %s (%.1f%%), not mysqld's %s (%.1f%%). Look at process_report.top_families_cpu.",
+			saturatedText(ev), ev.TopFamily, ev.TopFamilyCPUPercent, ev.MySQLFamily, ev.MySQLFamilyCPUPercent)
 	case !digestOK:
-		r.Verdict, r.Confidence = model.OverloadNoDominantQuery, model.ConfidenceHigh
-		if !mysqldKnown {
+		r.Verdict = model.OverloadNoDominantQuery
+		// A culprit needs percent_of_node_cpu_used (so a node window) and the
+		// node at least cpu_culprit_min_node_cpu_used_percent busy: when either
+		// is missing "no dominant query" is true by construction, not evidence.
+		minUsed := r.Thresholds.CPUCulpritMinNodeCPUUsedPercent
+		switch {
+		case d.PercentOfNodeCPUUsed == nil:
 			r.Confidence = model.ConfidenceLow
+			r.Summary = fmt.Sprintf("%s but the digests' share of node CPU is unavailable (mysql_report.node missing for a poll in the window), so no digest can be judged a CPU culprit%s.",
+				saturatedText(ev), coverageClause(ev.QueryCPUCoveragePercent))
+		case ev.NodeCPUUsedPercent < minUsed:
+			r.Confidence = model.ConfidenceLow
+			if ev.LoadNormalised >= th.NodeLoad {
+				r.Summary = fmt.Sprintf("Node is saturated by load (load/cpu %.2f), not CPU (CPU used %.1f%%, below the %.0f%% a CPU culprit needs), so no query can be a CPU culprit. Check io_diagnosis for an I/O or D-state stall.",
+					ev.LoadNormalised, ev.NodeCPUUsedPercent, minUsed)
+			} else {
+				r.Summary = fmt.Sprintf("%s but CPU used is below the %.0f%% a CPU culprit needs, so no query can be a CPU culprit.",
+					saturatedText(ev), minUsed)
+			}
+		default:
+			r.Confidence = model.ConfidenceHigh
+			if !mysqldKnown {
+				r.Confidence = model.ConfidenceLow
+			}
+			r.Summary = fmt.Sprintf("%s but no single digest dominates it: the top digest did %s of the CPU work. The load is spread over many queries or is outside query execution%s.",
+				saturatedText(ev), pct, coverageClause(ev.QueryCPUCoveragePercent))
 		}
-		r.Summary = fmt.Sprintf("Node CPU is saturated but no single digest dominates it: the top digest did %s of the CPU work. The load is spread over many queries or is outside query execution%s.",
-			pct, coverageClause(ev.QueryCPUCoveragePercent))
 	default:
 		r.Verdict = model.OverloadQueryCPU
 		switch {
@@ -176,7 +197,11 @@ func nodeSourceText(ev *model.OverloadEvidence, window int) string {
 	if ev.NodeCPUSource == "window" {
 		return fmt.Sprintf("over the last %ds, %.1f of %d cores", window, *ev.NodeCPUUsedCores, ev.NumCPU)
 	}
-	return "latest 5 s sample; window value unavailable"
+	return "latest collector sample; window value unavailable"
+}
+
+func saturatedText(ev *model.OverloadEvidence) string {
+	return fmt.Sprintf("Node is saturated (CPU used %.1f%%, load/cpu %.2f)", ev.NodeCPUUsedPercent, ev.LoadNormalised)
 }
 
 func usedCoresText(ev *model.OverloadEvidence) string {
