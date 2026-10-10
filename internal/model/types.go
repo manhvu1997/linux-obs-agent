@@ -997,12 +997,17 @@ type MySQLAnalysis struct {
 	// of that call; never set on the analyzer's cached snapshot.
 	OverloadCause *QueryOverload `json:"overload_cause,omitempty"`
 
-	// TopDigestsByWait ranks the digests with measured run-queue wait by
-	// total wait (absent when the kernel lacks scheduler stats).
+	// TopDigestsByWait ranks the digests by total measured wait (run queue,
+	// block I/O and commit wait, each only when available); digests with no
+	// measured wait are not listed.
 	TopDigestsByWait []QueryDigestStats `json:"top_digests_by_wait,omitempty"`
-	// Victims counts digests per victim_of kind (e.g. "cpu") over ALL digests
-	// in the window, not only those listed in top_digests. "cpu" is present
-	// (0 included) when accounting.cpu_wait is "ok", absent when unavailable.
+	// TopDigestsByDiskRead ranks the digests by physical-disk bytes read over
+	// the window (absent when accounting.disk_bytes is not "ok").
+	TopDigestsByDiskRead []QueryDigestStats `json:"top_digests_by_disk_read,omitempty"`
+	// Victims counts digests per victim_of kind ("cpu", "disk", "commit") over
+	// ALL digests in the window, not only those listed in top_digests. A kind
+	// is present (0 included) when its accounting entry (cpu_wait, disk_wait,
+	// commit_wait) is "ok", absent when unavailable.
 	Victims map[string]int `json:"victims,omitempty"`
 	// Accounting reports which per-statement signals every poll in the window
 	// measured ("unknown" for the last three before the first host sample):
@@ -1073,34 +1078,64 @@ type QueryDigestStats struct {
 	LatencyMsMax         float64        `json:"latency_ms_max"`
 	TimeBreakdown        *TimeBreakdown `json:"time_breakdown_percent,omitempty"`
 	BytesOutPerCall      float64        `json:"bytes_out_per_call"`
+	// DiskReadMBPerSec = physical-disk bytes read ÷ window ÷ 2²⁰. The four
+	// disk fields are absent unless accounting.disk_bytes is "ok".
+	DiskReadMBPerSec *float64 `json:"disk_read_mb_per_sec,omitempty"`
+	// PercentOfDiskRead = disk bytes read ÷ node physical-disk bytes read × 100:
+	// share of the node's physical-disk reads over the same polls: **disk
+	// culprit**. Absent without complete node disk samples.
+	PercentOfDiskRead *float64 `json:"percent_of_disk_read,omitempty"`
+	// DiskReadPagesPerCall: 16 KiB pages read per call: 1–4 = buffer-pool
+	// misses (grow innodb_buffer_pool_size), hundreds+ = a scan (EXPLAIN,
+	// index, LIMIT).
+	DiskReadPagesPerCall *float64 `json:"disk_read_pages_per_call,omitempty"`
+	// DiskWriteMBPerSec = bytes written (dirtied) ÷ window ÷ 2²⁰; non-zero on
+	// a SELECT = spills to disk.
+	DiskWriteMBPerSec *float64 `json:"disk_write_mb_per_sec,omitempty"`
 	// CPURole "culprit": ≥ cpu_culprit_percent_of_node_cpu_used of the node's
 	// CPU work while the node used ≥ cpu_culprit_min_node_cpu_used_percent.
 	CPURole string `json:"cpu_role,omitempty"`
-	// VictimOf "cpu": waited for a CPU ≥ victim_wait_percent of its time and
-	// is slow (latency_ms_avg ≥ the slow-query threshold).
+	// IORole "culprit": ≥ io_culprit_percent_of_disk_read of the node's disk
+	// reads while the node reads ≥ io_culprit_min_node_disk_read_mb_per_sec.
+	IORole string `json:"io_role,omitempty"`
+	// VictimOf "cpu" | "disk" | "commit": the available waits (cpu_wait +
+	// disk_wait + commit_wait) are ≥ victim_wait_percent of its time and it
+	// is slow (latency_ms_avg ≥ the slow-query threshold); the value is the
+	// largest of those waits.
 	VictimOf string `json:"victim_of,omitempty"`
 	// Raw window sums for rankings and the sticky export; not serialised.
-	CPUNs    uint64 `json:"-"`
-	RunqNs   uint64 `json:"-"`
-	WallNs   uint64 `json:"-"`
-	BytesOut uint64 `json:"-"`
+	CPUNs          uint64 `json:"-"`
+	RunqNs         uint64 `json:"-"`
+	WallNs         uint64 `json:"-"`
+	BytesOut       uint64 `json:"-"`
+	DiskReadBytes  uint64 `json:"-"`
+	DiskWriteBytes uint64 `json:"-"`
+	IOWaitNs       uint64 `json:"-"`
+	RedoWaitNs     uint64 `json:"-"`
 }
 
 // TimeBreakdown splits a digest's wall time in percent (sums to 100):
-// on-CPU, waiting for a CPU (run queue) and everything else. CPUWait is
-// absent when the kernel does not report run-queue time.
+// on-CPU, waiting for a CPU (run queue), block-I/O wait, commit wait and
+// everything else. A wait is absent when the kernel or mysqld does not
+// provide it (see accounting); its time is then part of Other.
 type TimeBreakdown struct {
 	CPU     float64  `json:"cpu"`
 	CPUWait *float64 `json:"cpu_wait,omitempty"`
-	Other   float64  `json:"other"`
+	// DiskWait: block-I/O wait (needs delay accounting).
+	DiskWait *float64 `json:"disk_wait,omitempty"`
+	// CommitWait: redo-log wait inside log_write_up_to.
+	CommitWait *float64 `json:"commit_wait,omitempty"`
+	Other      float64  `json:"other"`
 }
 
 // QueryRoleThresholds echoes the culprit/victim cut-offs into the report.
 type QueryRoleThresholds struct {
-	CPUCulpritPercentOfNodeCPUUsed  float64 `json:"cpu_culprit_percent_of_node_cpu_used"`
-	CPUCulpritMinNodeCPUUsedPercent float64 `json:"cpu_culprit_min_node_cpu_used_percent"`
-	VictimWaitPercent               float64 `json:"victim_wait_percent"`
-	VictimMinLatencyMs              float64 `json:"victim_min_latency_ms"`
+	CPUCulpritPercentOfNodeCPUUsed   float64 `json:"cpu_culprit_percent_of_node_cpu_used"`
+	CPUCulpritMinNodeCPUUsedPercent  float64 `json:"cpu_culprit_min_node_cpu_used_percent"`
+	VictimWaitPercent                float64 `json:"victim_wait_percent"`
+	VictimMinLatencyMs               float64 `json:"victim_min_latency_ms"`
+	IOCulpritPercentOfDiskRead       float64 `json:"io_culprit_percent_of_disk_read"`
+	IOCulpritMinNodeDiskReadMBPerSec float64 `json:"io_culprit_min_node_disk_read_mb_per_sec"`
 }
 
 // MySQLNodeWindow is the node's CPU over the digest window, built from the

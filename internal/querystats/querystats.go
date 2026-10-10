@@ -63,8 +63,14 @@ type Config struct {
 	StickyTTL                    time.Duration // 1h
 	CPUCulpritPercentOfNodeUsed  float64       // 20: cpu_role culprit needs ≥ this % of the node's CPU used
 	CPUCulpritMinNodeUsedPercent float64       // 50: … and the node ≥ this % busy over the window
-	VictimWaitPercent            float64       // 50: victim_of needs waits ≥ this % of its time (time_breakdown_percent.cpu_wait)
+	VictimWaitPercent            float64       // 50: victim_of needs Σ available waits ≥ this % of its time
 	TopNWait                     int           // 10
+	// IOCulpritPercentOfDiskRead: io_role culprit needs ≥ this % of the
+	// node's physical-disk reads (20) …
+	IOCulpritPercentOfDiskRead float64
+	// … while the node reads ≥ this many MB/s over the window (5).
+	IOCulpritMinNodeDiskReadMBPerSec float64
+	TopNDiskRead                     int // 10
 }
 
 func (c Config) withDefaults() Config {
@@ -101,6 +107,15 @@ func (c Config) withDefaults() Config {
 	if c.TopNWait <= 0 {
 		c.TopNWait = 10
 	}
+	if c.IOCulpritPercentOfDiskRead <= 0 {
+		c.IOCulpritPercentOfDiskRead = 20
+	}
+	if c.IOCulpritMinNodeDiskReadMBPerSec <= 0 {
+		c.IOCulpritMinNodeDiskReadMBPerSec = 5
+	}
+	if c.TopNDiskRead <= 0 {
+		c.TopNDiskRead = 10
+	}
 	return c
 }
 
@@ -136,10 +151,16 @@ type Snapshot struct {
 	// reads × 100; nil when a poll in the window had no node disk delta or
 	// no per-statement disk bytes, or the node read nothing.
 	QueryDiskReadCoveragePercent *float64
-	TopByWait                    []model.QueryDigestStats
+	// TopByWait ranks by total available wait (run queue, block I/O,
+	// commit); digests with none are not listed.
+	TopByWait []model.QueryDigestStats
+	// TopByDiskRead ranks by disk bytes read; empty unless per-statement
+	// disk bytes were measured in every poll of the window.
+	TopByDiskRead []model.QueryDigestStats
 	// Victims counts digests per victim_of kind over ALL digests in the
 	// window: victims burn little CPU, so most never reach TopByCPU.
-	// VictimCPU is present (0 included) when run-queue accounting is ok.
+	// VictimCPU / VictimDisk / VictimCommit are present (0 included) when
+	// the matching wait is available.
 	Victims map[string]int
 	// Accounting: AccountingKeyCPUWait → AccountingOK | AccountingNoRunDelay;
 	// AccountingKeyDiskBytes / DiskWait / CommitWait → AccountingOK, the
@@ -377,22 +398,42 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		nd = &nodeDenom{usedNs: used, usedPercent: node.CPUUsedPercent}
 	}
 
+	av := avail{
+		runq:      acct == AccountingOK,
+		diskBytes: hw.accounting(hw.queryDiskBad, hw.queryDiskReason) == AccountingOK,
+		ioWait:    hw.accounting(hw.ioWaitBad, hw.ioWaitReason) == AccountingOK,
+		redo:      hw.accounting(hw.redoBad, hw.redoWaitReason) == AccountingOK,
+	}
+	var dd *diskDenom
+	if rd, _, ok := hw.nodeDisk(); ok && av.diskBytes {
+		dd = &diskDenom{readBytes: rd, readMBPerSec: mbPerSec(rd, a.cfg.Window)}
+	}
+
 	stats := make([]model.QueryDigestStats, 0, len(merged))
-	victims := make(map[string]int)
-	if acct == AccountingOK {
-		// A real zero: cpu waits are measured, so "no cpu victims" is known
-		// (and survives omitempty). Unavailable accounting leaves the key out.
-		victims[VictimCPU] = 0
+	victims := map[string]int{}
+	for _, v := range []struct {
+		ok   bool
+		kind string
+	}{{av.runq, VictimCPU}, {av.ioWait, VictimDisk}, {av.redo, VictimCommit}} {
+		if v.ok {
+			victims[v.kind] = 0 // a measured zero survives omitempty; unavailable kinds stay absent
+		}
 	}
 	for k, x := range merged {
 		s := toStats(k, x)
-		a.addNewStats(&s, k, x, acct, nd)
+		a.addNewStats(&s, k, x, av, nd, dd)
 		if s.VictimOf != "" {
 			victims[s.VictimOf]++
 		}
 		stats = append(stats, s)
 	}
-	byWait := topBy(waiting(stats), a.cfg.TopNWait, func(s model.QueryDigestStats) float64 { return float64(s.RunqNs) })
+	waitOf := func(s model.QueryDigestStats) float64 { return float64(waitNs(s, av)) }
+	byWait := topBy(nonZero(stats, waitOf), a.cfg.TopNWait, waitOf)
+	var byDisk []model.QueryDigestStats
+	if av.diskBytes {
+		readOf := func(s model.QueryDigestStats) float64 { return float64(s.DiskReadBytes) }
+		byDisk = topBy(nonZero(stats, readOf), a.cfg.TopNDiskRead, readOf)
+	}
 	byCPU := topBy(stats, a.cfg.TopN, func(s model.QueryDigestStats) float64 { return float64(s.CPUNs) })
 	bytesOut := func(s model.QueryDigestStats) float64 { return float64(s.BytesOut) }
 	byOut := topBy(stats, a.cfg.TopNBytes, bytesOut)
@@ -429,8 +470,8 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		coverage = &v
 	}
 	var diskCoverage *float64
-	if rd, _, ok := hw.nodeDisk(); ok && rd > 0 && hw.accounting(hw.queryDiskBad, hw.queryDiskReason) == AccountingOK {
-		v := 100 * float64(diskAll) / float64(rd)
+	if dd != nil && dd.readBytes > 0 {
+		v := 100 * float64(diskAll) / float64(dd.readBytes)
 		diskCoverage = &v
 	}
 
@@ -438,10 +479,12 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		WindowSeconds:   int(a.cfg.Window / time.Second),
 		QueryCPUMsTotal: float64(cpuAll) / 1e6,
 		Thresholds: model.QueryRoleThresholds{
-			CPUCulpritPercentOfNodeCPUUsed:  a.cfg.CPUCulpritPercentOfNodeUsed,
-			CPUCulpritMinNodeCPUUsedPercent: a.cfg.CPUCulpritMinNodeUsedPercent,
-			VictimWaitPercent:               a.cfg.VictimWaitPercent,
-			VictimMinLatencyMs:              float64(a.cfg.SlowWallNs) / 1e6,
+			CPUCulpritPercentOfNodeCPUUsed:   a.cfg.CPUCulpritPercentOfNodeUsed,
+			CPUCulpritMinNodeCPUUsedPercent:  a.cfg.CPUCulpritMinNodeUsedPercent,
+			VictimWaitPercent:                a.cfg.VictimWaitPercent,
+			VictimMinLatencyMs:               float64(a.cfg.SlowWallNs) / 1e6,
+			IOCulpritPercentOfDiskRead:       a.cfg.IOCulpritPercentOfDiskRead,
+			IOCulpritMinNodeDiskReadMBPerSec: a.cfg.IOCulpritMinNodeDiskReadMBPerSec,
 		},
 		TopByCPU:                byCPU,
 		TopByBytesOut:           byOut,
@@ -450,6 +493,7 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		Node:                    node,
 		QueryCPUCoveragePercent: coverage,
 		TopByWait:               byWait,
+		TopByDiskRead:           byDisk,
 		Victims:                 victims,
 		Accounting: map[string]string{
 			AccountingKeyCPUWait:    acct,

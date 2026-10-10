@@ -57,6 +57,7 @@ func StripSensitive(r model.DiagnoseReport, include bool) model.DiagnoseReport {
 	cp.TopDigests = withoutSamples(cp.TopDigests)
 	cp.TopDigestsByBytesOut = withoutSamples(cp.TopDigestsByBytesOut)
 	cp.TopDigestsByWait = withoutSamples(cp.TopDigestsByWait)
+	cp.TopDigestsByDiskRead = withoutSamples(cp.TopDigestsByDiskRead)
 	if len(cp.RecentSlowQueries) > 0 {
 		slow := make([]model.MySQLSlowEvent, len(cp.RecentSlowQueries))
 		copy(slow, cp.RecentSlowQueries)

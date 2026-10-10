@@ -117,6 +117,7 @@ func mysqlReport() *model.MySQLAnalysis {
 		TopDigests:           []model.QueryDigestStats{{DigestID: "a", SampleQuery: "select * from u where pw='secret'"}},
 		TopDigestsByBytesOut: []model.QueryDigestStats{{DigestID: "a", SampleQuery: "select * from u where pw='secret'"}},
 		TopDigestsByWait:     []model.QueryDigestStats{{DigestID: "w", SampleQuery: "SELECT 'secret'"}},
+		TopDigestsByDiskRead: []model.QueryDigestStats{{DigestID: "d", SampleQuery: "SELECT * FROM big WHERE pw='secret'"}},
 		RecentSlowQueries:    []model.MySQLSlowEvent{{Query: "select * from u where pw='secret'"}},
 	}
 }
@@ -137,6 +138,9 @@ func TestStripSensitiveDoesNotMutateSource(t *testing.T) {
 	}
 	if out.MySQLReport.TopDigestsByWait[0].SampleQuery != "" || shared.TopDigestsByWait[0].SampleQuery == "" {
 		t.Fatalf("top_digests_by_wait sample: out %q, source %q", out.MySQLReport.TopDigestsByWait[0].SampleQuery, shared.TopDigestsByWait[0].SampleQuery)
+	}
+	if out.MySQLReport.TopDigestsByDiskRead[0].SampleQuery != "" || shared.TopDigestsByDiskRead[0].SampleQuery == "" {
+		t.Fatalf("top_digests_by_disk_read sample: out %q, source %q", out.MySQLReport.TopDigestsByDiskRead[0].SampleQuery, shared.TopDigestsByDiskRead[0].SampleQuery)
 	}
 }
 

@@ -27,6 +27,10 @@ func TestPerDigestFormulas(t *testing.T) {
 	if tb == nil || !near(tb.CPU, 50) || tb.CPUWait == nil || !near(*tb.CPUWait, 25) || !near(tb.Other, 25) {
 		t.Fatalf("breakdown = %+v", tb)
 	}
+	// busyHost reports no reason: disk and commit waits are measured (zero).
+	if tb.DiskWait == nil || *tb.DiskWait != 0 || tb.CommitWait == nil || *tb.CommitWait != 0 {
+		t.Fatalf("disk_wait / commit_wait = %v / %v, want measured zeros", tb.DiskWait, tb.CommitWait)
+	}
 	if d.CPUNs != 12e9 || d.RunqNs != 6e9 || d.WallNs != 24e9 || d.BytesOut != 120_000 {
 		t.Fatalf("raw sums = %+v", d)
 	}
@@ -177,5 +181,125 @@ func TestVictimsKeyAbsentWhenNoRunDelay(t *testing.T) {
 	s := a.Snapshot(t0.Add(time.Second))
 	if _, ok := s.Victims[VictimCPU]; ok {
 		t.Fatalf("victims = %v, want no cpu key when run-queue accounting is unavailable", s.Victims)
+	}
+}
+
+// availHost: every per-statement signal available, node disk read readBytes.
+func availHost(cpuUsedNs, readBytes uint64) HostDelta {
+	h := busyHost(cpuUsedNs)
+	h.DiskOK, h.DiskReadBytes = true, readBytes
+	return h
+}
+
+func diskDelta(sql string, calls, readBytes uint64) Delta {
+	d := digestDelta(1, sql, calls, 1e6)
+	d.DiskReadBytes = readBytes
+	return d
+}
+
+func TestPerDigestDiskFormulas(t *testing.T) {
+	a := New(cfg())
+	d := diskDelta("SELECT * FROM big", 120, 600<<20) // 600 MiB in 120 calls
+	d.DiskWriteBytes = 60 << 20
+	a.AddDeltas([]Delta{d}, t0)
+	a.AddHost(availHost(36e9, 1200<<20), t0)
+	s := a.Snapshot(t0)
+	x := s.TopByCPU[0]
+	if x.DiskReadMBPerSec == nil || !near(*x.DiskReadMBPerSec, 10) || !near(*x.DiskWriteMBPerSec, 1) {
+		t.Fatalf("MB/s = %v / %v", x.DiskReadMBPerSec, x.DiskWriteMBPerSec)
+	}
+	if x.PercentOfDiskRead == nil || !near(*x.PercentOfDiskRead, 50) {
+		t.Fatalf("percent_of_disk_read = %v", x.PercentOfDiskRead)
+	}
+	if x.DiskReadPagesPerCall == nil || !near(*x.DiskReadPagesPerCall, 320) { // 600 MiB / 120 / 16 KiB
+		t.Fatalf("pages/call = %v", x.DiskReadPagesPerCall)
+	}
+	if x.IORole != RoleCulprit { // 50 % of a 20 MB/s disk
+		t.Fatalf("io_role = %q", x.IORole)
+	}
+	if len(s.TopByDiskRead) != 1 || s.TopByDiskRead[0].DigestText != x.DigestText {
+		t.Fatalf("top_by_disk_read = %+v", s.TopByDiskRead)
+	}
+}
+
+func TestIOCulpritNeedsBusyDisk(t *testing.T) {
+	a := New(cfg())
+	a.AddDeltas([]Delta{diskDelta("SELECT * FROM big", 10, 200<<20)}, t0)
+	a.AddHost(availHost(36e9, 240<<20), t0) // node reads 4 MB/s < 5 MB/s floor
+	if r := a.Snapshot(t0).TopByCPU[0].IORole; r != "" {
+		t.Fatalf("io_role = %q on a quiet disk", r)
+	}
+}
+
+func TestTimeBreakdownFourParts(t *testing.T) {
+	a := New(cfg())
+	d := digestDelta(1, "UPDATE t SET a = 1", 10, 0)
+	d.CPUNs, d.RunqNs, d.IOWaitNs, d.RedoWaitNs, d.WallNs, d.WallMaxNs = 20e6, 10e6, 30e6, 25e6, 100e6, 15e6
+	a.AddDeltas([]Delta{d}, t0)
+	a.AddHost(availHost(36e9, 1), t0)
+	tb := a.Snapshot(t0).TopByCPU[0].TimeBreakdown
+	if tb == nil || tb.CPUWait == nil || tb.DiskWait == nil || tb.CommitWait == nil {
+		t.Fatalf("breakdown = %+v", tb)
+	}
+	if !near(tb.CPU, 20) || !near(*tb.CPUWait, 10) || !near(*tb.DiskWait, 30) || !near(*tb.CommitWait, 25) || !near(tb.Other, 15) {
+		t.Fatalf("breakdown = %+v", tb)
+	}
+	if !near(tb.CPU+*tb.CPUWait+*tb.DiskWait+*tb.CommitWait+tb.Other, 100) {
+		t.Fatal("parts do not sum to 100")
+	}
+}
+
+func TestVictimOfLargestWait(t *testing.T) {
+	a := New(cfg()) // slow threshold 10 ms
+	commit := digestDelta(1, "INSERT INTO t VALUES (1)", 10, 0)
+	commit.CPUNs, commit.RunqNs, commit.IOWaitNs, commit.RedoWaitNs, commit.WallNs, commit.WallMaxNs = 50e6, 50e6, 100e6, 300e6, 600e6, 80e6
+	disk := digestDelta(1, "SELECT * FROM cold", 10, 0)
+	disk.CPUNs, disk.IOWaitNs, disk.WallNs, disk.WallMaxNs = 100e6, 400e6, 600e6, 80e6
+	a.AddDeltas([]Delta{commit, disk}, t0)
+	a.AddHost(availHost(36e9, 1), t0)
+	s := a.Snapshot(t0)
+	got := map[string]string{}
+	for _, d := range s.TopByCPU {
+		got[d.DigestText] = d.VictimOf
+	}
+	if got["insert into t values ( ?+ )"] != VictimCommit || got["select * from cold"] != VictimDisk {
+		t.Fatalf("victim_of = %v", got)
+	}
+	if s.Victims[VictimCommit] != 1 || s.Victims[VictimDisk] != 1 || s.Victims[VictimCPU] != 0 {
+		t.Fatalf("victims = %v", s.Victims)
+	}
+	if len(s.TopByWait) != 2 || s.TopByWait[0].DigestText != "insert into t values ( ?+ )" { // 450 ms > 400 ms of waits
+		t.Fatalf("top_by_wait = %+v", s.TopByWait)
+	}
+}
+
+func TestNoDiskWaitNoDiskVictim(t *testing.T) {
+	a := New(cfg())
+	d := digestDelta(1, "SELECT * FROM cold", 10, 0)
+	d.CPUNs, d.IOWaitNs, d.WallNs, d.WallMaxNs = 100e6, 400e6, 600e6, 80e6
+	a.AddDeltas([]Delta{d}, t0)
+	h := availHost(36e9, 1)
+	h.IOWaitReason = "delayacct_disabled"
+	a.AddHost(h, t0)
+	s := a.Snapshot(t0)
+	x := s.TopByCPU[0]
+	if x.TimeBreakdown.DiskWait != nil || x.VictimOf == VictimDisk {
+		t.Fatalf("breakdown %+v victim %q with delay accounting off", x.TimeBreakdown, x.VictimOf)
+	}
+	if _, ok := s.Victims[VictimDisk]; ok {
+		t.Fatalf("victims = %v: no disk key when disk_wait is unavailable", s.Victims)
+	}
+}
+
+func TestDiskFieldsOmittedWithoutIOAccounting(t *testing.T) {
+	a := New(cfg())
+	a.AddDeltas([]Delta{diskDelta("SELECT * FROM big", 10, 100<<20)}, t0)
+	h := availHost(36e9, 200<<20)
+	h.QueryDiskReason = "io_accounting_unavailable"
+	a.AddHost(h, t0)
+	s := a.Snapshot(t0)
+	x := s.TopByCPU[0]
+	if x.DiskReadMBPerSec != nil || x.PercentOfDiskRead != nil || x.DiskReadPagesPerCall != nil || x.IORole != "" || len(s.TopByDiskRead) != 0 {
+		t.Fatalf("disk fields must be omitted: %+v, by_disk_read %d", x, len(s.TopByDiskRead))
 	}
 }

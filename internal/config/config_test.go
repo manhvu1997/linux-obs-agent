@@ -144,3 +144,32 @@ func TestMySQLRoleThresholds(t *testing.T) {
 		}
 	}
 }
+
+func TestMySQLIOCulpritThresholds(t *testing.T) {
+	m := Defaults().MySQL
+	if m.IOCulpritPercentOfDiskRead != 20 || m.IOCulpritMinNodeDiskReadMBPerSec != 5 {
+		t.Fatalf("defaults = %v / %v", m.IOCulpritPercentOfDiskRead, m.IOCulpritMinNodeDiskReadMBPerSec)
+	}
+	for _, bad := range []float64{0, -1, 101} {
+		c := Defaults()
+		c.MySQL.Enabled = true
+		c.MySQL.IOCulpritPercentOfDiskRead = bad
+		if err := c.validate(); err == nil {
+			t.Fatalf("io_culprit_percent_of_disk_read %v accepted", bad)
+		}
+	}
+	for _, bad := range []float64{0, -1} {
+		c := Defaults()
+		c.MySQL.Enabled = true
+		c.MySQL.IOCulpritMinNodeDiskReadMBPerSec = bad
+		if err := c.validate(); err == nil {
+			t.Fatalf("io_culprit_min_node_disk_read_mb_per_sec %v accepted", bad)
+		}
+	}
+	c := Defaults()
+	c.MySQL.Enabled = true
+	c.MySQL.IOCulpritMinNodeDiskReadMBPerSec = 500 // no upper bound on MB/s
+	if err := c.validate(); err != nil {
+		t.Fatalf("io_culprit_min_node_disk_read_mb_per_sec 500 rejected: %v", err)
+	}
+}

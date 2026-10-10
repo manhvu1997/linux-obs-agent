@@ -375,9 +375,14 @@ mysql:
   # cpu_culprit_min_node_cpu_used_percent % of its CPU (an idle server never has a culprit).
   cpu_culprit_percent_of_node_cpu_used: 20
   cpu_culprit_min_node_cpu_used_percent: 50
-  # victim_of: waiting for a CPU >= victim_wait_percent % of the digest's time
-  # (time_breakdown_percent.cpu_wait) and latency_ms_avg >= slow_query_threshold_ms.
+  # victim_of: the available waits (time_breakdown_percent cpu_wait + disk_wait +
+  # commit_wait) >= victim_wait_percent % of the digest's time and latency_ms_avg >=
+  # slow_query_threshold_ms; the value is the largest wait: cpu | disk | commit.
   victim_wait_percent: 50
+  # io_role "culprit": the digest read >= io_culprit_percent_of_disk_read % of the node's
+  # physical-disk bytes over digest_window, while the node read >= this many MB/s.
+  io_culprit_percent_of_disk_read: 20
+  io_culprit_min_node_disk_read_mb_per_sec: 5
   # mysql_report.overload_cause: verdict query_cpu_overload needs the node CPU-saturated
   # over digest_window (cpu used >= overload_node_cpu_percent OR load1/NumCPU >=
   # overload_node_load), mysqld's family the top CPU family, and the top digest's

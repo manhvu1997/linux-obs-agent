@@ -7,8 +7,13 @@ import (
 )
 
 const (
-	// VictimCPU is victim_of for a digest slowed mostly by waiting for a CPU.
-	VictimCPU = "cpu"
+	// VictimCPU / VictimDisk / VictimCommit: victim_of for a digest slowed
+	// mostly by waiting for a CPU, for block I/O, or for the redo log.
+	VictimCPU    = "cpu"
+	VictimDisk   = "disk"
+	VictimCommit = "commit"
+	// InnoDBPageBytes is the default InnoDB page size (disk_read_pages_per_call).
+	InnoDBPageBytes = 16384
 	// AccountingKeyCPUWait is the accounting entry for run-queue time.
 	AccountingKeyCPUWait = "cpu_wait"
 	// AccountingKeyDiskBytes / AccountingKeyDiskWait / AccountingKeyCommitWait
@@ -27,8 +32,17 @@ type nodeDenom struct {
 	usedPercent float64
 }
 
+// avail: which per-statement signals every poll in the window measured.
+type avail struct{ runq, diskBytes, ioWait, redo bool }
+
+// diskDenom is the node's physical-disk reads over the same polls.
+type diskDenom struct {
+	readBytes    uint64
+	readMBPerSec float64
+}
+
 // addNewStats fills the window statistics of one digest (spec §6.1–6.2).
-func (a *Aggregator) addNewStats(s *model.QueryDigestStats, k key, x *acc, acct string, nd *nodeDenom) {
+func (a *Aggregator) addNewStats(s *model.QueryDigestStats, k key, x *acc, av avail, nd *nodeDenom, dd *diskDenom) {
 	w := a.cfg.Window
 	calls := float64(x.calls)
 	s.CPUNs, s.RunqNs, s.WallNs, s.BytesOut = x.cpu, x.runq, x.wall, x.out
@@ -41,46 +55,109 @@ func (a *Aggregator) addNewStats(s *model.QueryDigestStats, k key, x *acc, acct 
 		p := 100 * float64(x.cpu) / float64(nd.usedNs)
 		s.PercentOfNodeCPUUsed = &p
 	}
-	s.TimeBreakdown = breakdown(x, acct == AccountingOK)
+	s.DiskReadBytes, s.DiskWriteBytes, s.IOWaitNs, s.RedoWaitNs = x.diskRead, x.diskWrite, x.ioWait, x.redoWait
+	if av.diskBytes {
+		r, wr := mbPerSec(x.diskRead, w), mbPerSec(x.diskWrite, w)
+		pages := float64(x.diskRead) / calls / InnoDBPageBytes
+		s.DiskReadMBPerSec, s.DiskWriteMBPerSec, s.DiskReadPagesPerCall = &r, &wr, &pages
+		if dd != nil && dd.readBytes > 0 {
+			p := 100 * float64(x.diskRead) / float64(dd.readBytes)
+			s.PercentOfDiskRead = &p
+		}
+	}
+	s.TimeBreakdown = breakdown(x, av)
 	if k.id == OtherDigestID {
 		return
 	}
 	if p := s.PercentOfNodeCPUUsed; p != nil && *p >= a.cfg.CPUCulpritPercentOfNodeUsed && nd.usedPercent >= a.cfg.CPUCulpritMinNodeUsedPercent {
 		s.CPURole = RoleCulprit
 	}
-	if tb := s.TimeBreakdown; tb != nil && tb.CPUWait != nil && *tb.CPUWait >= a.cfg.VictimWaitPercent &&
-		s.LatencyMsAvg >= float64(a.cfg.SlowWallNs)/1e6 {
-		s.VictimOf = VictimCPU
+	if p := s.PercentOfDiskRead; p != nil && *p >= a.cfg.IOCulpritPercentOfDiskRead && dd.readMBPerSec >= a.cfg.IOCulpritMinNodeDiskReadMBPerSec {
+		s.IORole = RoleCulprit
 	}
+	s.VictimOf = victimOf(s.TimeBreakdown, s.LatencyMsAvg >= float64(a.cfg.SlowWallNs)/1e6, a.cfg.VictimWaitPercent)
 }
 
-// breakdown splits wall time into on-CPU, waiting for a CPU and the rest, in
-// percent summing to 100. On short calls cpu + runq can exceed wall by a
-// scheduler tick; the parts are then divided by their own sum so none is
-// negative. Without run-queue accounting the wait is part of "other".
-func breakdown(x *acc, runqOK bool) *model.TimeBreakdown {
+// breakdown splits wall time into on-CPU, waiting for a CPU, block-I/O wait,
+// commit wait and the rest, in percent summing to 100. The four measured
+// parts are disjoint (the kernel subtracts CPU, run-queue and block-I/O time
+// from commit wait); on short calls they can still exceed wall by a tick, so
+// they are divided by max(wall, their sum). An unavailable part is absent and
+// its time stays in "other".
+func breakdown(x *acc, av avail) *model.TimeBreakdown {
 	if x.wall == 0 {
 		return nil
 	}
 	parts := float64(x.cpu)
-	if runqOK {
+	if av.runq {
 		parts += float64(x.runq)
 	}
+	if av.ioWait {
+		parts += float64(x.ioWait)
+	}
+	if av.redo {
+		parts += float64(x.redoWait)
+	}
 	den := math.Max(float64(x.wall), parts)
+	pct := func(v uint64) *float64 { p := 100 * float64(v) / den; return &p }
 	tb := &model.TimeBreakdown{CPU: 100 * float64(x.cpu) / den, Other: 100 * (den - parts) / den}
-	if runqOK {
-		v := 100 * float64(x.runq) / den
-		tb.CPUWait = &v
+	if av.runq {
+		tb.CPUWait = pct(x.runq)
+	}
+	if av.ioWait {
+		tb.DiskWait = pct(x.ioWait)
+	}
+	if av.redo {
+		tb.CommitWait = pct(x.redoWait)
 	}
 	return tb
 }
 
-// waiting keeps the digests with measured run-queue wait (none when the
-// kernel lacks scheduler stats).
-func waiting(in []model.QueryDigestStats) []model.QueryDigestStats {
+// victimOf: slow, and the available waits are at least minPct of its time;
+// the kind is the largest wait (ties: cpu, disk, commit).
+func victimOf(tb *model.TimeBreakdown, slow bool, minPct float64) string {
+	if tb == nil || !slow {
+		return ""
+	}
+	kind, top, sum := "", 0.0, 0.0
+	for _, w := range []struct {
+		v    *float64
+		kind string
+	}{{tb.CPUWait, VictimCPU}, {tb.DiskWait, VictimDisk}, {tb.CommitWait, VictimCommit}} {
+		if w.v == nil {
+			continue
+		}
+		sum += *w.v
+		if *w.v > top {
+			kind, top = w.kind, *w.v
+		}
+	}
+	if sum < minPct || kind == "" {
+		return ""
+	}
+	return kind
+}
+
+// waitNs is the digest's measured waiting time (run queue, block I/O, commit).
+func waitNs(s model.QueryDigestStats, av avail) uint64 {
+	var n uint64
+	if av.runq {
+		n += s.RunqNs
+	}
+	if av.ioWait {
+		n += s.IOWaitNs
+	}
+	if av.redo {
+		n += s.RedoWaitNs
+	}
+	return n
+}
+
+// nonZero keeps the digests whose metric is positive.
+func nonZero(in []model.QueryDigestStats, metric func(model.QueryDigestStats) float64) []model.QueryDigestStats {
 	out := make([]model.QueryDigestStats, 0, len(in))
 	for _, s := range in {
-		if s.TimeBreakdown != nil && s.TimeBreakdown.CPUWait != nil && s.RunqNs > 0 {
+		if metric(s) > 0 {
 			out = append(out, s)
 		}
 	}

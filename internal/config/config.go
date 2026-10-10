@@ -457,9 +457,15 @@ type MySQLConfig struct {
 	// … while the node used at least this % of its CPU capacity (so an idle
 	// server never shows a culprit).
 	CPUCulpritMinNodeCPUUsedPercent float64 `yaml:"cpu_culprit_min_node_cpu_used_percent"`
-	// VictimWaitPercent: victim_of needs waits ≥ this % of the digest's time
-	// (time_breakdown_percent.cpu_wait) and latency ≥ slow_query_threshold_ms.
+	// VictimWaitPercent: victim_of needs the available waits (cpu_wait +
+	// disk_wait + commit_wait) ≥ this % of the digest's time and latency ≥
+	// slow_query_threshold_ms.
 	VictimWaitPercent float64 `yaml:"victim_wait_percent"`
+	// IOCulpritPercentOfDiskRead: io_role "culprit" needs at least this % of
+	// the node's physical-disk reads over digest_window …
+	IOCulpritPercentOfDiskRead float64 `yaml:"io_culprit_percent_of_disk_read"`
+	// … while the node reads at least this many MB/s (a quiet disk never has a culprit).
+	IOCulpritMinNodeDiskReadMBPerSec float64 `yaml:"io_culprit_min_node_disk_read_mb_per_sec"`
 	// mysql_report.overload_cause: verdict query_cpu_overload needs the node
 	// CPU-saturated over digest_window (cpu used >= OverloadNodeCPUPercent OR
 	// load1/NumCPU >= OverloadNodeLoad), mysqld the top CPU family, and the
@@ -594,16 +600,18 @@ func Defaults() *Config {
 			PollInterval:          5 * time.Second,
 			MaxRecentQueries:      100,
 
-			EmitAllQueries:                  true,
-			SampleQueries:                   true,
-			FoldSystemSchemas:               true,
-			DigestWindow:                    60 * time.Second,
-			TopDigests:                      20,
-			StickyDigestsMax:                50,
-			StickyDigestTTL:                 time.Hour,
-			CPUCulpritPercentOfNodeCPUUsed:  20,
-			CPUCulpritMinNodeCPUUsedPercent: 50,
-			VictimWaitPercent:               50,
+			EmitAllQueries:                   true,
+			SampleQueries:                    true,
+			FoldSystemSchemas:                true,
+			DigestWindow:                     60 * time.Second,
+			TopDigests:                       20,
+			StickyDigestsMax:                 50,
+			StickyDigestTTL:                  time.Hour,
+			CPUCulpritPercentOfNodeCPUUsed:   20,
+			CPUCulpritMinNodeCPUUsedPercent:  50,
+			VictimWaitPercent:                50,
+			IOCulpritPercentOfDiskRead:       20,
+			IOCulpritMinNodeDiskReadMBPerSec: 5,
 
 			OverloadNodeCPUPercent: 85,
 			OverloadNodeLoad:       1.5,
@@ -805,6 +813,12 @@ func (c *Config) validate() error {
 			if v <= 0 || v > 100 {
 				return fmt.Errorf("mysql.cpu_culprit_percent_of_node_cpu_used, cpu_culprit_min_node_cpu_used_percent and victim_wait_percent must be in (0, 100]")
 			}
+		}
+		if v := c.MySQL.IOCulpritPercentOfDiskRead; v <= 0 || v > 100 {
+			return fmt.Errorf("mysql.io_culprit_percent_of_disk_read must be in (0, 100]")
+		}
+		if c.MySQL.IOCulpritMinNodeDiskReadMBPerSec <= 0 {
+			return fmt.Errorf("mysql.io_culprit_min_node_disk_read_mb_per_sec must be > 0")
 		}
 		if c.MySQL.OverloadNodeCPUPercent <= 0 || c.MySQL.OverloadNodeLoad <= 0 {
 			return fmt.Errorf("mysql.overload_node_cpu_percent and overload_node_load must be > 0")
