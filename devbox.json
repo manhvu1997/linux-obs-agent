@@ -1,9 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.1/.schema/devbox.schema.json",
-  "packages": [
-    "go@1.26.1",
-    "shellcheck@latest"
-  ],
+  "packages": {
+    "go":         "1.26.1",
+    "shellcheck": "latest",
+    "prometheus": {
+      "version": "latest",
+      "outputs": ["out", "cli"]
+    }
+  },
   "shell": {
     "init_hook": [
       "echo 'Welcome to devbox!' > /dev/null"

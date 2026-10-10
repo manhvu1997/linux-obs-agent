@@ -3,34 +3,75 @@
 # metrics. Thresholds are starting points: tune them against each fleet's
 # baseline. Every alert links to /api/diagnose for the full evidence.
 groups:
+  # MySQL attribution. Policy: page (critical) on symptoms users feel, ticket
+  # (warning/info) on causes. Every description is a numbered runbook; the
+  # obs-agent Overview dashboard draws each threshold on the panel named in it.
   - name: obs-agent-mysql
     rules:
-      - alert: MySQLQueryDigestCPUHog
-        expr: |
-          (
-            sum by (instance, digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total[5m]))
-              / on (instance) group_left
-            sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total[5m]))
-          ) > 0.30
-          and on (instance) obs_agent_cpu_usage_percent > 85
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "MySQL digest {{ $labels.digest_id }} dominates query CPU on {{ $labels.instance }}"
-          description: "One query pattern uses more than 30% of mysqld query CPU while the node is above 85% CPU. Look it up in mysql_report.top_digests or obs_agent_mysql_digest_info."
-          diagnose: "http://{{ $labels.instance }}/api/diagnose"
-
       - alert: MySQLQueriesStarvedForCPU
         expr: |
           sum by (instance) (rate(obs_agent_mysql_query_runq_wait_seconds_total[5m]))
-            / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total[5m])) > 0.30
+            / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total[5m])) > 0.3
+          and on (instance) avg_over_time(obs_agent_cpu_usage_percent[5m]) >= 85
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MySQL queries on {{ $labels.instance }} spend more than 30% of their time waiting for a CPU"
+          description: "1. Open obs-agent Overview → 'Where query time goes' (waiting for CPU above the 30% line). 2. Read mysql_report.overload_cause: verdict query_cpu_overload names the digest. 3. In 'MySQL — who uses the server', the digest with the largest '% of node CPU used' is the cause; slow queries whose breakdown is mostly 'waiting for CPU' are victims — do not tune them. 4. Fix the culprit (EXPLAIN, index, cache, rate-limit its caller) or add CPU; if overload_cause says not_mysql, another family is burning the CPU."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: MySQLQueriesStalledOnDisk
+        expr: |
+          (
+            (sum by (instance) (rate(obs_agent_mysql_query_io_wait_seconds_total[5m])) or 0 * sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total[5m])))
+            + (sum by (instance) (rate(obs_agent_mysql_query_redo_wait_seconds_total[5m])) or 0 * sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total[5m])))
+          ) / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total[5m])) > 0.3
+          and on (instance) obs_agent_pressure_io_full_avg10 > 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MySQL queries on {{ $labels.instance }} spend more than 30% of their time waiting for disk or commit"
+          description: "1. Open obs-agent Overview → 'Where query time goes' (disk + commit above the 30% line) and check io_diagnosis.verdict. 2. Read mysql_report.overload_cause (or its secondary): verdict query_disk_overload names the digest reading the disk. 3. disk_read_pages_per_call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Mostly commit wait = slow redo-log fsync: check MySQLCommitsStalledOnRedo, the log device and innodb_flush_log_at_trx_commit."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: MySQLDigestCPUHog
+        expr: |
+          sum by (instance, digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{digest_id!="other"}[5m]))
+            / on (instance) group_left () (avg_over_time(obs_agent_cpu_usage_percent[5m]) / 100 * obs_agent_cpu_count) > 0.2
+          and on (instance) avg_over_time(obs_agent_cpu_usage_percent[5m]) >= 85
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "MySQL queries on {{ $labels.instance }} spend more than 30% of their time waiting for a CPU"
-          description: "Slow queries here are cascade victims of CPU saturation. Fix the culprit digest (cpu_role=culprit in mysql_report.top_digests; mysql_report.overload_cause names it) instead of tuning the slow queries."
+          summary: "MySQL digest {{ $labels.digest_id }} does more than 20% of all CPU work on {{ $labels.instance }}"
+          description: "1. Open obs-agent Overview → '% of node CPU used by top digests' (above the 20% line). 2. Get its text: obs_agent_mysql_digest_info{digest_id=\"{{ $labels.digest_id }}\"} or mysql_report.top_digests. 3. EXPLAIN it; reduce calls_per_sec at the caller or the CPU per call (index, cache). 4. Track it in the Analysis dashboard (Top digests: cpuCores, pctNodeCpu)."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: MySQLDigestDiskReadHog
+        expr: |
+          sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{digest_id!="other"}[5m]))
+            / on (instance) group_left rate(obs_agent_node_disk_read_bytes_total[5m]) > 0.2
+          and on (instance) rate(obs_agent_node_disk_read_bytes_total[5m]) > 5 * 1048576
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL digest {{ $labels.digest_id }} does more than 20% of the disk's reads on {{ $labels.instance }}"
+          description: "1. Open obs-agent Overview → '% of node disk reads by top digests' (above the 20% line). 2. Get its text from obs_agent_mysql_digest_info or mysql_report.top_digests_by_disk_read. 3. disk_read_pages_per_call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Confirm with io_diagnosis whether the disk is saturated."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: MySQLCommitsStalledOnRedo
+        expr: |
+          sum by (instance) (rate(obs_agent_mysql_query_redo_wait_seconds_total[5m]))
+            / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL statements on {{ $labels.instance }} spend more than 20% of their time waiting for the redo log"
+          description: "1. Open obs-agent Overview → 'Commit wait share' (above the 20% line). 2. Check the redo log device: disk average wait and utilisation panels, io_diagnosis. 3. Writers with many small transactions: batch them; consider innodb_flush_log_at_trx_commit=2 if the durability trade-off is acceptable. 4. On MySQL 5.7 commit wait includes the thread's own log fsync when delay accounting is off."
           diagnose: "http://{{ $labels.instance }}/api/diagnose"
 
       - alert: MySQLDigestResultSizeSpike
@@ -47,17 +88,41 @@ groups:
           severity: warning
         annotations:
           summary: "MySQL digest {{ $labels.digest_id }} returns 5x more data per call than yesterday on {{ $labels.instance }}"
-          description: "Result size per execution jumped (missing LIMIT, data growth, or a changed query). See mysql_report.top_digests_by_bytes_out."
+          description: "1. Needs mysql.prometheus_digests: full (minimal does not export bytes_out). 2. Open mysql_report.top_digests_by_bytes_out. 3. A missing LIMIT, data growth or a changed query: compare sample_query with yesterday's in ClickHouse."
           diagnose: "http://{{ $labels.instance }}/api/diagnose"
 
-      - alert: ObsAgentMySQLEventsDropped
-        expr: rate(obs_agent_mysql_events_dropped_total[5m]) > 0
+      - alert: MySQLQueriesSpillingToDisk
+        expr: |
+          sum by (instance) (rate(obs_agent_mysql_query_disk_write_bytes_total{command=~"query|stmt_execute"}[5m])) > 10 * 1048576
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "MySQL statements on {{ $labels.instance }} write more than 10 MiB/s to disk"
+          description: "1. Open obs-agent Overview → 'Query disk writes by command' (above the 10 MiB/s line). 2. In mysql_report.top_digests find SELECTs with disk_write_mb_per_sec > 0: on-disk temporary tables or sorts. 3. Add an index for the ORDER BY / GROUP BY, or raise tmp_table_size / sort_buffer_size for that workload."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: ObsAgentMySQLIOWaitUnavailable
+        expr: obs_agent_mysql_io_wait_available == 0
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "obs-agent cannot measure per-statement disk wait on {{ $labels.instance }}"
+          description: "1. Read mysql_report.accounting.disk_wait. 2. delayacct_disabled: sysctl kernel.task_delayacct=1, or set mysql.enable_delayacct: true. 3. blkio_delay_unavailable: the kernel lacks CONFIG_TASK_DELAY_ACCT. Without it disk_wait and victim_of disk are omitted."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: ObsAgentMySQLAccountingDegraded
+        expr: |
+          rate(obs_agent_mysql_events_dropped_total[10m]) > 0
+          or rate(obs_agent_mysql_agg_overflow_total[10m]) > 0
+          or increase(obs_agent_mysql_hash_mismatch_total[10m]) > 0
         for: 10m
         labels:
           severity: info
         annotations:
-          summary: "obs-agent is dropping MySQL command events on {{ $labels.instance }}"
-          description: "Digest totals undercount. Per-PID kernel totals remain exact. Consider a larger ring buffer or check agent CPU throttling."
+          summary: "obs-agent MySQL accounting is degraded on {{ $labels.instance }}"
+          description: "1. events_dropped > 0: digest totals undercount — check agent CPU throttling. 2. agg_overflow > 0: more distinct statements per poll than the kernel map holds; totals stay exact but cost more. 3. hash_mismatch > 0: a kernel/Go text-hash disagreement; affected statements fall back to exact processing — report it with the agent log."
           diagnose: "http://{{ $labels.instance }}/api/diagnose"
 
   - name: obs-agent-process

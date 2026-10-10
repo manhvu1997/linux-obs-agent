@@ -6,39 +6,295 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  # --- MySQL ---------------------------------------------------------------
+  # Every MySQL alert has a firing and a non-firing case. Series use 1m steps
+  # over 20 minutes and are evaluated at 15m unless noted.
+
+  # Queries spend 40% of their wall time waiting for a CPU on a 95% busy node.
   - interval: 1m
     input_series:
-      # digest aaa burns 0.8 cores, bbb 0.1 cores, total query CPU 0.9 cores
-      - series: 'obs_agent_mysql_digest_cpu_seconds_total{instance="db1:9200",digest_id="aaa"}'
-        values: '0+48x20'
-      - series: 'obs_agent_mysql_digest_cpu_seconds_total{instance="db1:9200",digest_id="bbb"}'
-        values: '0+6x20'
-      - series: 'obs_agent_mysql_query_cpu_seconds_total{instance="db1:9200",command="query"}'
-        values: '0+54x20'
-      - series: 'obs_agent_cpu_usage_percent{instance="db1:9200"}'
-        values: '95x20'
-      # queries spend 40% of their wall time waiting for a CPU
       - series: 'obs_agent_mysql_query_runq_wait_seconds_total{instance="db1:9200",command="query"}'
         values: '0+20x20'
       - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
         values: '0+50x20'
+      - series: 'obs_agent_cpu_usage_percent{instance="db1:9200"}'
+        values: '95x20'
     alert_rule_test:
-      - eval_time: 15m
-        alertname: MySQLQueryDigestCPUHog
-        exp_alerts:
-          - exp_labels: { severity: warning, instance: "db1:9200", digest_id: "aaa" }
-            exp_annotations:
-              summary: "MySQL digest aaa dominates query CPU on db1:9200"
-              description: "One query pattern uses more than 30% of mysqld query CPU while the node is above 85% CPU. Look it up in mysql_report.top_digests or obs_agent_mysql_digest_info."
-              diagnose: "http://db1:9200/api/diagnose"
       - eval_time: 15m
         alertname: MySQLQueriesStarvedForCPU
         exp_alerts:
-          - exp_labels: { severity: warning, instance: "db1:9200" }
+          - exp_labels: { severity: critical, instance: "db1:9200" }
             exp_annotations:
               summary: "MySQL queries on db1:9200 spend more than 30% of their time waiting for a CPU"
-              description: "Slow queries here are cascade victims of CPU saturation. Fix the culprit digest (cpu_role=culprit in mysql_report.top_digests; mysql_report.overload_cause names it) instead of tuning the slow queries."
+              description: "1. Open obs-agent Overview → 'Where query time goes' (waiting for CPU above the 30% line). 2. Read mysql_report.overload_cause: verdict query_cpu_overload names the digest. 3. In 'MySQL — who uses the server', the digest with the largest '% of node CPU used' is the cause; slow queries whose breakdown is mostly 'waiting for CPU' are victims — do not tune them. 4. Fix the culprit (EXPLAIN, index, cache, rate-limit its caller) or add CPU; if overload_cause says not_mysql, another family is burning the CPU."
               diagnose: "http://db1:9200/api/diagnose"
+
+  # Same 40% run-queue share, but the node is only 60% busy: no page.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_runq_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+20x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+50x20'
+      - series: 'obs_agent_cpu_usage_percent{instance="db1:9200"}'
+        values: '60x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLQueriesStarvedForCPU
+        exp_alerts: []
+
+  # Disk wait 20% + commit wait 20% = 40% of wall time, PSI io.full 15%.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_io_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+10x20'
+      - series: 'obs_agent_mysql_query_redo_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+10x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+50x20'
+      - series: 'obs_agent_pressure_io_full_avg10{instance="db1:9200"}'
+        values: '15x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLQueriesStalledOnDisk
+        exp_alerts:
+          - exp_labels: { severity: critical, instance: "db1:9200" }
+            exp_annotations:
+              summary: "MySQL queries on db1:9200 spend more than 30% of their time waiting for disk or commit"
+              description: "1. Open obs-agent Overview → 'Where query time goes' (disk + commit above the 30% line) and check io_diagnosis.verdict. 2. Read mysql_report.overload_cause (or its secondary): verdict query_disk_overload names the digest reading the disk. 3. disk_read_pages_per_call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Mostly commit wait = slow redo-log fsync: check MySQLCommitsStalledOnRedo, the log device and innodb_flush_log_at_trx_commit."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # Disk wait not measured (no io_wait series, delay accounting off): commit
+  # wait alone (40%) still fires through the `or 0 * wall` fallback.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_redo_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+20x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+50x20'
+      - series: 'obs_agent_pressure_io_full_avg10{instance="db1:9200"}'
+        values: '15x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLQueriesStalledOnDisk
+        exp_alerts:
+          - exp_labels: { severity: critical, instance: "db1:9200" }
+            exp_annotations:
+              summary: "MySQL queries on db1:9200 spend more than 30% of their time waiting for disk or commit"
+              description: "1. Open obs-agent Overview → 'Where query time goes' (disk + commit above the 30% line) and check io_diagnosis.verdict. 2. Read mysql_report.overload_cause (or its secondary): verdict query_disk_overload names the digest reading the disk. 3. disk_read_pages_per_call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Mostly commit wait = slow redo-log fsync: check MySQLCommitsStalledOnRedo, the log device and innodb_flush_log_at_trx_commit."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # Commit wait not measured (no redo series): disk wait alone (40%) fires.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_io_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+20x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+50x20'
+      - series: 'obs_agent_pressure_io_full_avg10{instance="db1:9200"}'
+        values: '15x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLQueriesStalledOnDisk
+        exp_alerts:
+          - exp_labels: { severity: critical, instance: "db1:9200" }
+            exp_annotations:
+              summary: "MySQL queries on db1:9200 spend more than 30% of their time waiting for disk or commit"
+              description: "1. Open obs-agent Overview → 'Where query time goes' (disk + commit above the 30% line) and check io_diagnosis.verdict. 2. Read mysql_report.overload_cause (or its secondary): verdict query_disk_overload names the digest reading the disk. 3. disk_read_pages_per_call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Mostly commit wait = slow redo-log fsync: check MySQLCommitsStalledOnRedo, the log device and innodb_flush_log_at_trx_commit."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # Same 40% disk + commit share, but PSI io.full is only 5%: no page.
+  # Neither wait measured at all: 0 / wall, no page either (db2).
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_io_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+10x20'
+      - series: 'obs_agent_mysql_query_redo_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+10x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+50x20'
+      - series: 'obs_agent_pressure_io_full_avg10{instance="db1:9200"}'
+        values: '5x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db2:9200",command="query"}'
+        values: '0+50x20'
+      - series: 'obs_agent_pressure_io_full_avg10{instance="db2:9200"}'
+        values: '15x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLQueriesStalledOnDisk
+        exp_alerts: []
+
+  # Digest aaa burns 2 cores, bbb 0.1; the node uses 95% of 8 CPUs = 7.6
+  # cores, so aaa does 26% of all CPU work and bbb 1%.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_digest_cpu_seconds_total{instance="db1:9200",digest_id="aaa"}'
+        values: '0+120x20'
+      - series: 'obs_agent_mysql_digest_cpu_seconds_total{instance="db1:9200",digest_id="bbb"}'
+        values: '0+6x20'
+      - series: 'obs_agent_cpu_usage_percent{instance="db1:9200"}'
+        values: '95x20'
+      - series: 'obs_agent_cpu_count{instance="db1:9200"}'
+        values: '8x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLDigestCPUHog
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "db1:9200", digest_id: "aaa" }
+            exp_annotations:
+              summary: "MySQL digest aaa does more than 20% of all CPU work on db1:9200"
+              description: "1. Open obs-agent Overview → '% of node CPU used by top digests' (above the 20% line). 2. Get its text: obs_agent_mysql_digest_info{digest_id=\"aaa\"} or mysql_report.top_digests. 3. EXPLAIN it; reduce calls_per_sec at the caller or the CPU per call (index, cache). 4. Track it in the Analysis dashboard (Top digests: cpuCores, pctNodeCpu)."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # Same digests on a 60% busy node: no ticket.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_digest_cpu_seconds_total{instance="db1:9200",digest_id="aaa"}'
+        values: '0+120x20'
+      - series: 'obs_agent_mysql_digest_cpu_seconds_total{instance="db1:9200",digest_id="bbb"}'
+        values: '0+6x20'
+      - series: 'obs_agent_cpu_usage_percent{instance="db1:9200"}'
+        values: '60x20'
+      - series: 'obs_agent_cpu_count{instance="db1:9200"}'
+        values: '8x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLDigestCPUHog
+        exp_alerts: []
+
+  # Digest scan reads 10 MB/s of the node's 20 MB/s.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_digest_disk_read_bytes_total{instance="db1:9200",digest_id="scan"}'
+        values: '0+600000000x20'
+      - series: 'obs_agent_node_disk_read_bytes_total{instance="db1:9200"}'
+        values: '0+1200000000x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLDigestDiskReadHog
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "db1:9200", digest_id: "scan" }
+            exp_annotations:
+              summary: "MySQL digest scan does more than 20% of the disk's reads on db1:9200"
+              description: "1. Open obs-agent Overview → '% of node disk reads by top digests' (above the 20% line). 2. Get its text from obs_agent_mysql_digest_info or mysql_report.top_digests_by_disk_read. 3. disk_read_pages_per_call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Confirm with io_diagnosis whether the disk is saturated."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # Digest scan reads 2 of the node's 3 MB/s (67%), but the node reads below
+  # 5 MiB/s: no ticket.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_digest_disk_read_bytes_total{instance="db1:9200",digest_id="scan"}'
+        values: '0+120000000x20'
+      - series: 'obs_agent_node_disk_read_bytes_total{instance="db1:9200"}'
+        values: '0+180000000x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLDigestDiskReadHog
+        exp_alerts: []
+
+  # Commit wait is 30% of wall time (db1); 10% (db2) does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_redo_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+15x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+50x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLCommitsStalledOnRedo
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "db1:9200" }
+            exp_annotations:
+              summary: "MySQL statements on db1:9200 spend more than 20% of their time waiting for the redo log"
+              description: "1. Open obs-agent Overview → 'Commit wait share' (above the 20% line). 2. Check the redo log device: disk average wait and utilisation panels, io_diagnosis. 3. Writers with many small transactions: batch them; consider innodb_flush_log_at_trx_commit=2 if the durability trade-off is acceptable. 4. On MySQL 5.7 commit wait includes the thread's own log fsync when delay accounting is off."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_redo_wait_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+5x20'
+      - series: 'obs_agent_mysql_query_wall_seconds_total{instance="db1:9200",command="query"}'
+        values: '0+50x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLCommitsStalledOnRedo
+        exp_alerts: []
+
+  # Statements write 15 MB/s to disk.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_disk_write_bytes_total{instance="db1:9200",command="query"}'
+        values: '0+900000000x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLQueriesSpillingToDisk
+        exp_alerts:
+          - exp_labels: { severity: info, instance: "db1:9200" }
+            exp_annotations:
+              summary: "MySQL statements on db1:9200 write more than 10 MiB/s to disk"
+              description: "1. Open obs-agent Overview → 'Query disk writes by command' (above the 10 MiB/s line). 2. In mysql_report.top_digests find SELECTs with disk_write_mb_per_sec > 0: on-disk temporary tables or sorts. 3. Add an index for the ORDER BY / GROUP BY, or raise tmp_table_size / sort_buffer_size for that workload."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # The same 15 MB/s from commands other than statements: no ticket.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_query_disk_write_bytes_total{instance="db1:9200",command="other"}'
+        values: '0+900000000x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MySQLQueriesSpillingToDisk
+        exp_alerts: []
+
+  # Disk wait unmeasured for 40 minutes: pending at 15m, firing after 30m.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_io_wait_available{instance="db1:9200"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ObsAgentMySQLIOWaitUnavailable
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: ObsAgentMySQLIOWaitUnavailable
+        exp_alerts:
+          - exp_labels: { severity: info, instance: "db1:9200" }
+            exp_annotations:
+              summary: "obs-agent cannot measure per-statement disk wait on db1:9200"
+              description: "1. Read mysql_report.accounting.disk_wait. 2. delayacct_disabled: sysctl kernel.task_delayacct=1, or set mysql.enable_delayacct: true. 3. blkio_delay_unavailable: the kernel lacks CONFIG_TASK_DELAY_ACCT. Without it disk_wait and victim_of disk are omitted."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # The in-kernel aggregation map overflows; the other two counters are flat.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_events_dropped_total{instance="db1:9200"}'
+        values: '7x20'
+      - series: 'obs_agent_mysql_agg_overflow_total{instance="db1:9200"}'
+        values: '0+5x20'
+      - series: 'obs_agent_mysql_hash_mismatch_total{instance="db1:9200"}'
+        values: '3x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ObsAgentMySQLAccountingDegraded
+        exp_alerts:
+          - exp_labels: { severity: info, instance: "db1:9200" }
+            exp_annotations:
+              summary: "obs-agent MySQL accounting is degraded on db1:9200"
+              description: "1. events_dropped > 0: digest totals undercount — check agent CPU throttling. 2. agg_overflow > 0: more distinct statements per poll than the kernel map holds; totals stay exact but cost more. 3. hash_mismatch > 0: a kernel/Go text-hash disagreement; affected statements fall back to exact processing — report it with the agent log."
+              diagnose: "http://db1:9200/api/diagnose"
+
+  # All three counters flat (non-zero, but not increasing): healthy.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_events_dropped_total{instance="db1:9200"}'
+        values: '7x20'
+      - series: 'obs_agent_mysql_agg_overflow_total{instance="db1:9200"}'
+        values: '5x20'
+      - series: 'obs_agent_mysql_hash_mismatch_total{instance="db1:9200"}'
+        values: '3x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ObsAgentMySQLAccountingDegraded
+        exp_alerts: []
 
   - interval: 1m
     input_series:
@@ -82,8 +338,6 @@ tests:
         values: '0+36000x20'
       - series: 'obs_agent_family_net_connections_opened_total{instance="web1:9200",family="cron.service",direction="outbound"}'
         values: '0+60x20'
-      - series: 'obs_agent_mysql_events_dropped_total{instance="db1:9200"}'
-        values: '0+60x20'
     alert_rule_test:
       - eval_time: 15m
         alertname: ConnectionChurnHigh
@@ -93,14 +347,6 @@ tests:
               summary: "php-fpm.service on web1:9200 opens more than 500 outbound connections/s"
               description: "Sustained connection churn usually means a missing or broken connection pool."
               diagnose: "http://web1:9200/api/diagnose"
-      - eval_time: 15m
-        alertname: ObsAgentMySQLEventsDropped
-        exp_alerts:
-          - exp_labels: { severity: info, instance: "db1:9200" }
-            exp_annotations:
-              summary: "obs-agent is dropping MySQL command events on db1:9200"
-              description: "Digest totals undercount. Per-PID kernel totals remain exact. Consider a larger ring buffer or check agent CPU throttling."
-              diagnose: "http://db1:9200/api/diagnose"
 
   # Result size per call: old regime (steps 0..300, 25h):
   # 5e8 bytes / 5 calls per 5m step = 1e8 B/call (1.67 MB/s); new regime
@@ -119,7 +365,7 @@ tests:
           - exp_labels: { severity: warning, instance: "db1:9200", digest_id: "fat" }
             exp_annotations:
               summary: "MySQL digest fat returns 5x more data per call than yesterday on db1:9200"
-              description: "Result size per execution jumped (missing LIMIT, data growth, or a changed query). See mysql_report.top_digests_by_bytes_out."
+              description: "1. Needs mysql.prometheus_digests: full (minimal does not export bytes_out). 2. Open mysql_report.top_digests_by_bytes_out. 3. A missing LIMIT, data growth or a changed query: compare sample_query with yesterday's in ClickHouse."
               diagnose: "http://db1:9200/api/diagnose"
 
   # Old regime (first 2200 steps = 7.6d): 1.2e9 B/step = 4 MB/s.
