@@ -18,7 +18,22 @@ Both are generated: edit `deploy/grafana/gen/main.go`, then run `go run ./deploy
    unified alerting. It shows the obs-agent rules only when Grafana sees them: load
    `deploy/prometheus/obs-agent-alerts.yaml` into the Prometheus that Grafana uses as a data source
    (data-source-managed rules), or add an Alertmanager data source. Its instance filter is
-   `{instance=~"${instance:regex}"}`, so it follows the instance variable.
+   `{instance=~"${instance:regex}"}`, so it follows the instance variable. It lists firing **and
+   pending** alerts of every severity; `ObsAgentMySQLIOWaitUnavailable` (info) fires on every host with
+   delay accounting off. To hide them here, untick *Pending* in the panel's state filter or add
+   `severity!="info"` to its alert instance label filter. To keep info alerts out of notifications, route
+   them to a null receiver in Alertmanager:
+
+   ```yaml
+   route:
+     receiver: oncall
+     routes:
+       - matchers: ['severity="info"']
+         receiver: "null"
+   receivers:
+     - name: oncall
+     - name: "null"
+   ```
 5. If your agents use a `clickhouse.flush_interval` other than 60 s or a `mysql.slow_query_threshold_ms`
    other than 100, set the hidden constants `flush_s` / `slow_ms` (Analysis → Dashboard settings →
    Variables) and save.

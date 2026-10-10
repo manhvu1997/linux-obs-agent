@@ -1708,7 +1708,7 @@ The same split names the query that **reads** the disk (`io_role: culprit`) apar
   | `io_role: culprit` | `percent_of_disk_read` ≥ `io_culprit_percent_of_disk_read` (20) **and** node disk read ≥ `io_culprit_min_node_disk_read_mb_per_sec` (5) MB/s | a quiet disk never has a culprit |
   | `victim_of: cpu \| disk \| commit` | Σ available waits (`cpu_wait` + `disk_wait` + `commit_wait`) ≥ `victim_wait_percent` (50) **and** `latency_ms_avg` ≥ `slow_query_threshold_ms`; the value is the largest available wait (ties: cpu, disk, commit) | slow because it waited — for a CPU, for block I/O, or for the redo log |
 
-  A value whose input is unavailable is omitted, never 0. The disk fields need per-statement disk bytes in every poll of the window; `percent_of_disk_read` also needs the node's physical-disk bytes in every poll and a non-zero total. The `<other>` overflow digest never gets a role.
+  A value whose input is unavailable is omitted, never 0. The disk fields need per-statement disk bytes in every poll of the window; `percent_of_disk_read` also needs the node's physical-disk bytes in every poll and a non-zero total. The `other` overflow digest never gets a role.
 - Report level: `node` {`num_cpu`, `cpu_used_cores`, `cpu_used_percent`} over W (from `/proc/stat`, same polls); `query_cpu_coverage_percent` = Σ digest CPU ÷ CPU of the traced mysqld processes × 100 — how much of mysqld's CPU the digests explain (the rest: connection handling outside `dispatch_command`, InnoDB background threads); omitted while any poll in the window lacked a mysqld baseline: for the first window after the agent starts, after a mysqld restart, and whenever a mysqld PID comes back after a quiet window (with several mysqld instances, one quiet-then-active instance omits it node-wide for one window). `node` also carries `disk_read_mb_per_sec` / `disk_write_mb_per_sec`: bytes of the **physical disks** over W (whole devices under `/sys/block` with an empty `slaves/` — so no dm-*/md* — and not loop/ram/zram/sr/fd/nbd; without `/sys/block`, names like `sd*`, `vd*`, `xvd*`, `hd*`, `nvme*n*`, `mmcblk*`), omitted unless every poll in the window had a valid `/proc/diskstats` delta. `query_disk_read_coverage_percent` = Σ digest disk read bytes ÷ physical-disk read bytes × 100 — how much of the disk's reads the statements explain (the rest: read-ahead, page cleaners, purge, other processes). It does not need node CPU, so it can be present while `node` (and with it `node.disk_*`) is absent: the `node` block is built only when node CPU is available for every poll. `victims` {`cpu`, `disk`, `commit`: n} over **all** digests (victims burn little CPU and rarely reach the top lists): `victims.cpu` counts the slow digests whose measured waits sum to ≥ `victim_wait_percent` and whose largest wait is the run queue, and likewise `disk` (block I/O) and `commit` (redo log). A key is present, possibly 0, exactly when that wait is measured for the whole window. `accounting` says which signals were measured in every poll of the window (otherwise the newest reason a poll gave; `disk_bytes`, `disk_wait` and `commit_wait` — never `cpu_wait` — read `unknown` before the first host sample):
 
   | Key | Values | When not `ok` |
@@ -1792,7 +1792,7 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 | Alert | Severity | Condition (`for`) | Overview panel |
 |---|---|---|---|
 | `MySQLQueriesStarvedForCPU` | critical | query runq wait ÷ query wall > 0.3 **and** avg node CPU ≥ 85 % (5m) | Where query time goes |
-| `MySQLQueriesStalledOnDisk` | critical | (query io wait + redo wait) ÷ query wall > 0.3 **and** PSI io.full avg10 > 10 (5m); an absent wait counts as 0 | Where query time goes |
+| `MySQLQueriesStalledOnDisk` | critical | (query io wait + redo wait) ÷ query wall > 0.3 **and** PSI io.full avg10 > 10 (5m); an absent wait counts as 0. **Never fires without PSI** (kernel < 4.20, or RHEL 8's default `psi=0` — boot with `psi=1`): `obs_agent_pressure_io_full_avg10` is then absent | Where query time goes |
 | `MySQLDigestCPUHog` | warning | one digest's CPU ÷ node CPU cores in use > 0.2 **and** node CPU ≥ 85 % (5m) | % of node CPU used by top digests; Top CPU digest stat |
 | `MySQLDigestDiskReadHog` | warning | one digest's disk reads ÷ node physical-disk reads > 0.2 **and** node reads > 5 MiB/s (5m) | % of node disk reads by top digests; Top disk-read digest stat |
 | `MySQLCommitsStalledOnRedo` | warning | query redo wait ÷ query wall > 0.2 (5m) | Commit wait share |
@@ -1802,6 +1802,22 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 | `ObsAgentMySQLAccountingDegraded` | info | events dropped, agg overflow or hash mismatches rising over `[10m]` (10m) | Dropped, overflow and hash mismatches (no threshold line) |
 
 The digest alerts exclude `digest_id="other"` and need the digest in the exported set.
+
+`ObsAgentMySQLIOWaitUnavailable` (and the other `severity="info"` alerts) fire on every host whose kernel runs with delay accounting off, so do not send them to a pager or chat receiver: route `severity="info"` to a null receiver in Alertmanager, e.g.
+
+```yaml
+route:
+  receiver: oncall
+  routes:
+    - matchers: ['severity="info"']
+      receiver: "null"        # visible in Alertmanager / Grafana, never notified
+receivers:
+  - name: oncall
+    # …
+  - name: "null"
+```
+
+The Overview's "Firing obs-agent alerts" list shows firing **and pending** alerts of every severity: untick *Pending* in its state filter, or add `severity!="info"` to its alert instance label filter, to hide them there.
 
 ### Accuracy and limits
 
@@ -1836,6 +1852,7 @@ The digest alerts exclude `digest_id="other"` and need the digest in the exporte
 - Node disk bytes may double count on stacked devices that still look physical (`zd*` ZFS zvols, `drbd*`, `rbd*`: whole devices with an empty `slaves/`) — their I/O can also be counted on the local disks beneath (for `rbd*`, when Ceph OSDs run on the same node). `percent_of_disk_read` (and the coverage) can exceed 100 % when statements read through NFS or swap in from zram: those reads are charged to the thread's `ioac` but are not in the physical-disk count.
 - Without PSI (`/proc/pressure` absent), `io_diagnosis` relies on iowait, which accrues only on idle CPUs: on a CPU-saturated node it can read `healthy` while the disk is saturated, so a disk overload may not appear as `secondary` of a CPU verdict.
 - The disk `mysqld_top_consumer` check needs per-process I/O (`process.include_io`, default true); without per-family read bytes the disk verdict has low confidence and `missing: family_disk_io`.
+- `obs_agent_node_disk_{read,write}_bytes_total` are a sum over the physical disks present at scrape time: removing (or hot-unplugging) a disk lowers the sum, which `rate()` / `increase()` treat as a counter reset (one spike sample); adding a disk adds its lifetime bytes at once (also one spike sample).
 - `bytes_in` (it was the SQL text length, not network bytes) is removed from digests, commands, Prometheus (`obs_agent_mysql_query_bytes_total{flow="in"}` is gone) and ClickHouse (`clickhouse-schema -alter` drops the column, §22).
 - **Not verified at runtime in the development environment** (compile-checked only, on arm64 Linux): verifier acceptance, attach behaviour and byte/connection counts on x86_64. Run the verification commands in the spec/plan before relying on the numbers.
 
