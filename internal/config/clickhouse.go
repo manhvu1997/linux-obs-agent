@@ -35,6 +35,10 @@ type ClickHouseConfig struct {
 	MaxDigestKeys          int `yaml:"max_digest_keys"`
 	MaxFlowKeys            int `yaml:"max_flow_keys"`
 	MaxSlowQueriesPerFlush int `yaml:"max_slow_queries_per_flush"`
+	// MinDigestSharePercent: fold, per interval, digests under this % of
+	// query CPU and disk reads (and never slow) into one '<minor>' row per
+	// (pid, command); 0 disables. Valid 0 <= x < 100.
+	MinDigestSharePercent float64 `yaml:"min_digest_share_percent"`
 	// IncludeSampleQueries sends raw SQL (with literals) off-host. The
 	// effective rule is the AND of this and mysql.sample_queries; see
 	// EffectiveIncludeSamples.
@@ -63,6 +67,7 @@ func defaultClickHouse() ClickHouseConfig {
 		MaxDigestKeys:          10000,
 		MaxFlowKeys:            20000,
 		MaxSlowQueriesPerFlush: 1000,
+		MinDigestSharePercent:  0.1,
 		Snapshots: ClickHouseSnapshotConfig{
 			Enabled:       true,
 			CheckInterval: 30 * time.Second,
@@ -166,6 +171,9 @@ func (c *ClickHouseConfig) finish() error {
 		if v <= 0 {
 			return fmt.Errorf("clickhouse.%s must be > 0", name)
 		}
+	}
+	if c.MinDigestSharePercent < 0 || c.MinDigestSharePercent >= 100 {
+		return fmt.Errorf("clickhouse.min_digest_share_percent must be >= 0 and < 100, got %v", c.MinDigestSharePercent)
 	}
 	if c.Snapshots.Enabled && (c.Snapshots.CheckInterval <= 0 || c.Snapshots.MinInterval < c.Snapshots.CheckInterval) {
 		return fmt.Errorf("clickhouse.snapshots.min_interval must be >= check_interval > 0")

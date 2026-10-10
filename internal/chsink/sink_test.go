@@ -310,3 +310,90 @@ func TestShutdownForgetsDigestText(t *testing.T) {
 		t.Fatal("id still marked seen after its text was dropped at shutdown")
 	}
 }
+
+func TestFlushHostStatsWaitsAndMinorFold(t *testing.T) {
+	ins := &fakeIns{}
+	cfg := testCfg()
+	cfg.MinDigestSharePercent = 0.1
+	src := Sources{
+		Digests: func() ([]querystats.DigestDelta, uint64) {
+			return []querystats.DigestDelta{
+				fdd(1, "big", "query", 1_000_000, 0, 5),
+				fdd(1, "tiny1", "query", 10, 0, 5),
+				fdd(1, "tiny2", "query", 20, 0, 5),
+				fdd(1, "cheap-but-slow", "query", 10, 0, 5_000),
+			}, 0
+		},
+		Host: func() querystats.HostWindow {
+			return querystats.HostWindow{Samples: 12, NumCPU: 8, NodeCPUUsedNs: 3e11, MysqldCPUNs: 1e11, DiskReadBytes: 5, DiskWriteBytes: 6,
+				NodeOK: true, MysqldOK: true, DiskOK: true, IOWaitOK: true, RedoWaitOK: false}
+		},
+		SlowWallNs: 1_000,
+	}
+	s := NewSink(cfg, "h", ins, src, tStart)
+	s.Flush(context.Background(), tStart.Add(time.Minute))
+
+	var host, stats, texts []map[string]any
+	for _, x := range ins.sent {
+		switch x.table {
+		case TableHostStats:
+			host = append(host, decodeRowsForTest(t, x.body)...)
+		case TableDigestStats:
+			stats = append(stats, decodeRowsForTest(t, x.body)...)
+		case TableDigestText:
+			texts = append(texts, decodeRowsForTest(t, x.body)...)
+		}
+	}
+	if len(host) != 1 || host[0]["cpu_count"] != float64(8) || host[0]["node_cpu_used_ns"] != float64(3e11) ||
+		host[0]["host"] != "h" || host[0]["window_end"] != "2026-10-08 00:01:00" {
+		t.Fatalf("host_stats rows = %+v", host)
+	}
+	ids := map[string]map[string]any{}
+	for _, r := range stats {
+		ids[r["digest_id"].(string)] = r
+	}
+	if len(stats) != 3 || ids["big"] == nil || ids["cheap-but-slow"] == nil || ids[MinorDigestID] == nil {
+		t.Fatalf("digest rows = %+v, want big, cheap-but-slow and one <minor>", stats)
+	}
+	if m := ids[MinorDigestID]; m["calls"] != float64(2) || m["cpu_ns"] != float64(30) {
+		t.Fatalf("<minor> = %+v", m)
+	}
+	if r := ids["big"]; r["io_wait_ns"] != float64(1) || r["redo_wait_ns"] != nil {
+		t.Fatalf("waits must follow the host window flags: %+v", r)
+	}
+	var minorText bool
+	for _, r := range texts {
+		if r["digest_id"] == MinorDigestID {
+			minorText = r["digest_text"] == MinorDigestText
+		}
+		if r["digest_id"] == "tiny1" || r["digest_id"] == "tiny2" {
+			t.Fatalf("folded digest must not get a text row: %+v", r)
+		}
+	}
+	if !minorText {
+		t.Fatalf("digest_text rows = %+v, want the <minor> text", texts)
+	}
+}
+
+func TestFlushWithoutHostSourceWritesNullWaits(t *testing.T) {
+	ins := &fakeIns{}
+	src := Sources{Digests: func() ([]querystats.DigestDelta, uint64) {
+		return []querystats.DigestDelta{{PID: 1, DigestID: "a", Command: "query", Calls: 1, IOWaitNs: 7, RedoWaitNs: 9}}, 0
+	}}
+	s := NewSink(testCfg(), "h", ins, src, tStart)
+	s.Flush(context.Background(), tStart.Add(time.Minute))
+	for _, x := range ins.sent {
+		if x.table == TableHostStats {
+			t.Fatal("nil Sources.Host must not write host_stats")
+		}
+		if x.table == TableDigestStats {
+			r := decodeRowsForTest(t, x.body)[0]
+			if v, ok := r["io_wait_ns"]; !ok || v != nil {
+				t.Fatalf("io_wait_ns = %v (present %v), want null", v, ok)
+			}
+			if v, ok := r["redo_wait_ns"]; !ok || v != nil {
+				t.Fatalf("redo_wait_ns = %v (present %v), want null", v, ok)
+			}
+		}
+	}
+}

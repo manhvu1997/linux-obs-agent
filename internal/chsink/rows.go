@@ -47,6 +47,25 @@ type DigestStatRow struct {
 	WallNs      uint64 `json:"wall_ns"`
 	WallMaxNs   uint64 `json:"wall_max_ns"`
 	BytesOut    uint64 `json:"bytes_out"`
+	// Disk bytes are always measured; a wait is NULL when not every poll in
+	// the interval could measure it (or no host window exists).
+	DiskReadBytes  uint64  `json:"disk_read_bytes"`
+	DiskWriteBytes uint64  `json:"disk_write_bytes"`
+	IOWaitNs       *uint64 `json:"io_wait_ns"`
+	RedoWaitNs     *uint64 `json:"redo_wait_ns"`
+}
+
+// HostRow is one host_stats row: the interval's denominators for the digest
+// rows. Nullable columns are NULL when not every poll measured them.
+type HostRow struct {
+	WindowStart    string  `json:"window_start"`
+	WindowEnd      string  `json:"window_end"`
+	Host           string  `json:"host"`
+	CPUCount       uint16  `json:"cpu_count"`
+	NodeCPUUsedNs  *uint64 `json:"node_cpu_used_ns"`
+	MysqldCPUNs    *uint64 `json:"mysqld_cpu_ns"`
+	DiskReadBytes  *uint64 `json:"disk_read_bytes"`
+	DiskWriteBytes *uint64 `json:"disk_write_bytes"`
 }
 
 type DigestTextRow struct {
@@ -102,17 +121,53 @@ type SnapshotRow struct {
 	Report  string `json:"report"`
 }
 
-func digestRows(host string, w flushWindow, d []querystats.DigestDelta) []DigestStatRow {
+// digestRows renders the interval's digest deltas. hw says which waits every
+// poll measured: io_wait_ns / redo_wait_ns are written only when hw has
+// samples and the matching flag is set, NULL otherwise (never a partial 0).
+func digestRows(host string, w flushWindow, d []querystats.DigestDelta, hw querystats.HostWindow) []DigestStatRow {
+	ioOK := hw.Samples > 0 && hw.IOWaitOK
+	redoOK := hw.Samples > 0 && hw.RedoWaitOK
 	rows := make([]DigestStatRow, 0, len(d))
 	for _, x := range d {
-		rows = append(rows, DigestStatRow{
+		r := DigestStatRow{
 			WindowStart: chTime(w.start), WindowEnd: chTime(w.end), Host: host,
 			PID: x.PID, DigestID: x.DigestID, Command: x.Command,
 			Calls: x.Calls, CPUNs: x.CPUNs, RunqNs: x.RunqNs, WallNs: x.WallNs, WallMaxNs: x.WallMaxNs,
-			BytesOut: x.BytesOut,
-		})
+			BytesOut: x.BytesOut, DiskReadBytes: x.DiskReadBytes, DiskWriteBytes: x.DiskWriteBytes,
+		}
+		if ioOK {
+			v := x.IOWaitNs
+			r.IOWaitNs = &v
+		}
+		if redoOK {
+			v := x.RedoWaitNs
+			r.RedoWaitNs = &v
+		}
+		rows = append(rows, r)
 	}
 	return rows
+}
+
+// hostRows is one host_stats row for the interval, or nil when no poll ran
+// or nothing moved (no row without signal). A value whose polls were not
+// all valid is NULL, so sum() over a range never mixes in a partial value.
+// cpu_count is not nullable: it is 0 when no poll had a valid node delta
+// (node_cpu_used_ns is then NULL too).
+func hostRows(host string, w flushWindow, hw querystats.HostWindow) []HostRow {
+	if hw.Samples == 0 || hw.NodeCPUUsedNs+hw.MysqldCPUNs+hw.DiskReadBytes+hw.DiskWriteBytes == 0 {
+		return nil
+	}
+	opt := func(ok bool, v uint64) *uint64 {
+		if !ok {
+			return nil
+		}
+		return &v
+	}
+	return []HostRow{{
+		WindowStart: chTime(w.start), WindowEnd: chTime(w.end), Host: host, CPUCount: uint16(hw.NumCPU),
+		NodeCPUUsedNs: opt(hw.NodeOK, hw.NodeCPUUsedNs), MysqldCPUNs: opt(hw.MysqldOK, hw.MysqldCPUNs),
+		DiskReadBytes: opt(hw.DiskOK, hw.DiskReadBytes), DiskWriteBytes: opt(hw.DiskOK, hw.DiskWriteBytes),
+	}}
 }
 
 // textRows returns one row per digest id not yet sent and marks it sent.

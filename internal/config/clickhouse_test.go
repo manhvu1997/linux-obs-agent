@@ -79,6 +79,8 @@ func TestClickHouseValidation(t *testing.T) {
 		"missing pw file":   {base + "  password_file: /nonexistent/pw\n", "password_file"},
 		"bad digests mode":  {"mysql:\n  prometheus_digests: some\n", "prometheus_digests"},
 		"bad minimal top n": {"mysql:\n  prometheus_minimal_top_n: 0\n", "prometheus_minimal_top_n"},
+		"minor share < 0":   {base + "  min_digest_share_percent: -1\n", "min_digest_share_percent"},
+		"minor share 100":   {base + "  min_digest_share_percent: 100\n", "min_digest_share_percent"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -87,6 +89,19 @@ func TestClickHouseValidation(t *testing.T) {
 				t.Fatalf("err = %v, want it to mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestClickHouseMinDigestShare(t *testing.T) {
+	if got := Defaults().ClickHouse.MinDigestSharePercent; got != 0.1 {
+		t.Fatalf("default min_digest_share_percent = %v, want 0.1", got)
+	}
+	cfg, err := Load(chYAML(t, "clickhouse:\n  enabled: true\n  url: http://ch:8123\n  min_digest_share_percent: 0\n"))
+	if err != nil {
+		t.Fatalf("0 (disabled) must be accepted: %v", err)
+	}
+	if cfg.ClickHouse.MinDigestSharePercent != 0 {
+		t.Fatalf("min_digest_share_percent = %v, want 0", cfg.ClickHouse.MinDigestSharePercent)
 	}
 }
 

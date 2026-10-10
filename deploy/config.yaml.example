@@ -445,6 +445,9 @@ clickhouse:
   max_digest_keys: 10000             # per interval; overflow folds into <other>
   max_flow_keys: 20000               # per interval; overflow folds into peer ::, port 0
   max_slow_queries_per_flush: 1000
+  # Fold, per interval, digests under this % of query CPU and disk reads (and
+  # never slow) into one '<minor>' row per (pid, command); 0 disables.
+  min_digest_share_percent: 0.1
   # Raw SQL with literals (possibly secrets) leaves the host only when this AND
   # mysql.sample_queries are true. Otherwise digest text is sent instead.
   include_sample_queries: false

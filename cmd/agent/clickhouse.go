@@ -55,6 +55,9 @@ func startClickHouse(ctx context.Context, cfg *config.Config, promExp *exporter.
 		src.Digests = my.DrainDigests
 		my.EnableSlowDrain(ch.MaxSlowQueriesPerFlush)
 		src.Slow = my.DrainSlowQueries
+		my.EnableHostDrain()
+		src.Host = my.DrainHost
+		src.SlowWallNs = cfg.MySQL.SlowQueryThresholdMs * uint64(time.Millisecond)
 	}
 
 	// The sink and snapshotter must see the effective flag: raw SQL leaves the

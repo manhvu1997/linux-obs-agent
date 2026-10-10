@@ -154,11 +154,13 @@ func TestEncodeRowsJSONEachRow(t *testing.T) {
 
 func TestDigestRowsColumns(t *testing.T) {
 	w := flushWindow{time.Unix(0, 0), time.Unix(60, 0)}
-	rows := digestRows("h", w, []querystats.DigestDelta{{PID: 5, DigestID: "x", Command: "query", Calls: 2, CPUNs: 10, WallMaxNs: 7}})
+	rows := digestRows("h", w, []querystats.DigestDelta{{PID: 5, DigestID: "x", Command: "query", Calls: 2, CPUNs: 10, WallMaxNs: 7}},
+		querystats.HostWindow{Samples: 1, IOWaitOK: true, RedoWaitOK: true})
 	body, _ := encodeRows(rows)
 	got := decodeRowsForTest(t, body)[0]
 	for _, col := range []string{"window_start", "window_end", "host", "pid", "digest_id", "command", "calls",
-		"cpu_ns", "runq_ns", "wall_ns", "wall_max_ns", "bytes_out"} {
+		"cpu_ns", "runq_ns", "wall_ns", "wall_max_ns", "bytes_out",
+		"disk_read_bytes", "disk_write_bytes", "io_wait_ns", "redo_wait_ns"} {
 		if _, ok := got[col]; !ok {
 			t.Errorf("missing column %s in %v", col, got)
 		}
@@ -175,5 +177,65 @@ func TestIDSetForget(t *testing.T) {
 	s.forget([]string{"a", "zz"})
 	if !s.addNew("a") || s.addNew("b") {
 		t.Fatal("forget must remove only the named ids")
+	}
+}
+
+var t0 = time.Unix(1_800_000_000, 0)
+
+func TestDigestRowsNullWaits(t *testing.T) {
+	d := []querystats.DigestDelta{{PID: 1, DigestID: "a", Command: "query", Calls: 1, DiskReadBytes: 4096, DiskWriteBytes: 1, IOWaitNs: 7, RedoWaitNs: 9}}
+	w := flushWindow{t0, t0.Add(time.Minute)}
+	got := digestRows("h", w, d, querystats.HostWindow{Samples: 12, IOWaitOK: false, RedoWaitOK: true})
+	if got[0].IOWaitNs != nil || got[0].RedoWaitNs == nil || *got[0].RedoWaitNs != 9 || got[0].DiskReadBytes != 4096 {
+		t.Fatalf("row = %+v", got[0])
+	}
+	b, _ := json.Marshal(got[0])
+	if !strings.Contains(string(b), `"io_wait_ns":null`) {
+		t.Fatalf("unmeasured wait must encode as null: %s", b)
+	}
+}
+
+func TestDigestRowsWaitsNullWithoutHostSamples(t *testing.T) {
+	d := []querystats.DigestDelta{{PID: 1, DigestID: "a", Command: "query", Calls: 1, IOWaitNs: 7, RedoWaitNs: 9}}
+	w := flushWindow{t0, t0.Add(time.Minute)}
+	got := digestRows("h", w, d, querystats.HostWindow{IOWaitOK: true, RedoWaitOK: true})
+	if got[0].IOWaitNs != nil || got[0].RedoWaitNs != nil {
+		t.Fatalf("no host samples (Sources.Host nil): waits must be NULL, row = %+v", got[0])
+	}
+}
+
+func TestHostRows(t *testing.T) {
+	w := flushWindow{t0, t0.Add(time.Minute)}
+	got := hostRows("h", w, querystats.HostWindow{Samples: 12, NumCPU: 8, NodeCPUUsedNs: 3e11, MysqldCPUNs: 1e11, DiskReadBytes: 5, DiskWriteBytes: 6,
+		NodeOK: true, MysqldOK: false, DiskOK: true})
+	if len(got) != 1 || got[0].CPUCount != 8 || *got[0].NodeCPUUsedNs != 3e11 || got[0].MysqldCPUNs != nil || *got[0].DiskReadBytes != 5 {
+		t.Fatalf("rows = %+v", got)
+	}
+}
+
+func TestHostRowsSkippedWhenIdle(t *testing.T) {
+	w := flushWindow{t0, t0.Add(time.Minute)}
+	if got := hostRows("h", w, querystats.HostWindow{}); got != nil {
+		t.Fatalf("no samples: rows = %+v", got)
+	}
+	if got := hostRows("h", w, querystats.HostWindow{Samples: 12, NumCPU: 8, NodeOK: true, DiskOK: true, MysqldOK: true}); got != nil {
+		t.Fatalf("all deltas 0: rows = %+v", got)
+	}
+}
+
+// NumCPU stays 0 when no poll had a valid node delta; cpu_count is not
+// nullable, so the row carries 0 with node_cpu_used_ns NULL rather than
+// being skipped while other values moved.
+func TestHostRowsNumCPUZeroWhenNodeUnknown(t *testing.T) {
+	w := flushWindow{t0, t0.Add(time.Minute)}
+	got := hostRows("h", w, querystats.HostWindow{Samples: 3, MysqldCPUNs: 2e9, DiskReadBytes: 10, DiskWriteBytes: 20,
+		NodeOK: false, MysqldOK: true, DiskOK: true})
+	if len(got) != 1 || got[0].CPUCount != 0 || got[0].NodeCPUUsedNs != nil || got[0].MysqldCPUNs == nil || *got[0].MysqldCPUNs != 2e9 ||
+		*got[0].DiskWriteBytes != 20 {
+		t.Fatalf("rows = %+v", got)
+	}
+	b, _ := json.Marshal(got[0])
+	if !strings.Contains(string(b), `"cpu_count":0`) || !strings.Contains(string(b), `"node_cpu_used_ns":null`) {
+		t.Fatalf("json = %s", b)
 	}
 }

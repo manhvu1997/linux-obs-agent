@@ -25,6 +25,12 @@ type Sources struct {
 	Slow     func() ([]model.SlowQuery, uint64)
 	Families func() []process.FamilyWindow
 	Comm     func(pid uint32) string
+	// Host drains the interval's host window. nil: no host_stats, waits
+	// written as NULL.
+	Host func() querystats.HostWindow
+	// SlowWallNs is mysql.slow_query_threshold_ms in ns: minor folding never
+	// folds a slow statement. 0 treats every statement as slow (no folding).
+	SlowWallNs uint64
 }
 
 // Inserter is satisfied by *Client.
@@ -144,10 +150,17 @@ func (s *Sink) Flush(ctx context.Context, now time.Time) {
 	s.mu.Unlock()
 	w := flushWindow{start, end}
 
+	var hw querystats.HostWindow
+	if s.src.Host != nil {
+		hw = s.src.Host()
+		enqueueRows(s, TableHostStats, hostRows(s.host, w, hw))
+	}
 	if s.src.Digests != nil {
 		d, folded := s.src.Digests()
 		s.m.dropped.WithLabelValues(TableDigestStats, "drain_cap").Add(float64(folded))
-		enqueueRows(s, TableDigestStats, digestRows(s.host, w, d))
+		// Text rows come from the folded slice, so <minor> gets its text once.
+		d = foldMinor(d, s.cfg.MinDigestSharePercent, s.src.SlowWallNs)
+		enqueueRows(s, TableDigestStats, digestRows(s.host, w, d, hw))
 		s.mu.Lock()
 		texts := textRows(d, s.seen, s.cfg.IncludeSampleQueries, now)
 		s.mu.Unlock()
