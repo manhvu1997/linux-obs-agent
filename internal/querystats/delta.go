@@ -24,8 +24,12 @@ type Delta struct {
 	WallMaxNs   uint64
 	CPUNs       uint64
 	RunqNs      uint64
-	BytesIn     uint64
 	BytesOut    uint64
+	// Disk bytes and waits, summed like the times (see Event).
+	DiskReadBytes  uint64
+	DiskWriteBytes uint64
+	IOWaitNs       uint64
+	RedoWaitNs     uint64
 }
 
 // DeltaFromEvent converts one measured call.
@@ -33,7 +37,8 @@ func DeltaFromEvent(e Event) Delta {
 	return Delta{
 		PID: e.PID, Command: e.Command, Digest: e.Digest, SampleQuery: e.SampleQuery, Truncated: e.Truncated,
 		Calls: 1, WallNs: e.WallNs, WallMaxNs: e.WallNs, CPUNs: e.CPUNs,
-		RunqNs: e.RunqNs, BytesIn: e.BytesIn, BytesOut: e.BytesOut,
+		RunqNs: e.RunqNs, BytesOut: e.BytesOut,
+		DiskReadBytes: e.DiskReadBytes, DiskWriteBytes: e.DiskWriteBytes, IOWaitNs: e.IOWaitNs, RedoWaitNs: e.RedoWaitNs,
 	}
 }
 

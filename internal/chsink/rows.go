@@ -46,7 +46,6 @@ type DigestStatRow struct {
 	RunqNs      uint64 `json:"runq_ns"`
 	WallNs      uint64 `json:"wall_ns"`
 	WallMaxNs   uint64 `json:"wall_max_ns"`
-	BytesIn     uint64 `json:"bytes_in"`
 	BytesOut    uint64 `json:"bytes_out"`
 }
 
@@ -110,7 +109,7 @@ func digestRows(host string, w flushWindow, d []querystats.DigestDelta) []Digest
 			WindowStart: chTime(w.start), WindowEnd: chTime(w.end), Host: host,
 			PID: x.PID, DigestID: x.DigestID, Command: x.Command,
 			Calls: x.Calls, CPUNs: x.CPUNs, RunqNs: x.RunqNs, WallNs: x.WallNs, WallMaxNs: x.WallMaxNs,
-			BytesIn: x.BytesIn, BytesOut: x.BytesOut,
+			BytesOut: x.BytesOut,
 		})
 	}
 	return rows

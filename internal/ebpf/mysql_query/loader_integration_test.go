@@ -105,9 +105,6 @@ func TestCmdEventCarriesCPUAndBytes(t *testing.T) {
 	if ev.CPUNs > ev.WallNs || ev.RunqNs > ev.WallNs || ev.WallNs == 0 {
 		t.Fatalf("timing invariant broken: %+v", ev)
 	}
-	if ev.BytesIn != uint64(len(q)) {
-		t.Fatalf("bytes_in = %d", ev.BytesIn)
-	}
 }
 
 // TestPreparedStatementTextRecovered checks the version-specific part: the
@@ -230,4 +227,29 @@ func TestUnsafeHashFallsBackToFullEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitCmd(t, l, func(ev CmdEvent) bool { return ev.Command == 3 && ev.Query == q })
+}
+
+// A committed InnoDB write waits for the redo log: commit wait is measured.
+func TestRedoWaitMeasured(t *testing.T) {
+	l, db := startLoader(t)
+	if !l.RedoTracking() {
+		t.Skip("log_write_up_to probes not attached for this mysqld")
+	}
+	for _, q := range []string{"CREATE DATABASE IF NOT EXISTS obs_t", "CREATE TABLE IF NOT EXISTS obs_t.r (id INT) ENGINE=InnoDB"} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		if _, err := db.Exec(fmt.Sprintf("INSERT INTO obs_t.r VALUES (%d)", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	drainUntil(t, l, func(es []AggEntry) bool {
+		var redo uint64
+		for _, e := range es {
+			redo += e.RedoWaitNs
+		}
+		return redo > 0
+	})
 }

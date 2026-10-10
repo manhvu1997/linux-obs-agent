@@ -22,7 +22,7 @@ var (
 	myWallDesc = prometheus.NewDesc("obs_agent_mysql_query_wall_seconds_total",
 		"Wall-clock seconds spent inside dispatch_command, by command class.", []string{"command"}, nil)
 	myBytesDesc = prometheus.NewDesc("obs_agent_mysql_query_bytes_total",
-		"Bytes received (statement) and sent (result) per command class.", []string{"command", "flow"}, nil)
+		"Result bytes sent to clients per command class (flow=\"out\").", []string{"command", "flow"}, nil)
 	myDigestCPUDesc = prometheus.NewDesc("obs_agent_mysql_digest_cpu_seconds_total",
 		"On-CPU seconds spent executing statements of this digest.", []string{"digest_id"}, nil)
 	myDigestCallsDesc = prometheus.NewDesc("obs_agent_mysql_digest_calls_total",
@@ -96,7 +96,6 @@ func (c *MySQLCollector) Collect(ch chan<- prometheus.Metric) {
 		emit(ch, myCPUDesc, prometheus.CounterValue, sec(q.CPUNs), cmd)
 		emit(ch, myRunqDesc, prometheus.CounterValue, sec(q.RunqNs), cmd)
 		emit(ch, myWallDesc, prometheus.CounterValue, sec(q.WallNs), cmd)
-		emit(ch, myBytesDesc, prometheus.CounterValue, float64(q.BytesIn), cmd, "in")
 		emit(ch, myBytesDesc, prometheus.CounterValue, float64(q.BytesOut), cmd, "out")
 	}
 	var exported []querystats.ExportedDigest

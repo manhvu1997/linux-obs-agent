@@ -158,10 +158,13 @@ func TestDigestRowsColumns(t *testing.T) {
 	body, _ := encodeRows(rows)
 	got := decodeRowsForTest(t, body)[0]
 	for _, col := range []string{"window_start", "window_end", "host", "pid", "digest_id", "command", "calls",
-		"cpu_ns", "runq_ns", "wall_ns", "wall_max_ns", "bytes_in", "bytes_out"} {
+		"cpu_ns", "runq_ns", "wall_ns", "wall_max_ns", "bytes_out"} {
 		if _, ok := got[col]; !ok {
 			t.Errorf("missing column %s in %v", col, got)
 		}
+	}
+	if _, ok := got["bytes_in"]; ok {
+		t.Errorf("bytes_in is no longer measured; rows must not carry it: %v", got)
 	}
 }
 

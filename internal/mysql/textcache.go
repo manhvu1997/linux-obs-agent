@@ -28,8 +28,9 @@ type textEntry struct {
 
 // aggSums are one kernel aggregation entry's sums.
 type aggSums struct {
-	PID                                                        uint32
-	Calls, WallNs, WallMaxNs, CPUNs, RunqNs, BytesIn, BytesOut uint64
+	PID                                                 uint32
+	Calls, WallNs, WallMaxNs, CPUNs, RunqNs, BytesOut   uint64
+	DiskReadBytes, DiskWriteBytes, IOWaitNs, RedoWaitNs uint64
 }
 
 // textCacheHooks call back into the kernel maps. They are never invoked with
@@ -194,7 +195,8 @@ func toDelta(e textEntry, s aggSums) querystats.Delta {
 	return querystats.Delta{
 		PID: s.PID, Command: e.class, Digest: e.digest, SampleQuery: e.sample, Truncated: e.truncated,
 		Calls: s.Calls, WallNs: s.WallNs, WallMaxNs: s.WallMaxNs, CPUNs: s.CPUNs,
-		RunqNs: s.RunqNs, BytesIn: s.BytesIn, BytesOut: s.BytesOut,
+		RunqNs: s.RunqNs, BytesOut: s.BytesOut,
+		DiskReadBytes: s.DiskReadBytes, DiskWriteBytes: s.DiskWriteBytes, IOWaitNs: s.IOWaitNs, RedoWaitNs: s.RedoWaitNs,
 	}
 }
 

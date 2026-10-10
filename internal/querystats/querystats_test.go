@@ -15,7 +15,7 @@ func ev(sql string, at time.Time, cpuMs, runqMs, wallMs float64, out uint64) Eve
 	ms := func(v float64) uint64 { return uint64(v * 1e6) }
 	return Event{
 		PID: 100, Command: "query", Digest: sqldigest.Normalize(sql), SampleQuery: sql,
-		CPUNs: ms(cpuMs), RunqNs: ms(runqMs), WallNs: ms(wallMs), BytesIn: uint64(len(sql)), BytesOut: out, At: at,
+		CPUNs: ms(cpuMs), RunqNs: ms(runqMs), WallNs: ms(wallMs), BytesOut: out, At: at,
 	}
 }
 
@@ -227,7 +227,7 @@ func TestStickyCounterMonotonic(t *testing.T) {
 	}
 	for _, p := range [][2]model.QueryCounters{{before.Counters, mid.Counters}, {mid.Counters, after.Counters}} {
 		x, y := p[0], p[1]
-		if y.Calls < x.Calls || y.CPUNs < x.CPUNs || y.RunqNs < x.RunqNs || y.WallNs < x.WallNs || y.BytesIn < x.BytesIn || y.BytesOut < x.BytesOut {
+		if y.Calls < x.Calls || y.CPUNs < x.CPUNs || y.RunqNs < x.RunqNs || y.WallNs < x.WallNs || y.BytesOut < x.BytesOut {
 			t.Fatalf("counters decreased: %+v -> %+v", x, y)
 		}
 	}

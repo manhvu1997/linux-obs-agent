@@ -27,14 +27,14 @@ func TestDecodeTextEvent(t *testing.T) {
 }
 
 // DrainAgg and the text/unsafe maps read the generated mirror types with
-// reflection-free fixed sizes; they must match the C structs (16, 64, 16).
+// reflection-free fixed sizes; they must match the C structs (16, 80, 16).
 func TestAggTypeSizesMatchGenerated(t *testing.T) {
 	for _, c := range []struct {
 		name      string
 		got, want int
 	}{
 		{"agg_key_t", binary.Size(MysqlQueryAggKeyT{}), 16},
-		{"agg_val_t", binary.Size(MysqlQueryAggValT{}), 64},
+		{"agg_val_t", binary.Size(MysqlQueryAggValT{}), 80},
 		{"text_key_t", binary.Size(MysqlQueryTextKeyT{}), 16},
 	} {
 		if c.got != c.want {
@@ -118,6 +118,19 @@ func TestDrainRows(t *testing.T) {
 		}
 		if got[1].PID != 7 || got[1].Command != 3 || got[1].Calls != 2 || got[1].CPUNs != 20 {
 			t.Fatalf("entry fields not mapped: %+v", got[1])
+		}
+	})
+	t.Run("every measurement is mapped", func(t *testing.T) {
+		val := MysqlQueryAggValT{Calls: 1, WallNs: 2, WallMaxNs: 3, CpuNs: 4, RunqNs: 5, BytesOut: 6,
+			DiskReadBytes: 7, DiskWriteBytes: 8, IoWaitNs: 9, RedoWaitNs: 10}
+		got, err := drainRows(func(yield func(MysqlQueryAggKeyT, MysqlQueryAggValT)) error {
+			yield(k(1), val)
+			return nil
+		}, func(MysqlQueryAggKeyT) error { return nil })
+		want := AggEntry{PID: 7, Command: 3, Hash: 1, Calls: 1, WallNs: 2, WallMaxNs: 3, CPUNs: 4, RunqNs: 5, BytesOut: 6,
+			DiskReadBytes: 7, DiskWriteBytes: 8, IOWaitNs: 9, RedoWaitNs: 10}
+		if err != nil || len(got) != 1 || got[0] != want {
+			t.Fatalf("got %+v, err %v; want %+v", got, err, want)
 		}
 	})
 	t.Run("failed delete is withheld and reported, the rest continue", func(t *testing.T) {

@@ -15,8 +15,7 @@
 // keyed by {tgid, command, text hash}; DrainAgg returns the sums. Statement
 // text is sent once per (command, hash) on TextEvents. CmdEvents carries only
 // commands that could not be aggregated (map full, or a hash marked unsafe).
-// COM_QUERY additionally feeds slow-query events (and the kernel's per-PID
-// stats map, which nothing in userspace reads any more).
+// COM_QUERY and COM_STMT_EXECUTE additionally feed slow-query events.
 // With emitAll == false only COM_QUERY is tracked and no per-command events
 // are emitted (legacy behaviour).
 //
@@ -30,6 +29,11 @@
 //
 // Result bytes come from optional kretprobes on tcp_sendmsg and
 // unix_stream_sendmsg; when either symbol is unavailable bytes_out stays 0.
+//
+// Disk bytes (ioac) and block-I/O wait (delay accounting) are per-thread
+// deltas inside dispatch_command; commit wait comes from optional uprobes on
+// InnoDB log_write_up_to. Accounting() and RedoTracking() say which of them
+// the running kernel and mysqld provide.
 //
 // # Lifecycle
 //
@@ -68,16 +72,18 @@ type Loader struct {
 	mysqldPath  string // absolute path to the mysqld binary
 	emitAll     bool
 
-	objs        MysqlQueryObjects
-	links       []link.Link
-	rd          *ringbuf.Reader
-	cmdRd       *ringbuf.Reader
-	textRd      *ringbuf.Reader
-	aggActive   uint32        // which agg map the kernel writes (mirrors agg_active)
-	userDropped atomic.Uint64 // CmdEvents channel full: commands lost
-	textDropped atomic.Uint64 // TextEvents channel full: re-requested, not lost
-	psTracking  atomic.Bool
-	literalSkip atomic.Bool
+	objs         MysqlQueryObjects
+	links        []link.Link
+	rd           *ringbuf.Reader
+	cmdRd        *ringbuf.Reader
+	textRd       *ringbuf.Reader
+	aggActive    uint32        // which agg map the kernel writes (mirrors agg_active)
+	userDropped  atomic.Uint64 // CmdEvents channel full: commands lost
+	textDropped  atomic.Uint64 // TextEvents channel full: re-requested, not lost
+	psTracking   atomic.Bool
+	redoTracking atomic.Bool
+	literalSkip  atomic.Bool
+	acct         Accounting // set in Start before any probe runs, read-only afterwards
 
 	// SlowEvents receives slow-query outlier events (latency > threshold).
 	// Buffered to 256 so the consume goroutine never blocks the ringbuf reader.
@@ -99,13 +105,13 @@ type Loader struct {
 
 // CmdEvent is one MySQL command measured in the kernel.
 type CmdEvent struct {
-	PID, TID, Command, QueryLen uint32
-	WallNs, CPUNs, RunqNs       uint64
-	BytesIn, BytesOut           uint64
-	Comm, Query                 string
+	PID, TID, Command, QueryLen                         uint32
+	WallNs, CPUNs, RunqNs, BytesOut                     uint64
+	DiskReadBytes, DiskWriteBytes, IOWaitNs, RedoWaitNs uint64
+	Comm, Query                                         string
 }
 
-const cmdEventSize = 584 // sizeof(struct mysql_cmd_event_t)
+const cmdEventSize = 608 // sizeof(struct mysql_cmd_event_t)
 
 // decodeCmdEvent reads struct mysql_cmd_event_t by fixed offsets. At up to
 // 20k events/s, reflection-based binary.Read would cost several percent of
@@ -117,12 +123,29 @@ func decodeCmdEvent(b []byte) (CmdEvent, bool) {
 	le := binary.LittleEndian
 	return CmdEvent{
 		PID: le.Uint32(b[0:]), TID: le.Uint32(b[4:]), Command: le.Uint32(b[8:]), QueryLen: le.Uint32(b[12:]),
-		WallNs: le.Uint64(b[16:]), CPUNs: le.Uint64(b[24:]), RunqNs: le.Uint64(b[32:]),
-		BytesIn: le.Uint64(b[40:]), BytesOut: le.Uint64(b[48:]),
-		Comm:  nullTermU8(b[56:72]),
-		Query: nullTermU8(b[72:cmdEventSize]),
+		WallNs: le.Uint64(b[16:]), CPUNs: le.Uint64(b[24:]), RunqNs: le.Uint64(b[32:]), BytesOut: le.Uint64(b[40:]),
+		DiskReadBytes: le.Uint64(b[48:]), DiskWriteBytes: le.Uint64(b[56:]), IOWaitNs: le.Uint64(b[64:]), RedoWaitNs: le.Uint64(b[72:]),
+		Comm:  nullTermU8(b[80:96]),
+		Query: nullTermU8(b[96:cmdEventSize]),
 	}, true
 }
+
+// Accounting says which per-statement signals the running kernel provides.
+type Accounting struct {
+	DiskBytes  bool // task_struct.ioac.read_bytes/write_bytes (CONFIG_TASK_IO_ACCOUNTING)
+	BlkioDelay bool // task_struct.delays (CONFIG_TASK_DELAY_ACCT); also needs delay accounting switched on
+	Redo       bool // log_write_up_to uprobes attached
+}
+
+// Accounting is valid after Start.
+func (l *Loader) Accounting() Accounting {
+	a := l.acct
+	a.Redo = l.redoTracking.Load()
+	return a
+}
+
+// RedoTracking reports whether commit wait (log_write_up_to) is measured.
+func (l *Loader) RedoTracking() bool { return l.redoTracking.Load() }
 
 // PreparedTextTracking reports whether the prepared-statement text uprobes
 // are attached, i.e. COM_STMT_EXECUTE events carry recovered SQL text unless
@@ -271,6 +294,9 @@ func (l *Loader) Start(ctx context.Context) error {
 	}
 	l.textRd = textRd
 
+	ioac, delays := kernelTaskFields()
+	l.acct = Accounting{DiskBytes: ioac, BlkioDelay: delays}
+
 	// Open the mysqld executable for uprobe attachment.
 	// link.OpenExecutable resolves the binary's build-ID from the ELF headers,
 	// which is required by the kernel to attach uprobes reliably.
@@ -312,7 +338,22 @@ func (l *Loader) Start(ctx context.Context) error {
 		slog.Info("mysql_query: prepared-statement text tracking enabled",
 			"prepare", hooks.Prepare, "execute_loop", hooks.ExecuteLoop, "layout", hooks.PrepareLayout)
 	}
-	hooks.PreparedErr = psErr // the summary reports what is attached, not what resolved
+
+	// Commit wait. Optional, and only meaningful when commands are aggregated.
+	if l.emitAll {
+		if err := hooks.RedoErr; err != nil {
+			slog.Warn("mysql_query: commit wait unavailable (no log_write_up_to symbol)", "mysqld_path", l.mysqldPath, "err", err)
+		} else if err := l.attachRedo(exe, hooks.Redo); err != nil {
+			slog.Warn("mysql_query: commit wait unavailable", "symbol", hooks.Redo, "err", err)
+			hooks.RedoErr = err
+		} else {
+			l.redoTracking.Store(true)
+		}
+	} else {
+		hooks.RedoErr = errors.New("not attached: emit_all_queries is off")
+	}
+	// The summary reports what is attached, not what resolved.
+	hooks.PreparedErr = psErr
 	slog.Info("mysql_query: mysqld hooks: "+hooks.Summary(), "mysqld_path", l.mysqldPath)
 
 	// Result bytes per command. Optional: without them bytes_out stays 0.
@@ -337,6 +378,9 @@ func (l *Loader) Start(ctx context.Context) error {
 		"symbol", symbol,
 		"emit_all", l.emitAll,
 		"literal_skip", skip,
+		"disk_bytes", l.acct.DiskBytes,
+		"blkio_delay", l.acct.BlkioDelay,
+		"commit_wait", l.redoTracking.Load(),
 		"hooks", "uprobe+uretprobe/dispatch_command")
 	// The readers are passed by value: cleanup() nils the fields.
 	go l.consume(ctx, rd)
@@ -380,6 +424,7 @@ func (l *Loader) Stop() {
 
 func (l *Loader) cleanup() {
 	l.psTracking.Store(false)
+	l.redoTracking.Store(false)
 	for _, lnk := range l.links {
 		lnk.Close()
 	}
@@ -412,6 +457,22 @@ func (l *Loader) attachPrepared(exe *link.Executable, h mysqldsym.Hooks) error {
 		return fmt.Errorf("attaching uprobe %s: %w", h.ExecuteLoop, err)
 	}
 	l.links = append(l.links, prep, run)
+	return nil
+}
+
+// attachRedo attaches both log_write_up_to probes, or neither: an entry
+// without its return would leave frames open.
+func (l *Loader) attachRedo(exe *link.Executable, sym string) error {
+	up, err := exe.Uprobe(sym, l.objs.UprobeLogWriteUpTo, nil)
+	if err != nil {
+		return fmt.Errorf("attaching uprobe %s: %w", sym, err)
+	}
+	ret, err := exe.Uretprobe(sym, l.objs.UretprobeLogWriteUpTo, nil)
+	if err != nil {
+		up.Close()
+		return fmt.Errorf("attaching uretprobe %s: %w", sym, err)
+	}
+	l.links = append(l.links, up, ret)
 	return nil
 }
 

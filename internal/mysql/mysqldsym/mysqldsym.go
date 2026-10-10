@@ -96,7 +96,11 @@ func (h Hooks) Summary() string {
 	if h.PreparedErr == nil {
 		exec = "ok"
 	}
-	return fmt.Sprintf("dispatch=ok prepare=%s execute_loop=%s", h.PrepareLayout, exec)
+	redo := "unavailable"
+	if h.RedoErr == nil {
+		redo = "ok"
+	}
+	return fmt.Sprintf("dispatch=ok prepare=%s execute_loop=%s redo=%s", h.PrepareLayout, exec, redo)
 }
 
 func resolvePrepared(symbols []string) (prepare string, layout PrepareLayout, exec string, err error) {

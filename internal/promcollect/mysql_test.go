@@ -15,7 +15,7 @@ import (
 
 func snap(text string) *querystats.Snapshot {
 	return &querystats.Snapshot{
-		Commands: map[string]model.QueryCounters{"query": {Calls: 2, CPUNs: 1_500_000_000, RunqNs: 500_000_000, WallNs: 3_000_000_000, BytesIn: 100, BytesOut: 9000}},
+		Commands: map[string]model.QueryCounters{"query": {Calls: 2, CPUNs: 1_500_000_000, RunqNs: 500_000_000, WallNs: 3_000_000_000, BytesOut: 9000}},
 		Exported: []querystats.ExportedDigest{{ID: "aaa", Text: text, Counters: model.QueryCounters{Calls: 2, CPUNs: 1_500_000_000, BytesOut: 9000}}},
 	}
 }
@@ -33,6 +33,15 @@ obs_agent_mysql_events_dropped_total 7
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want),
 		"obs_agent_mysql_digest_cpu_seconds_total", "obs_agent_mysql_events_dropped_total"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Result bytes are only sent bytes: no flow="in" series (bytes_in is gone).
+func TestMySQLQueryBytesOutOnly(t *testing.T) {
+	c := NewMySQLCollector(func() *querystats.Snapshot { return snap("select * from t") }, MySQLHealth{}, config.DigestsFull, 20)
+	flows := gatherOne(t, c, "obs_agent_mysql_query_bytes_total", "flow")
+	if len(flows) != 1 || flows[0] != "out" {
+		t.Fatalf("obs_agent_mysql_query_bytes_total flows = %v, want [out]", flows)
 	}
 }
 

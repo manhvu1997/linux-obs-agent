@@ -12,7 +12,7 @@ func dEv(pid uint32, id string, cpu uint64) Event {
 	return Event{
 		PID: pid, Command: "query",
 		Digest: sqldigest.Digest{ID: id, Text: "select " + id, Normalized: true},
-		CPUNs:  cpu, WallNs: 2 * cpu, RunqNs: cpu / 2, BytesIn: 10, BytesOut: 100,
+		CPUNs:  cpu, WallNs: 2 * cpu, RunqNs: cpu / 2, BytesOut: 100,
 		At: time.Unix(1_800_000_000, 0),
 	}
 }

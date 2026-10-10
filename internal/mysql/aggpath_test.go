@@ -20,10 +20,36 @@ func TestAggEntriesBecomeDigests(t *testing.T) {
 	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
 	a.learnText(mysqlq.TextEvent{Command: 3, Hash: 99, Query: "SELECT * FROM t WHERE id = 5", QueryLen: 28}, true, false)
 	now := time.Unix(1_800_000_000, 0)
-	a.applyAgg([]mysqlq.AggEntry{{PID: 1, Command: 3, Hash: 99, Calls: 40, CPUNs: 40e6, WallNs: 80e6, WallMaxNs: 3e6, CPUMaxNs: 2e6}}, now, true)
+	a.applyAgg([]mysqlq.AggEntry{{PID: 1, Command: 3, Hash: 99, Calls: 40, CPUNs: 40e6, WallNs: 80e6, WallMaxNs: 3e6}}, now, true)
 	s := a.agg.Snapshot(now.Add(time.Second))
 	if len(s.TopByCPU) != 1 || s.TopByCPU[0].Calls != 40 || s.TopByCPU[0].DigestText != "select * from t where id = ?" {
 		t.Fatalf("got %+v", s.TopByCPU)
+	}
+}
+
+// Disk bytes and waits of an aggregated entry reach the command counters.
+func TestAggEntryCarriesDiskAndWaits(t *testing.T) {
+	a := testAnalyzer()
+	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
+	a.learnText(mysqlq.TextEvent{Command: 3, Hash: 99, Query: "SELECT * FROM t WHERE id = 5", QueryLen: 28}, true, false)
+	now := time.Unix(1_800_000_000, 0)
+	a.applyAgg([]mysqlq.AggEntry{{PID: 1, Command: 3, Hash: 99, Calls: 4, CPUNs: 4e6, WallNs: 20e6, WallMaxNs: 6e6,
+		DiskReadBytes: 16384, DiskWriteBytes: 512, IOWaitNs: 5e6, RedoWaitNs: 1e6}}, now, true)
+	c := a.agg.Snapshot(now.Add(time.Second)).Commands["query"]
+	if c.DiskReadBytes != 16384 || c.DiskWriteBytes != 512 || c.IOWaitNs != 5e6 || c.RedoWaitNs != 1e6 {
+		t.Fatalf("command counters = %+v", c)
+	}
+}
+
+// The fallback (full event) path carries them too.
+func TestCmdEventCarriesDiskAndWaits(t *testing.T) {
+	a := testAnalyzer()
+	now := time.Unix(1_800_000_000, 0)
+	a.agg.Add(a.toEvent(mysqlq.CmdEvent{PID: 1, Command: 3, Query: "SELECT 1", QueryLen: 8, WallNs: 9e6, CPUNs: 1e6,
+		DiskReadBytes: 32768, DiskWriteBytes: 7, IOWaitNs: 4e6, RedoWaitNs: 2e6}, now, true))
+	c := a.agg.Snapshot(now.Add(time.Second)).Commands["query"]
+	if c.DiskReadBytes != 32768 || c.DiskWriteBytes != 7 || c.IOWaitNs != 4e6 || c.RedoWaitNs != 2e6 {
+		t.Fatalf("command counters = %+v", c)
 	}
 }
 
@@ -120,9 +146,9 @@ func TestLostTextPlaceholdersPerCommand(t *testing.T) {
 	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
 	now := time.Unix(1_800_000_000, 0)
 	lost := []mysqlq.AggEntry{
-		{PID: 1, Command: 3, Hash: 101, Calls: 1, CPUNs: 3e6, CPUMaxNs: 3e6, WallNs: 3e6, WallMaxNs: 3e6},
-		{PID: 1, Command: 22, Hash: 102, Calls: 1, CPUNs: 2e6, CPUMaxNs: 2e6, WallNs: 2e6, WallMaxNs: 2e6},
-		{PID: 1, Command: 23, Hash: 103, Calls: 1, CPUNs: 1e6, CPUMaxNs: 1e6, WallNs: 1e6, WallMaxNs: 1e6},
+		{PID: 1, Command: 3, Hash: 101, Calls: 1, CPUNs: 3e6, WallNs: 3e6, WallMaxNs: 3e6},
+		{PID: 1, Command: 22, Hash: 102, Calls: 1, CPUNs: 2e6, WallNs: 2e6, WallMaxNs: 2e6},
+		{PID: 1, Command: 23, Hash: 103, Calls: 1, CPUNs: 1e6, WallNs: 1e6, WallMaxNs: 1e6},
 	}
 	a.applyAgg(lost, now, true) // parked
 	a.applyAgg(nil, now, true)  // still unknown a tick later: placeholders

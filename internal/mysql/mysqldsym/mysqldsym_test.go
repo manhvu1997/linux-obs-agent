@@ -174,11 +174,11 @@ func TestRedo(t *testing.T) {
 
 func TestSummary(t *testing.T) {
 	h, _ := Resolve([]string{dispatch, prepTHD, execTHD, redo80})
-	if got := h.Summary(); got != "dispatch=ok prepare=thd_first execute_loop=ok" {
+	if got := h.Summary(); got != "dispatch=ok prepare=thd_first execute_loop=ok redo=ok" {
 		t.Errorf("Summary() = %q", got)
 	}
 	h, _ = Resolve([]string{dispatch})
-	if got := h.Summary(); got != "dispatch=ok prepare=unavailable execute_loop=unavailable" {
+	if got := h.Summary(); got != "dispatch=ok prepare=unavailable execute_loop=unavailable redo=unavailable" {
 		t.Errorf("Summary() = %q", got)
 	}
 }

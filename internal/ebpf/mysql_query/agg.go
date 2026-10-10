@@ -14,16 +14,18 @@ import (
 // AggEntry is one kernel aggregation entry: the sums of every command with
 // the same {tgid, command, text hash} since the previous DrainAgg.
 type AggEntry struct {
-	PID, Command uint32
-	Hash         uint64
-	Calls        uint64
-	WallNs       uint64
-	WallMaxNs    uint64
-	CPUNs        uint64
-	CPUMaxNs     uint64
-	RunqNs       uint64
-	BytesIn      uint64
-	BytesOut     uint64
+	PID, Command   uint32
+	Hash           uint64
+	Calls          uint64
+	WallNs         uint64
+	WallMaxNs      uint64
+	CPUNs          uint64
+	RunqNs         uint64
+	BytesOut       uint64
+	DiskReadBytes  uint64 // storage bytes read by the thread (ioac.read_bytes delta)
+	DiskWriteBytes uint64 // bytes dirtied / written directly (ioac.write_bytes delta)
+	IOWaitNs       uint64 // synchronous block-I/O wait (delays->blkio_delay delta)
+	RedoWaitNs     uint64 // commit wait in log_write_up_to beyond CPU, run queue and block I/O
 }
 
 // TextEvent carries a statement text: on the first sight of its (command,
@@ -110,8 +112,8 @@ func drainRows(
 	if err := iterate(func(k MysqlQueryAggKeyT, v MysqlQueryAggValT) {
 		rows = append(rows, row{k, AggEntry{
 			PID: k.Tgid, Command: k.Command, Hash: k.Hash,
-			Calls: v.Calls, WallNs: v.WallNs, WallMaxNs: v.WallMaxNs, CPUNs: v.CpuNs, CPUMaxNs: v.CpuMaxNs,
-			RunqNs: v.RunqNs, BytesIn: v.BytesIn, BytesOut: v.BytesOut,
+			Calls: v.Calls, WallNs: v.WallNs, WallMaxNs: v.WallMaxNs, CPUNs: v.CpuNs, RunqNs: v.RunqNs, BytesOut: v.BytesOut,
+			DiskReadBytes: v.DiskReadBytes, DiskWriteBytes: v.DiskWriteBytes, IOWaitNs: v.IoWaitNs, RedoWaitNs: v.RedoWaitNs,
 		}})
 	}); err != nil {
 		return nil, fmt.Errorf("mysql_query: iterating agg map: %w", err)

@@ -214,7 +214,8 @@ func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time, preparedTracking b
 	return querystats.Event{
 		PID: ev.PID, Command: e.class, Digest: e.digest, SampleQuery: e.sample, Truncated: e.truncated,
 		WallNs: ev.WallNs, CPUNs: ev.CPUNs, RunqNs: ev.RunqNs,
-		BytesIn: ev.BytesIn, BytesOut: ev.BytesOut, At: now,
+		BytesOut: ev.BytesOut, DiskReadBytes: ev.DiskReadBytes, DiskWriteBytes: ev.DiskWriteBytes,
+		IOWaitNs: ev.IOWaitNs, RedoWaitNs: ev.RedoWaitNs, At: now,
 	}
 }
 
@@ -285,7 +286,8 @@ func (a *Analyzer) applyAgg(entries []mysqlq.AggEntry, now time.Time, preparedTr
 	for _, en := range entries {
 		d, ok := a.text.resolve(textKey{en.Command, en.Hash}, aggSums{
 			PID: en.PID, Calls: en.Calls, WallNs: en.WallNs, WallMaxNs: en.WallMaxNs, CPUNs: en.CPUNs,
-			RunqNs: en.RunqNs, BytesIn: en.BytesIn, BytesOut: en.BytesOut,
+			RunqNs: en.RunqNs, BytesOut: en.BytesOut,
+			DiskReadBytes: en.DiskReadBytes, DiskWriteBytes: en.DiskWriteBytes, IOWaitNs: en.IOWaitNs, RedoWaitNs: en.RedoWaitNs,
 		}, byCommand)
 		if ok {
 			deltas = append(deltas, d)

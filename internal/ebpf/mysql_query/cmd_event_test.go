@@ -25,8 +25,11 @@ func TestDecodeCmdEventRoundTrip(t *testing.T) {
 	raw.WallNs = 0x1111111111111111
 	raw.CpuNs = 0x2222222222222222
 	raw.RunqNs = 0x3333333333333333
-	raw.BytesIn = 0x4444444444444444
 	raw.BytesOut = 0x5555555555555555
+	raw.DiskReadBytes = 0x6666666666666666
+	raw.DiskWriteBytes = 0x7777777777777777
+	raw.IoWaitNs = 0x8888888888888888
+	raw.RedoWaitNs = 0x9999999999999999
 	copy(raw.Comm[:], "mysqld-worker")
 	const q = "SELECT REPEAT('a', 100000) AS big"
 	copy(raw.Query[:], q)
@@ -43,8 +46,8 @@ func TestDecodeCmdEventRoundTrip(t *testing.T) {
 	}
 	want := CmdEvent{
 		PID: raw.Pid, TID: raw.Tid, Command: raw.Command, QueryLen: raw.QueryLen,
-		WallNs: raw.WallNs, CPUNs: raw.CpuNs, RunqNs: raw.RunqNs,
-		BytesIn: raw.BytesIn, BytesOut: raw.BytesOut,
+		WallNs: raw.WallNs, CPUNs: raw.CpuNs, RunqNs: raw.RunqNs, BytesOut: raw.BytesOut,
+		DiskReadBytes: raw.DiskReadBytes, DiskWriteBytes: raw.DiskWriteBytes, IOWaitNs: raw.IoWaitNs, RedoWaitNs: raw.RedoWaitNs,
 		Comm: "mysqld-worker", Query: q,
 	}
 	if ev != want {

@@ -30,7 +30,7 @@ func TestTickBuildsReport(t *testing.T) {
 	h := sqlhash.KernelHash([]byte(q))
 	a.learnText(mysqlq.TextEvent{Command: cmdmap.ComQuery, Hash: h, Query: q, QueryLen: uint32(len(q))}, true, true)
 	now := time.Unix(1_800_000_000, 0)
-	a.tick(now, []mysqlq.AggEntry{{PID: 42, Command: cmdmap.ComQuery, Hash: h, Calls: 100, CPUNs: 12e9, CPUMaxNs: 2e8, WallNs: 15e9, WallMaxNs: 3e8}}, true)
+	a.tick(now, []mysqlq.AggEntry{{PID: 42, Command: cmdmap.ComQuery, Hash: h, Calls: 100, CPUNs: 12e9, WallNs: 15e9, WallMaxNs: 3e8}}, true)
 
 	r := a.Latest()
 	if r == nil || r.Node == nil || r.Node.NumCPU != 8 || r.Node.CPUUsedPercent != 90 {

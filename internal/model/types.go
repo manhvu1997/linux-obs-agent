@@ -1028,12 +1028,15 @@ type InspectReport struct {
 
 // QueryCounters are cumulative totals for one digest or one command class.
 type QueryCounters struct {
-	Calls    uint64 `json:"calls"`
-	CPUNs    uint64 `json:"cpu_ns"`
-	RunqNs   uint64 `json:"runq_ns"`
-	WallNs   uint64 `json:"wall_ns"`
-	BytesIn  uint64 `json:"bytes_in"`
-	BytesOut uint64 `json:"bytes_out"`
+	Calls          uint64 `json:"calls"`
+	CPUNs          uint64 `json:"cpu_ns"`
+	RunqNs         uint64 `json:"runq_ns"`
+	WallNs         uint64 `json:"wall_ns"`
+	BytesOut       uint64 `json:"bytes_out"`
+	DiskReadBytes  uint64 `json:"disk_read_bytes"`
+	DiskWriteBytes uint64 `json:"disk_write_bytes"`
+	IOWaitNs       uint64 `json:"io_wait_ns"`
+	RedoWaitNs     uint64 `json:"redo_wait_ns"`
 }
 
 // QueryDigestStats is one digest's aggregate over the report window.

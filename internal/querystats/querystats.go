@@ -1,7 +1,7 @@
 // internal/querystats/querystats.go
 
 // Package querystats aggregates per-statement measurements (CPU time,
-// run-queue wait, wall time, bytes) by normalised digest over a rolling
+// run-queue wait, wall time, disk bytes and waits, bytes sent) by normalised digest over a rolling
 // window and labels each digest as a CPU culprit or a cascade victim.
 //
 // Database-agnostic: the MySQL analyzer is the first producer of Events.
@@ -39,9 +39,16 @@ type Event struct {
 	WallNs      uint64
 	CPUNs       uint64
 	RunqNs      uint64
-	BytesIn     uint64
 	BytesOut    uint64
-	At          time.Time
+	// DiskReadBytes / DiskWriteBytes: storage bytes the thread read / wrote
+	// (dirtied) during the call; IOWaitNs: synchronous block-I/O wait;
+	// RedoWaitNs: commit wait. 0 when the kernel or mysqld does not provide
+	// them (the producer reports availability separately).
+	DiskReadBytes  uint64
+	DiskWriteBytes uint64
+	IOWaitNs       uint64
+	RedoWaitNs     uint64
+	At             time.Time
 }
 
 // Config tunes the aggregator. Zero values take the documented defaults.
@@ -143,7 +150,9 @@ type acc struct {
 	command, text, sample  string
 	normalized, truncated  bool
 	calls, cpu, runq, wall uint64
-	wallMax, in, out       uint64
+	wallMax, out           uint64
+	diskRead, diskWrite    uint64
+	ioWait, redoWait       uint64
 }
 
 func (x *acc) add(d Delta) {
@@ -151,8 +160,11 @@ func (x *acc) add(d Delta) {
 	x.cpu += d.CPUNs
 	x.runq += d.RunqNs
 	x.wall += d.WallNs
-	x.in += d.BytesIn
 	x.out += d.BytesOut
+	x.diskRead += d.DiskReadBytes
+	x.diskWrite += d.DiskWriteBytes
+	x.ioWait += d.IOWaitNs
+	x.redoWait += d.RedoWaitNs
 	x.wallMax = max(x.wallMax, d.WallMaxNs)
 	x.truncated = x.truncated || d.Truncated
 	if x.sample == "" {
@@ -165,8 +177,11 @@ func (x *acc) merge(y *acc) {
 	x.cpu += y.cpu
 	x.runq += y.runq
 	x.wall += y.wall
-	x.in += y.in
 	x.out += y.out
+	x.diskRead += y.diskRead
+	x.diskWrite += y.diskWrite
+	x.ioWait += y.ioWait
+	x.redoWait += y.redoWait
 	x.wallMax = max(x.wallMax, y.wallMax)
 	x.truncated = x.truncated || y.truncated
 	if x.sample == "" {
@@ -222,8 +237,11 @@ func addCounters(c *model.QueryCounters, d Delta) {
 	c.CPUNs += d.CPUNs
 	c.RunqNs += d.RunqNs
 	c.WallNs += d.WallNs
-	c.BytesIn += d.BytesIn
 	c.BytesOut += d.BytesOut
+	c.DiskReadBytes += d.DiskReadBytes
+	c.DiskWriteBytes += d.DiskWriteBytes
+	c.IOWaitNs += d.IOWaitNs
+	c.RedoWaitNs += d.RedoWaitNs
 }
 
 // Add records one call; equivalent to AddDeltas with DeltaFromEvent(e).
