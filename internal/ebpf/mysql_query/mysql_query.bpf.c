@@ -924,9 +924,9 @@ int uretprobe_dispatch_command(struct pt_regs *ctx)
                 bpf_ringbuf_submit(ev, 0);
             } else {
                 __u32 zero = 0;
-                __u64 *d = bpf_map_lookup_elem(&dropped, &zero);
-                if (d)
-                    *d += 1; /* per-CPU slot: no atomic needed */
+                __u64 *drop = bpf_map_lookup_elem(&dropped, &zero);
+                if (drop)
+                    *drop += 1; /* per-CPU slot: no atomic needed */
             }
         }
     }
