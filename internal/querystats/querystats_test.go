@@ -271,10 +271,15 @@ func TestVictimDigestsCountedBeyondTopN(t *testing.T) {
 	}
 }
 
-// A digest that reads the disk but burns little CPU is still exported.
+// A digest that reads the disk but burns little CPU is still exported via stickyDisk.
+// TopN=1 ensures only the high-CPU query is in byCPU; high BytesOut on CPU query
+// ensures neither is in stickyOut; only disk query is in stickyDisk.
 func TestDiskReadDigestIsSticky(t *testing.T) {
-	a := New(cfg())
+	c := cfg()
+	c.TopN = 1
+	a := New(c)
 	cpu := digestDelta(1, "SELECT a FROM t", 10, 9e9)
+	cpu.BytesOut = 1000 // high result size; won't help disk query win stickyOut
 	disk := digestDelta(1, "SELECT * FROM big", 10, 1e6)
 	disk.DiskReadBytes = 500 << 20
 	a.AddDeltas([]Delta{cpu, disk}, t0)
@@ -283,11 +288,78 @@ func TestDiskReadDigestIsSticky(t *testing.T) {
 	a.AddHost(h, t0)
 	s := a.Snapshot(t0)
 	if !exported(s, disk.Digest.ID) {
-		t.Fatal("top disk-read digest missing from the export set")
+		t.Fatal("top disk-read digest missing from the export set (stickyDisk)")
 	}
 	for _, e := range s.Exported {
 		if e.ID == disk.Digest.ID && e.Counters.DiskReadBytes != 500<<20 {
 			t.Fatalf("lifetime disk read = %d", e.Counters.DiskReadBytes)
 		}
 	}
+}
+
+// markSticky seeds disk/io/redo counters from window stats when a digest
+// re-enters the sticky set. Without seeding, these counters start at zero and
+// never increase.
+func TestMarkStickyDiskSeeding(t *testing.T) {
+	c := cfg()
+	c.StickyTTL = time.Hour
+	a := New(c)
+	disk := digestDelta(1, "SELECT * FROM big", 10, 1e6)
+	disk.DiskReadBytes = 500 << 20
+	disk.IOWaitNs = 100e6
+	disk.RedoWaitNs = 50e6
+
+	// First snapshot: disk digest is in the window and gets marked sticky.
+	a.AddDeltas([]Delta{disk}, t0)
+	h := okHost(30e9, 40e9, 4e9)
+	h.DiskOK, h.DiskReadBytes = true, 600<<20
+	a.AddHost(h, t0)
+	s1 := a.Snapshot(t0)
+	if !exported(s1, disk.Digest.ID) {
+		t.Fatal("disk digest not exported initially")
+	}
+
+	// Second snapshot: disk digest is outside the window, but stays sticky.
+	s2 := a.Snapshot(t0.Add(61 * time.Second))
+	if !exported(s2, disk.Digest.ID) {
+		t.Fatal("disk digest should stay sticky after leaving window")
+	}
+
+	// Third snapshot: disk digest re-enters the window with new data.
+	// markSticky seeds its counters from the window, so the lifetime counters increase.
+	disk2 := digestDelta(1, "SELECT * FROM big", 5, 2e6)
+	disk2.DiskReadBytes = 200 << 20
+	disk2.IOWaitNs = 50e6
+	disk2.RedoWaitNs = 30e6
+	a.AddDeltas([]Delta{disk2}, t0.Add(62*time.Second))
+	h2 := okHost(30e9, 40e9, 4e9)
+	h2.DiskOK, h2.DiskReadBytes = true, 600<<20
+	a.AddHost(h2, t0.Add(62*time.Second))
+	s3 := a.Snapshot(t0.Add(62 * time.Second))
+
+	for _, e := range s3.Exported {
+		if e.ID == disk.Digest.ID {
+			// Lifetime Calls: 10 (initial) + 5 (re-entry) = 15
+			if e.Counters.Calls != 15 {
+				t.Fatalf("calls: got %d, want 15", e.Counters.Calls)
+			}
+			// Lifetime DiskReadBytes must include both the seeded value (500 MB)
+			// from the first snapshot and the new value (200 MB) from re-entry.
+			// With seeding: 500<<20 + 200<<20; without: 0 + 200<<20.
+			expected := (500 + 200) << 20
+			if e.Counters.DiskReadBytes != uint64(expected) {
+				t.Fatalf("disk read: got %d, want %d (suggests no seeding)",
+					e.Counters.DiskReadBytes, expected)
+			}
+			// Same logic for io/redo: initial (100e6 + 50e6) + re-entry (50e6 + 30e6)
+			if e.Counters.IOWaitNs != 150e6 {
+				t.Fatalf("io wait: got %d, want 150e6", e.Counters.IOWaitNs)
+			}
+			if e.Counters.RedoWaitNs != 80e6 {
+				t.Fatalf("redo wait: got %d, want 80e6", e.Counters.RedoWaitNs)
+			}
+			return
+		}
+	}
+	t.Fatal("disk digest not found in exported")
 }

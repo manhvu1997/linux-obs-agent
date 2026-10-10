@@ -13,8 +13,8 @@ type HostWindow struct {
 	NodeOK         bool // every poll had a valid /proc/stat delta
 	MysqldOK       bool // no poll lacked a mysqld baseline
 	DiskOK         bool // every poll had a valid /proc/diskstats delta
-	IOWaitOK       bool // every poll measured block-I/O wait
-	RedoWaitOK     bool // every poll measured commit wait
+	IOWaitOK       bool // no poll reported a reason it was unavailable
+	RedoWaitOK     bool // no poll reported a reason it was unavailable
 }
 
 // hostDrain accumulates HostDelta between drains; nil until EnableHostDrain.

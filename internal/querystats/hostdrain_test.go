@@ -37,3 +37,20 @@ func TestDrainHostAvailabilityIsAllPolls(t *testing.T) {
 		t.Fatalf("window = %+v: one bad poll must clear the matching flags", w)
 	}
 }
+
+// RedoWaitReason on one poll clears RedoWaitOK while leaving other flags true.
+func TestDrainHostRedoWaitReasonOnly(t *testing.T) {
+	a := New(cfg())
+	a.EnableHostDrain()
+	good := okHost(1, 2, 1)
+	good.DiskOK, good.DiskReadBytes = true, 100
+	redo := okHost(1, 2, 1)
+	redo.DiskOK, redo.DiskReadBytes = true, 100
+	redo.RedoWaitReason = "uprobe_attach_failed"
+	a.AddHost(good, t0)
+	a.AddHost(redo, t0.Add(time.Second))
+	w := a.DrainHost()
+	if !w.NodeOK || !w.MysqldOK || !w.DiskOK || !w.IOWaitOK || w.RedoWaitOK {
+		t.Fatalf("window = %+v: only RedoWaitOK should be false", w)
+	}
+}
