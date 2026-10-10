@@ -997,7 +997,8 @@ type MySQLAnalysis struct {
 	// total wait (absent when the kernel lacks scheduler stats).
 	TopDigestsByWait []QueryDigestStats `json:"top_digests_by_wait,omitempty"`
 	// Victims counts digests per victim_of kind (e.g. "cpu") over ALL digests
-	// in the window, not only those listed in top_digests.
+	// in the window, not only those listed in top_digests. "cpu" is present
+	// (0 included) when accounting.cpu_wait is "ok", absent when unavailable.
 	Victims map[string]int `json:"victims,omitempty"`
 	// Accounting reports which time sources are available: key "cpu_wait" →
 	// "ok" | "run_delay_unavailable" (no run-queue time; cpu_wait and

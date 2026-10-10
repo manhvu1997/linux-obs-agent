@@ -128,6 +128,7 @@ type Snapshot struct {
 	TopByWait               []model.QueryDigestStats
 	// Victims counts digests per victim_of kind over ALL digests in the
 	// window: victims burn little CPU, so most never reach TopByCPU.
+	// VictimCPU is present (0 included) when run-queue accounting is ok.
 	Victims map[string]int
 	// Accounting: AccountingKeyCPUWait → AccountingOK | AccountingNoRunDelay.
 	Accounting map[string]string
@@ -353,6 +354,11 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 
 	stats := make([]model.QueryDigestStats, 0, len(merged))
 	victims := make(map[string]int)
+	if acct == AccountingOK {
+		// A real zero: cpu waits are measured, so "no cpu victims" is known
+		// (and survives omitempty). Unavailable accounting leaves the key out.
+		victims[VictimCPU] = 0
+	}
 	for k, x := range merged {
 		s := toStats(k, x)
 		a.addNewStats(&s, k, x, acct, nd)

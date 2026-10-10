@@ -155,3 +155,27 @@ func TestThresholdsEchoed(t *testing.T) {
 		t.Fatalf("thresholds = %+v", th)
 	}
 }
+
+func TestVictimsZeroWhenAccountingOK(t *testing.T) {
+	a := New(cfg())
+	// 50 ms average, but waited only 20 %: no victim.
+	a.AddDeltas([]Delta{{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT v FROM t", 1, 1).Digest,
+		Calls: 10, CPUNs: 400e6, RunqNs: 100e6, WallNs: 500e6, WallMaxNs: 60e6}}, t0)
+	s := a.Snapshot(t0)
+	if s.Accounting[AccountingKeyCPUWait] != AccountingOK {
+		t.Fatalf("accounting %v", s.Accounting)
+	}
+	if n, ok := s.Victims[VictimCPU]; !ok || n != 0 {
+		t.Fatalf("victims = %v, want cpu: 0 present (a real zero, not unknown)", s.Victims)
+	}
+}
+
+func TestVictimsKeyAbsentWhenNoRunDelay(t *testing.T) {
+	a := New(cfg())
+	a.AddDeltas([]Delta{{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT v FROM t", 1, 1).Digest,
+		Calls: 1000, CPUNs: 1e9, WallNs: 50e9, WallMaxNs: 60e6}}, t0)
+	s := a.Snapshot(t0.Add(time.Second))
+	if _, ok := s.Victims[VictimCPU]; ok {
+		t.Fatalf("victims = %v, want no cpu key when run-queue accounting is unavailable", s.Victims)
+	}
+}
