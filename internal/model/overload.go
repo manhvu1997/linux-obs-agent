@@ -79,7 +79,9 @@ type OverloadCheck struct {
 // resource's fields are omitted, never 0. A victim count is present (0
 // included) exactly when that wait is measured (mysql_report.accounting
 // cpu_wait / disk_wait / commit_wait is "ok"); otherwise it is omitted and
-// the wait is listed in missing.
+// the wait is listed in missing. psi_cpu_some_avg10 is omitted when PSI is
+// unavailable (psi_available false) and load_normalised when the CPU count is
+// unknown.
 type OverloadEvidence struct {
 	NodeCPUUsedPercent      *float64 `json:"node_cpu_used_percent,omitempty"`
 	NodeCPUSource           string   `json:"node_cpu_source,omitempty"`

@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	// VictimCPU / VictimDisk / VictimCommit: victim_of for a digest slowed
-	// mostly by waiting for a CPU, for block I/O, or for the redo log.
+	// VictimCPU / VictimDisk / VictimCommit: victim_of for a digest whose
+	// largest measured wait is the run queue, block I/O, or the redo log
+	// (waits >= victim_wait_percent, slow).
 	VictimCPU    = "cpu"
 	VictimDisk   = "disk"
 	VictimCommit = "commit"

@@ -150,12 +150,15 @@ func assessCPU(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 		r.Missing = append(r.Missing, querystats.AccountingKeyCPUWait)
 	}
 	psi := m.Pressure.CPU
-	ev.PSICPUSomeAvg10, ev.PSIAvailable = floatp(psi.Some.Avg10), &psi.Available
+	ev.PSIAvailable = &psi.Available
+	if psi.Available {
+		ev.PSICPUSomeAvg10 = floatp(psi.Some.Avg10)
+	}
 	var load float64
 	if m.LoadAvg.NumCPU > 0 {
 		load = m.LoadAvg.Load1 / float64(m.LoadAvg.NumCPU)
+		ev.LoadNormalised = floatp(load)
 	}
-	ev.LoadNormalised = floatp(load)
 	var used float64
 	if n := my.Node; n != nil {
 		used = n.CPUUsedPercent

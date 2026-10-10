@@ -413,6 +413,36 @@ func TestBothResourcesSecondaryJSONClean(t *testing.T) {
 	assertResourceJSON(t, got.Secondary)
 }
 
+func TestCPUEvidenceOmitsUnavailablePSIAndLoad(t *testing.T) {
+	// PSI unavailable: no psi_cpu_some_avg10 (psi_available false is kept).
+	m := metrics(20, 1, 8)
+	r := Assess(Inputs{Metrics: m, MySQL: report("culprit", 27, 90, 0), Families: mysqlTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHealthy}, Thresholds{}, time.Unix(0, 0))
+	if r.Resource != "cpu" {
+		t.Fatalf("precondition: resource %s", r.Resource)
+	}
+	ev := keys(t, r.Evidence)
+	if ev["psi_cpu_some_avg10"] {
+		t.Errorf("PSI unavailable must omit psi_cpu_some_avg10: %s", mustJSON(t, r.Evidence))
+	}
+	if !ev["psi_available"] || !ev["load_normalised"] {
+		t.Errorf("psi_available and load_normalised must stay: %s", mustJSON(t, r.Evidence))
+	}
+
+	// NumCPU unknown: no load_normalised.
+	m = metrics(20, 1, 0)
+	m.Pressure.CPU.Available, m.Pressure.CPU.Some.Avg10 = true, 12
+	r = Assess(Inputs{Metrics: m, MySQL: report("culprit", 27, 90, 0), Families: mysqlTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHealthy}, Thresholds{}, time.Unix(0, 0))
+	ev = keys(t, r.Evidence)
+	if ev["load_normalised"] {
+		t.Errorf("NumCPU 0 must omit load_normalised: %s", mustJSON(t, r.Evidence))
+	}
+	if !ev["psi_cpu_some_avg10"] {
+		t.Errorf("PSI available must report psi_cpu_some_avg10: %s", mustJSON(t, r.Evidence))
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
