@@ -300,63 +300,62 @@ func TestDiskReadDigestIsSticky(t *testing.T) {
 // markSticky seeds disk/io/redo counters from window stats when a digest
 // re-enters the sticky set. Without seeding, these counters start at zero and
 // never increase.
+// markSticky seeds disk/io/redo counters when a digest is NOT in a.life
+// (because life was at capacity when the digest was folded into <other>).
 func TestMarkStickyDiskSeeding(t *testing.T) {
 	c := cfg()
-	c.StickyTTL = time.Hour
+	c.MaxDigests = 2 // a.life can hold at most 2 digests
 	a := New(c)
+
+	// Fill a.life with 2 entries at t0. They will stay sticky for StickyTTL (1h).
+	other1 := digestDelta(1, "SELECT a FROM t1", 10, 5e9)
+	other2 := digestDelta(1, "SELECT a FROM t2", 10, 4e9)
+	a.AddDeltas([]Delta{other1, other2}, t0)
+	a.AddHost(okHost(30e9, 40e9, 4e9), t0)
+	s1 := a.Snapshot(t0)
+	// Verify a.life has exactly 2 entries (MaxDigests cap)
+	if len(s1.Exported) != 2 {
+		t.Fatalf("exported = %d, want 2 (MaxDigests)", len(s1.Exported))
+	}
+
+	// At t0+120s (after t0 bucket rolled out), add disk digest D with disk/io/redo counters.
+	// a.life is still at capacity (other1, other2 sticky), so D cannot be added to a.life.
+	// D folds into <other> in life; its window entry exists but a.life[D.id] does not.
 	disk := digestDelta(1, "SELECT * FROM big", 10, 1e6)
 	disk.DiskReadBytes = 500 << 20
+	disk.DiskWriteBytes = 10 << 20
 	disk.IOWaitNs = 100e6
 	disk.RedoWaitNs = 50e6
-
-	// First snapshot: disk digest is in the window and gets marked sticky.
-	a.AddDeltas([]Delta{disk}, t0)
+	a.AddDeltas([]Delta{disk}, t0.Add(120*time.Second))
 	h := okHost(30e9, 40e9, 4e9)
-	h.DiskOK, h.DiskReadBytes = true, 600<<20
-	a.AddHost(h, t0)
-	s1 := a.Snapshot(t0)
-	if !exported(s1, disk.Digest.ID) {
-		t.Fatal("disk digest not exported initially")
-	}
+	h.DiskOK, h.DiskReadBytes, h.DiskWriteBytes = true, 600<<20, 100<<20
+	a.AddHost(h, t0.Add(120*time.Second))
+	s2 := a.Snapshot(t0.Add(120 * time.Second))
 
-	// Second snapshot: disk digest is outside the window, but stays sticky.
-	s2 := a.Snapshot(t0.Add(61 * time.Second))
+	// D is the top disk reader so stickyDisk marks it sticky.
+	// Since a.life[D.id] does not exist, markSticky creates a new entry and RUNS the seeding lines.
 	if !exported(s2, disk.Digest.ID) {
-		t.Fatal("disk digest should stay sticky after leaving window")
+		t.Fatalf("disk digest not exported after re-entry; life may be over-capacity or D not in stickyDisk")
 	}
 
-	// Third snapshot: disk digest re-enters the window with new data.
-	// markSticky seeds its counters from the window, so the lifetime counters increase.
-	disk2 := digestDelta(1, "SELECT * FROM big", 5, 2e6)
-	disk2.DiskReadBytes = 200 << 20
-	disk2.IOWaitNs = 50e6
-	disk2.RedoWaitNs = 30e6
-	a.AddDeltas([]Delta{disk2}, t0.Add(62*time.Second))
-	h2 := okHost(30e9, 40e9, 4e9)
-	h2.DiskOK, h2.DiskReadBytes = true, 600<<20
-	a.AddHost(h2, t0.Add(62*time.Second))
-	s3 := a.Snapshot(t0.Add(62 * time.Second))
-
-	for _, e := range s3.Exported {
+	for _, e := range s2.Exported {
 		if e.ID == disk.Digest.ID {
-			// Lifetime Calls: 10 (initial) + 5 (re-entry) = 15
-			if e.Counters.Calls != 15 {
-				t.Fatalf("calls: got %d, want 15", e.Counters.Calls)
+			// With seeding, counters = window stats exactly (first entry ever in life).
+			if e.Counters.Calls != 10 {
+				t.Fatalf("calls: got %d, want 10 (window value)", e.Counters.Calls)
 			}
-			// Lifetime DiskReadBytes must include both the seeded value (500 MB)
-			// from the first snapshot and the new value (200 MB) from re-entry.
-			// With seeding: 500<<20 + 200<<20; without: 0 + 200<<20.
-			expected := (500 + 200) << 20
-			if e.Counters.DiskReadBytes != uint64(expected) {
-				t.Fatalf("disk read: got %d, want %d (suggests no seeding)",
-					e.Counters.DiskReadBytes, expected)
+			if e.Counters.DiskReadBytes != 500<<20 {
+				t.Fatalf("disk read: got %d, want 500<<20 (seeded from window; no seeding → 0)",
+					e.Counters.DiskReadBytes)
 			}
-			// Same logic for io/redo: initial (100e6 + 50e6) + re-entry (50e6 + 30e6)
-			if e.Counters.IOWaitNs != 150e6 {
-				t.Fatalf("io wait: got %d, want 150e6", e.Counters.IOWaitNs)
+			if e.Counters.DiskWriteBytes != 10<<20 {
+				t.Fatalf("disk write: got %d, want 10<<20", e.Counters.DiskWriteBytes)
 			}
-			if e.Counters.RedoWaitNs != 80e6 {
-				t.Fatalf("redo wait: got %d, want 80e6", e.Counters.RedoWaitNs)
+			if e.Counters.IOWaitNs != 100e6 {
+				t.Fatalf("io wait: got %d, want 100e6", e.Counters.IOWaitNs)
+			}
+			if e.Counters.RedoWaitNs != 50e6 {
+				t.Fatalf("redo wait: got %d, want 50e6", e.Counters.RedoWaitNs)
 			}
 			return
 		}
