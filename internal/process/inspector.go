@@ -34,7 +34,32 @@ type prevSample struct {
 	cpuTime    uint64
 	readBytes  uint64
 	writeBytes uint64
+	ioOK       bool   // readBytes / writeBytes were read from /proc/<pid>/io
+	startTime  uint64 // /proc/<pid>/stat starttime: a change means the PID was reused
 	sampleTime time.Time
+}
+
+// deltaRates turns two samples of one PID into CPU % and I/O bytes/s. The
+// counters are uint64: a counter that went backwards (PID reused, counter
+// reset) would wrap to a huge rate, so it gives 0 for this scan instead, as
+// does a PID whose start time changed. I/O rates need both samples' I/O.
+func deltaRates(prev, cur prevSample, numCPU float64) (cpuPercent, readPerSec, writePerSec float64) {
+	elapsed := cur.sampleTime.Sub(prev.sampleTime).Seconds()
+	if elapsed <= 0 || prev.startTime != cur.startTime {
+		return 0, 0, 0
+	}
+	if cur.cpuTime >= prev.cpuTime && numCPU > 0 {
+		cpuPercent = 100 * float64(cur.cpuTime-prev.cpuTime) / float64(clkTck) / elapsed / numCPU
+	}
+	if prev.ioOK && cur.ioOK {
+		if cur.readBytes >= prev.readBytes {
+			readPerSec = float64(cur.readBytes-prev.readBytes) / elapsed
+		}
+		if cur.writeBytes >= prev.writeBytes {
+			writePerSec = float64(cur.writeBytes-prev.writeBytes) / elapsed
+		}
+	}
+	return cpuPercent, readPerSec, writePerSec
 }
 
 // Inspector scans /proc periodically and maintains a sorted top-N snapshot.
@@ -268,33 +293,17 @@ func (i *Inspector) readProc(pid uint32, now time.Time, numCPU float64) (model.P
 		s.MemPercent = 100.0 * float64(s.MemRSSBytes) / float64(i.memTotal)
 	}
 
-	// Delta CPU.
-	curCPUTime := stat.utime + stat.stime
-	if prev, ok := i.prev[pid]; ok {
-		elapsed := now.Sub(prev.sampleTime).Seconds()
-		if elapsed > 0 {
-			cpuDelta := float64(curCPUTime-prev.cpuTime) / float64(clkTck)
-			s.CPUPercent = 100.0 * cpuDelta / elapsed / numCPU
-			if s.CPUPercent < 0 {
-				s.CPUPercent = 0
-			}
-		}
-	}
-
+	cur := prevSample{cpuTime: stat.utime + stat.stime, startTime: stat.starttime, sampleTime: now}
 	// IO stats (best-effort – may fail without CAP_SYS_PTRACE on some kernels).
 	if i.cfg.IncludeIO {
-		rio, wio, err := readProcIO(base + "/io")
-		if err == nil {
-			s.ReadBytesTotal = rio
-			s.WriteBytesTotal = wio
-			if prev, ok := i.prev[pid]; ok {
-				elapsed := now.Sub(prev.sampleTime).Seconds()
-				if elapsed > 0 {
-					s.ReadBytesPerSec = float64(rio-prev.readBytes) / elapsed
-					s.WriteBytesPerSec = float64(wio-prev.writeBytes) / elapsed
-				}
-			}
+		if rio, wio, err := readProcIO(base + "/io"); err == nil {
+			s.ReadBytesTotal, s.WriteBytesTotal = rio, wio
+			cur.readBytes, cur.writeBytes, cur.ioOK = rio, wio, true
 		}
+	}
+	// Delta CPU and I/O rates against the previous scan.
+	if prev, ok := i.prev[pid]; ok {
+		s.CPUPercent, s.ReadBytesPerSec, s.WriteBytesPerSec = deltaRates(prev, cur, numCPU)
 	}
 
 	// Open file count (non-fatal).
@@ -305,12 +314,7 @@ func (i *Inspector) readProc(pid uint32, now time.Time, numCPU float64) (model.P
 	// Container / K8s metadata from cgroup path and environ.
 	s.ContainerID, s.K8sPodName, s.K8sNamespace = extractK8sMeta(cgroupPath, base)
 
-	i.prev[pid] = prevSample{
-		cpuTime:    curCPUTime,
-		readBytes:  s.ReadBytesTotal,
-		writeBytes: s.WriteBytesTotal,
-		sampleTime: now,
-	}
+	i.prev[pid] = cur
 
 	_ = status // available for future fields (e.g. UIDs)
 	return s, nil
