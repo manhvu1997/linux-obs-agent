@@ -76,7 +76,7 @@ func TestVerdicts(t *testing.T) {
 }
 
 func TestWindowValueWinsOverLatestSample(t *testing.T) {
-	// latest 5 s sample says 95 %, but over the window the node used 40 %.
+	// latest collector sample says 95 %, but over the window the node used 40 %.
 	got := Assess(Inputs{Metrics: metrics(95, 1, 8), MySQL: report("", 30, 40, 0), Families: mysqlTop, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
 	if got.Verdict != model.OverloadNodeNotSaturated || got.Evidence.NodeCPUSource != "window" {
 		t.Fatalf("verdict %s source %s", got.Verdict, got.Evidence.NodeCPUSource)

@@ -1070,7 +1070,7 @@ All metrics are prefixed with `obs_agent_`.
 | `ebpf_events_total{module}` | Counter | eBPF events emitted per module |
 | `ebpf_events_total{module="fsync"}` | Counter | Fsync outlier events (latency > threshold) |
 | `family_*` (cpu_percent, mem_rss_bytes, processes, net_*, inbound/outbound bytes) | Gauge/Counter | Per process family; never per PID. See §20 |
-| `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes, digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. `events_dropped` counts commands genuinely lost (fallback ring buffer full or consumer behind). See §20 |
+| `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes (`flow="out"` only: result bytes), digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. `events_dropped` counts commands genuinely lost (fallback ring buffer full or consumer behind). See §20 |
 | `family_inbound_peer_bytes_total{family,peer_ip,service_port,flow}` | Counter | Inbound client bytes; top `netflow.max_inbound_peers` IPs node-wide, overflow `other`. See §20 |
 | `mysql_digest_coverage_ratio` | Gauge | Share (0–1) of window query CPU explained by the exported digest series. See §20 |
 | `mysql_agg_overflow_total` | Counter | Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact) |
@@ -1095,14 +1095,16 @@ All metrics are prefixed with `obs_agent_`.
 | **Fsync analyzer poll (5s)** | **~0.001%** | **< 1 MB** |
 | Go runtime overhead | ~0.02% | ~12 MB |
 | **eBPF netflow (always-on, ~100k hook calls/s)** — estimated, not measured | **~0.4%** | **~6 MB (maps)** |
-| **MySQL tracer with in-kernel aggregation (20k QPS)** — estimated, not measured; kernel text hashing unmeasured | **~0.2 % kernel + < 0.1 % userspace (~0.3 %)** | **~35 MB typical**: kernel maps ~25 MB (agg 2 × 16 384 ~3 MB, `cmd_events` ringbuf 4 MB, `text_events` ringbuf 1 MB, `text_seen` LRU ~2–3 MB, `ps_text` ~9 MB, `mysql_pending` ~5 MB, slow events + pid stats < 1 MB) + userspace ~10 MB (digests ~5 MB, text cache ~5 MB) |
+| **MySQL tracer with in-kernel aggregation (20k QPS)** — estimated, not measured; kernel text hashing unmeasured | **~0.2 % kernel + < 0.1 % userspace (~0.3 %)** | **~35 MB typical**: kernel maps ~25 MB (agg 2 × 16 384 × (16 + 80) B ≈ 3.1 MB, `cmd_events` ringbuf 4 MB, `text_events` ringbuf 1 MB, `text_seen` LRU ~2–3 MB, `ps_text` ~9 MB, `mysql_pending` 8 192 × 640 B ≈ 5.2 MB, slow events ringbuf 256 KB; the per-PID stats map is removed, −1.3 MB) + userspace ~10 MB (digests ~5 MB, text cache ~5 MB) |
+| **MySQL commit-wait uprobes** (one uprobe + uretprobe on `log_write_up_to` per commit, only inside `dispatch_command`) — estimated, not measured | **~1–2 µs per commit** (≈ 0.1–0.2 % of one core at 1 000 commits/s) | — (state lives in `mysql_pending`) |
+| **Kernel delay accounting** (`enable_delayacct` / `kernel.task_delayacct=1`; needed for per-statement disk wait) — estimated, not measured | **kernel-wide, typically < 1 %** (paid by every task, not the agent) | — |
 | **Family grouping (10s scan)** — estimated, not measured | **~0.02%** | **< 1 MB** |
 | **ClickHouse export (drains + 60 s flush, 20k QPS)** — estimated, not measured | **~0.1–0.2 % (digest drain) + a few ms/min encoding** | **≤ 32 MB buffer + per-interval drain maps** |
 | netinv (per /api/diagnose) — estimated, not measured | 20–50 ms per call | transient |
 | **Total (all eBPF active + fsync + netflow + MySQL)** — estimated, not measured | **~1.4%** | **~98 MB** |
 | **Total (no trigger-eBPF; fsync + netflow + MySQL)** — estimated, not measured | **~0.9%** | **~63 MB** |
 
-The totals are the sum of the rows above, except ClickHouse export (off by default; adds ~0.1–0.2 % and up to 32 MB when enabled) and netinv (per `/api/diagnose` call, transient). The measured rows (4-core 8GB VM, moderate load) sum to ~0.64 % / ~56 MB with every trigger module active and ~0.17 % / ~21 MB without; the totals add the estimated rows: netflow (~0.4 % / ~6 MB), the MySQL tracer (~0.3 % / ~35 MB typical, only when `mysql.enabled`) and family grouping (~0.02 % / ~1 MB). MySQL worst cases on top: the text cache holds up to 32 768 hashes (~150 B each, ~5 MB) plus one record per **distinct** digest among them (~0.65 KB: id + normalised text, +~0.5 KB sample only with `mysql.sample_queries`), so if every cached hash were its own digest it reaches ~26 MB (~43 MB with samples), i.e. +21 / +38 MB. Kernel map memory is not Go heap (charged to the agent's memory cgroup on kernels ≥ 5.11). **Unmeasured**: the kernel text-hashing cost — `text_hash` runs up to 511 loop iterations per COM_QUERY / COM_STMT_PREPARE at `dispatch_command` entry, and a prepare is hashed twice (also in `Prepared_statement::prepare`) — is not in the MySQL CPU estimate. All totals are **estimated, not measured**. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
+The totals are the sum of the rows above, except ClickHouse export (off by default; adds ~0.1–0.2 % and up to 32 MB when enabled), netinv (per `/api/diagnose` call, transient), the commit-wait uprobes (proportional to the commit rate, see the row) and kernel delay accounting (a kernel-wide cost, only when it is on). The measured rows (4-core 8GB VM, moderate load) sum to ~0.64 % / ~56 MB with every trigger module active and ~0.17 % / ~21 MB without; the totals add the estimated rows: netflow (~0.4 % / ~6 MB), the MySQL tracer (~0.3 % / ~35 MB typical, only when `mysql.enabled`) and family grouping (~0.02 % / ~1 MB). MySQL worst cases on top: the text cache holds up to 32 768 hashes (~150 B each, ~5 MB) plus one record per **distinct** digest among them (~0.65 KB: id + normalised text, +~0.5 KB sample only with `mysql.sample_queries`), so if every cached hash were its own digest it reaches ~26 MB (~43 MB with samples), i.e. +21 / +38 MB. Kernel map memory is not Go heap (charged to the agent's memory cgroup on kernels ≥ 5.11). **Unmeasured**: the kernel text-hashing cost — `text_hash` runs up to 511 loop iterations per COM_QUERY / COM_STMT_PREPARE at `dispatch_command` entry, and a prepare is hashed twice (also in `Prepared_statement::prepare`) — is not in the MySQL CPU estimate. All totals are **estimated, not measured**. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
 
 **Fsync overhead detail**: At 10 000 fsync/s with a 5 ms slow threshold, the kprobe/kretprobe pair executes ~20 000 times/s. Each execution does one map lookup + one atomic add (~50 ns each). Total: ~1 ms/s ≈ **0.01% CPU** on a single core. The ringbuf emits zero events at normal latencies.
 
@@ -1153,7 +1155,9 @@ The MySQL tracer is an **always-on server-side** analyzer that attaches uprobes 
 uprobe: mysqld!dispatch_command(THD *thd, COM_DATA *com_data, enum command)
     │  every command is measured (emit_all_queries: true, the default;
     │  with false only COM_QUERY (3) and COM_STMT_EXECUTE (23) are tracked)
-    │  start_ts, on-CPU and run-queue baselines, comm
+    │  baselines: start_ts, on-CPU (se.sum_exec_runtime), run-queue
+    │      (sched_info.run_delay), ioac.read_bytes / ioac.write_bytes,
+    │      delays->blkio_delay; comm
     │  COM_QUERY / COM_STMT_PREPARE (22): query_str = com_data[0..7],
     │      length = com_data[8..11]  (same layout for both commands)
     │      bpf_probe_read_user_str(pending.query, 512, query_str)
@@ -1162,13 +1166,18 @@ uprobe: mysqld!dispatch_command(THD *thd, COM_DATA *com_data, enum command)
 uprobe: Prepared_statement::prepare / execute_loop   (optional, §20)
     │  ps_text[Prepared_statement*] = text;  ps_exec[tid] = Prepared_statement*
     │
+uprobe / uretprobe: InnoDB log_write_up_to   (optional: commit wait)
+    │  only while mysql_pending[tid] exists, outermost frame only
+    │  entry: snapshot ts, on-CPU, run-queue, blkio_delay
+    │  return: redo_wait += max(0, Δwall − Δcpu − Δrunq − Δblkio)
+    │
 uretprobe: mysqld!dispatch_command
     │  pending = mysql_pending[tid]
-    │  latency_ns = now - pending.start_ts
+    │  wall, cpu, runq, bytes_out, disk_read/write bytes (Δioac),
+    │  io_wait (Δblkio_delay), redo_wait   (cpu/runq/io_wait/redo_wait ≤ wall)
     │  COM_STMT_EXECUTE: text = ps_text[ps_exec[tid]] when recovered
     │
     ├── COM_QUERY and COM_STMT_EXECUTE only:
-    │     mysql_pid_stats[tgid]: total_queries++, total_latency_ns += Δ, ...
     │     if latency_ns >= slow_query_threshold_ns:
     │         push mysql_slow_event_t {…, query, command} → events RINGBUF
     │         (→ recent_slow_queries; no text → the placeholder of §20)
@@ -1178,7 +1187,7 @@ uretprobe: mysqld!dispatch_command
     └── delete ps_exec[tid], mysql_pending[tid]
 ```
 
-`mysql_pid_stats` is still updated by the kernel but no longer read (removed in the next kernel change).
+The kernel object reads `ioac` and `delays` through local CO-RE flavor structs guarded by `bpf_core_field_exists`, so it loads on kernels built without `CONFIG_TASK_IO_ACCOUNTING` / `CONFIG_TASK_DELAY_ACCT`; the missing signals are then reported unavailable in `mysql_report.accounting` (§20). The four time parts (on-CPU, run-queue wait, block-I/O wait, commit wait) are disjoint by construction. The commit-wait probes attach only with `emit_all_queries: true` and only when mysqld's symbol table has `log_write_up_to` (both probes attach or neither).
 
 ### Configuration (`mysql:` section in config.yaml)
 
@@ -1189,9 +1198,10 @@ mysql:
   slow_query_threshold_ms: 100       # emit ringbuf event when query > 100 ms
   poll_interval: 5s
   max_recent_queries: 100
+  enable_delayacct: false            # true: write 1 to /proc/sys/kernel/task_delayacct at start if it reads 0
 ```
 
-Environment variable overrides: `MYSQL_TRACING_ENABLED=true`, `MYSQL_SLOW_QUERY_THRESHOLD_MS=50`, `MYSQL_MYSQLD_PATH=/usr/bin/mysqld`.
+Environment variable overrides: `MYSQL_TRACING_ENABLED=true`, `MYSQL_SLOW_QUERY_THRESHOLD_MS=50`, `MYSQL_MYSQLD_PATH=/usr/bin/mysqld`, `MYSQL_ENABLE_DELAYACCT=true`.
 
 ### MySQL version compatibility
 
@@ -1221,7 +1231,7 @@ against real `mysqld` builds (`.dynsym`; fixtures in
   in every series (5.7 `EbPhS0_`, early 8.0 `EP6Stringb`, 8.0.36+ `EP3THDP6Stringb`).
 - `COM_DATA` (query pointer + `unsigned int` length first) and
   `enum_server_command` (prepare 22, execute 23) are unchanged through trunk.
-- The start log prints `mysqld hooks: dispatch=ok prepare=<layout> execute_loop=ok`.
+- The start log prints `mysqld hooks: dispatch=ok prepare=<layout> execute_loop=ok|unavailable redo=ok|unavailable` (`redo` = the `log_write_up_to` commit-wait probes; `unavailable` also when `emit_all_queries` is off).
 
 **Adding a release** (9.x, 26.x+): extract its `mysqld` (e.g. from the
 `mysql-community-server-core` .deb), run
@@ -1268,10 +1278,11 @@ curl -s http://localhost:9200/api/diagnose | jq .mysql_report
 ```bash
 sudo bpftool prog list | grep -E 'uprobe|kprobe'
 # Expected:
-#   kprobe  name uprobe_dispatch     (uprobe type shows as kprobe in bpftool)
-#   kprobe  name uretprobe_dispatch
+#   kprobe  name uprobe_dispatch_command     (uprobe type shows as kprobe in bpftool)
+#   kprobe  name uretprobe_dispatch_command
+#   kprobe  name uprobe_log_write_up_to      (commit wait, when redo=ok)
+#   kprobe  name uretprobe_log_write_up_to
 
-sudo bpftool map show name mysql_pid_stats
 sudo bpftool map show name mysql_pending
 ```
 
@@ -1649,17 +1660,19 @@ list fills with *victims*. This feature separates the query pattern that
 which services (process families) are heavy and who they talk to.
 
 ```
-wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
-       culprit     cascade victim
+wall = on-CPU  +  run-queue wait  +  block-I/O wait  +  commit wait  +  other (locks, network, …)
+       culprit     cascade victim     disk victim        commit victim
 ```
+
+The same split names the query that **reads** the disk (`io_role: culprit`) apart from the queries that only waited for block I/O or for the redo log.
 
 ### Components
 
 | Unit | What it does |
 |---|---|
 | `ebpf/netflow` | Always-on. Counts TCP bytes and connections per {tgid, direction, peer, service port} in an LRU map. Owner is recorded at connect/accept (process context); bytes are charged to the current process at `tcp_sendmsg` / `tcp_cleanup_rbuf`. |
-| `ebpf/mysql_query` | Per `dispatch_command`: wall, on-CPU (`se.sum_exec_runtime` Δ), run-queue wait (`sched_info.run_delay` Δ), result bytes (`tcp_sendmsg` / `unix_stream_sendmsg` returns). Summed in the kernel per {tgid, command, literal-skipping text hash} (`internal/mysql/sqlhash` is the Go reference); text crosses once per hash; the analyzer drains the map every poll. Optional uprobes on `Prepared_statement::prepare` / `execute_loop` recover the SQL text of `COM_STMT_EXECUTE`. |
-| `sqldigest` + `querystats` | Normalise SQL → digest; aggregate over a 60 s window; rank by **total** CPU; label `cpu_role: culprit` (≥ 20 % of the node's CPU used over the window **and** the node ≥ 50 % busy) or `victim_of: cpu` (run-queue wait ≥ 50 % of its time and slow). |
+| `ebpf/mysql_query` | Per `dispatch_command`: wall, on-CPU (`se.sum_exec_runtime` Δ), run-queue wait (`sched_info.run_delay` Δ), result bytes (`tcp_sendmsg` / `unix_stream_sendmsg` returns), storage bytes read / written (`ioac.read_bytes` / `write_bytes` Δ), block-I/O wait (`delays->blkio_delay` Δ) and commit wait (optional `log_write_up_to` uprobes, §16). Summed in the kernel per {tgid, command, literal-skipping text hash} (`internal/mysql/sqlhash` is the Go reference); text crosses once per hash; the analyzer drains the map every poll. Optional uprobes on `Prepared_statement::prepare` / `execute_loop` recover the SQL text of `COM_STMT_EXECUTE`. |
+| `sqldigest` + `querystats` | Normalise SQL → digest; aggregate over a 60 s window; rank by **total** CPU; label `cpu_role: culprit` (≥ 20 % of the node's CPU used over the window **and** the node ≥ 50 % busy), `io_role: culprit` (≥ 20 % of the physical disks' reads **and** the node reading ≥ 5 MB/s) or `victim_of` `cpu` / `disk` / `commit` (measured waits ≥ 50 % of its time, slow; the largest wait names it). |
 | `process` | Groups processes into families by systemd unit (`nginx.service`), falling back to `.scope` / cgroup path. |
 | `netinv` | On demand only: listening ports and live connections (`src → dst`, client → server) from `/proc/net/tcp*` + `/proc/<pid>/fd`. |
 
@@ -1667,7 +1680,7 @@ wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
 
 - `process_report.top_cpu[]` / `top_mem[]` — top `process.report_top_cpu` / `report_top_mem` processes (default `report_top_n`, 10) with `listening_ports`, `network` (inbound/outbound conns and bytes over the window, `top_peers`), `connections` (≤ 50, `connections_truncated`), `profile_url`.
 - `process_report.top_families_cpu[]` / `top_families_mem[]` — top `process.report_top_families_cpu` / `report_top_families_mem` families (default `report_top_n`, 10) with `process_count`, `root_pid`, `top_members`, summed `network`.
-- `mysql_report.top_digests[]` — top `mysql.top_digests` (20) by on-CPU time; `top_digests_by_wait[]` (10) by run-queue wait; `top_digests_by_bytes_out[]` (10). Per digest (W = `digest_window`, 60 s; every sum is over the same polls as the node numbers):
+- `mysql_report.top_digests[]` — top `mysql.top_digests` (20) by on-CPU time; `top_digests_by_wait[]` (10) by measured wait (run queue + block I/O + commit, each only when available; digests with none are not listed); `top_digests_by_disk_read[]` (10) by disk bytes read (present only when per-statement disk bytes were measured in every poll of the window; digests that read nothing are not listed); `top_digests_by_bytes_out[]` (10). Per digest (W = `digest_window`, 60 s; every sum is over the same polls as the node numbers):
 
   | Field | Formula | Reading |
   |---|---|---|
@@ -1675,33 +1688,48 @@ wall = on-CPU  +  run-queue wait  +  blocked (I/O, locks)
   | `cpu_cores` | cpu ÷ W | "keeps 1.3 cores busy" |
   | `percent_of_node_cpu_used` | cpu ÷ node CPU used × 100 | **CPU culprit:** "did 27 % of all CPU work on this server" |
   | `latency_ms_avg` / `_max` | wall ÷ calls; max | user-visible latency |
-  | `time_breakdown_percent` | `cpu`, `cpu_wait` (run queue), `other` ÷ max(wall, cpu + cpu_wait) × 100 | where the time went (sums to 100) |
+  | `time_breakdown_percent` | `cpu`, `cpu_wait` (run queue), `disk_wait` (block I/O), `commit_wait` (redo log), `other` = max(wall, Σ parts) − Σ parts; each ÷ max(wall, Σ available parts) × 100 | where the time went (sums to 100); an unavailable part is absent and its time stays in `other` |
   | `bytes_out_per_call` | bytes sent ÷ calls | result size |
+  | `disk_read_mb_per_sec` | disk read bytes ÷ W ÷ 2²⁰ | read load |
+  | `percent_of_disk_read` | disk read bytes ÷ physical-disk reads × 100 | **disk culprit:** "is 71 % of the disk's reads" |
+  | `disk_read_pages_per_call` | disk read bytes ÷ calls ÷ 16 384 | 1–4 = buffer-pool misses → grow `innodb_buffer_pool_size`; hundreds+ = scan → `EXPLAIN`, index, `LIMIT` |
+  | `disk_write_mb_per_sec` | disk write bytes ÷ W ÷ 2²⁰ | non-zero on a SELECT = spills to disk |
   | `cpu_role: culprit` | `percent_of_node_cpu_used` ≥ `cpu_culprit_percent_of_node_cpu_used` (20) **and** node CPU used ≥ `cpu_culprit_min_node_cpu_used_percent` (50) % | an idle server never has a culprit |
-  | `victim_of: cpu` | `cpu_wait` ≥ `victim_wait_percent` (50) **and** `latency_ms_avg` ≥ `slow_query_threshold_ms` | slow because it waited for a CPU |
+  | `io_role: culprit` | `percent_of_disk_read` ≥ `io_culprit_percent_of_disk_read` (20) **and** node disk read ≥ `io_culprit_min_node_disk_read_mb_per_sec` (5) MB/s | a quiet disk never has a culprit |
+  | `victim_of: cpu \| disk \| commit` | Σ available waits (`cpu_wait` + `disk_wait` + `commit_wait`) ≥ `victim_wait_percent` (50) **and** `latency_ms_avg` ≥ `slow_query_threshold_ms`; the value is the largest available wait (ties: cpu, disk, commit) | slow because it waited — for a CPU, for block I/O, or for the redo log |
 
-  A value whose input is unavailable is omitted, never 0.
-- Report level: `node` {`num_cpu`, `cpu_used_cores`, `cpu_used_percent`} over W (from `/proc/stat`, same polls); `query_cpu_coverage_percent` = Σ digest CPU ÷ CPU of the traced mysqld processes × 100 — how much of mysqld's CPU the digests explain (the rest: connection handling outside `dispatch_command`, InnoDB background threads); omitted while any poll in the window lacked a mysqld baseline: for the first window after the agent starts, after a mysqld restart, and whenever a mysqld PID comes back after a quiet window (with several mysqld instances, one quiet-then-active instance omits it node-wide for one window). `victims` {`cpu`: n} over all digests (`{"cpu": 0}` when none; the key is absent when `accounting.cpu_wait` is unavailable); `accounting` {`cpu_wait`: `ok` | `run_delay_unavailable`}; `thresholds` echoes the role cut-offs.
-- `mysql_report.overload_cause` (built per `/api/diagnose` call by `internal/overload`, on a copy) — four checks, always all reported:
+  A value whose input is unavailable is omitted, never 0. The disk fields need per-statement disk bytes in every poll of the window; `percent_of_disk_read` also needs the node's physical-disk bytes in every poll and a non-zero total. The `<other>` overflow digest never gets a role.
+- Report level: `node` {`num_cpu`, `cpu_used_cores`, `cpu_used_percent`} over W (from `/proc/stat`, same polls); `query_cpu_coverage_percent` = Σ digest CPU ÷ CPU of the traced mysqld processes × 100 — how much of mysqld's CPU the digests explain (the rest: connection handling outside `dispatch_command`, InnoDB background threads); omitted while any poll in the window lacked a mysqld baseline: for the first window after the agent starts, after a mysqld restart, and whenever a mysqld PID comes back after a quiet window (with several mysqld instances, one quiet-then-active instance omits it node-wide for one window). `node` also carries `disk_read_mb_per_sec` / `disk_write_mb_per_sec`: bytes of the **physical disks** over W (whole devices under `/sys/block` with an empty `slaves/` — so no dm-*/md* — and not loop/ram/zram/sr/fd/nbd; without `/sys/block`, names like `sd*`, `vd*`, `xvd*`, `hd*`, `nvme*n*`, `mmcblk*`), omitted unless every poll in the window had a valid `/proc/diskstats` delta. `query_disk_read_coverage_percent` = Σ digest disk read bytes ÷ physical-disk read bytes × 100 — how much of the disk's reads the statements explain (the rest: read-ahead, page cleaners, purge, other processes). It does not need node CPU, so it can be present while `node` (and with it `node.disk_*`) is absent: the `node` block is built only when node CPU is available for every poll. `victims` {`cpu`, `disk`, `commit`: n} over **all** digests (victims burn little CPU and rarely reach the top lists): `victims.cpu` counts the slow digests whose measured waits sum to ≥ `victim_wait_percent` and whose largest wait is the run queue, and likewise `disk` (block I/O) and `commit` (redo log). A key is present, possibly 0, exactly when that wait is measured for the whole window. `accounting` says which signals were measured in every poll of the window (otherwise the newest reason a poll gave; `unknown` before the first host sample):
 
-  | Check | Passes when |
-  |---|---|
-  | `node_saturated` | node CPU used over W (`mysql_report.node`; the latest collector sample when unavailable, `missing: node_cpu_window`) ≥ `overload_node_cpu_percent` (85) **or** load1 ÷ NumCPU ≥ `overload_node_load` (1.5) |
-  | `mysqld_top_consumer` | the top digest's mysqld PID belongs to the #1 process family by CPU |
-  | `dominant_digest` | the top digest by CPU has `cpu_role: culprit` |
-  | `victims` | ≥ 1 digest with `victim_of: cpu` |
+  | Key | Values | When not `ok` |
+  |---|---|---|
+  | `cpu_wait` | `ok` \| `run_delay_unavailable` | kernel without scheduler stats (`run_delay` reads 0) |
+  | `disk_bytes` | `ok` \| `io_accounting_unavailable` | kernel without `CONFIG_TASK_IO_ACCOUNTING` (no `task_struct.ioac` in BTF) |
+  | `disk_wait` | `ok` \| `blkio_delay_unavailable` \| `delayacct_disabled` | `blkio_delay_unavailable`: kernel without `CONFIG_TASK_DELAY_ACCT`; `delayacct_disabled`: delay accounting is off (the default since kernel 5.14 unless booted with `delayacct`; older kernels booted `nodelayacct`) → `sysctl kernel.task_delayacct=1` or `mysql.enable_delayacct: true` (re-read every poll) |
+  | `commit_wait` | `ok` \| `log_write_up_to_unavailable` | mysqld without the `log_write_up_to` symbol, an attach error, or `emit_all_queries: false` |
 
-  `verdict`: `query_cpu_overload` (checks 1–3; confidence high with victims, medium without, low without process families), `node_not_saturated`, `not_mysql`, `no_dominant_query` (confidence low when a culprit is impossible by construction: no `mysql_report.node`, so no `percent_of_node_cpu_used`, or the node saturated by load while its window CPU used is below `cpu_culprit_min_node_cpu_used_percent` — then check `io_diagnosis`), `no_data`; `resource: "cpu"`; `digest` {`digest_id`, `digest_text`, `cpu_cores`, `percent_of_node_cpu_used`, `calls_per_sec`, `bytes_out_per_call`, `cpu_role`}; `evidence` and `thresholds` carry every number used. Disk attribution is not implemented yet.
+  `thresholds` echoes the role cut-offs.
+- `mysql_report.overload_cause` (built per `/api/diagnose` call by `internal/overload`, on a copy) — the CPU and the disk are assessed separately, each with four checks, always all reported:
+
+  | Check | CPU (`resource: "cpu"`) passes when | Disk (`resource: "disk"`) passes when |
+  |---|---|---|
+  | `node_saturated` | node CPU used over W (`mysql_report.node`; the latest collector sample when unavailable, `missing: node_cpu_window`) ≥ `overload_node_cpu_percent` (85) **or** load1 ÷ NumCPU ≥ `overload_node_load` (1.5) | this call's `io_diagnosis.verdict` ∈ {`high_disk_throughput`, `storage_latency_stall`, `writeback_congestion`} (`missing: io_diagnosis` when there is none) |
+  | `mysqld_top_consumer` | the top digest's mysqld PID belongs to the #1 process family by CPU | that family is #1 by storage read bytes/s (`/proc/<pid>/io`, needs `process.include_io`, default true) |
+  | `dominant_digest` | the top digest by CPU has `cpu_role: culprit` | the top digest by disk reads has `io_role: culprit` |
+  | `victims` | ≥ 1 digest with `victim_of: cpu` | ≥ 1 digest with `victim_of` `disk` or `commit` |
+
+  `verdict`: `query_cpu_overload` / `query_disk_overload` (checks 1–3; confidence high with victims, medium without, low without process families — for the disk, without per-family read bytes, `missing: family_disk_io`, e.g. `process.include_io: false`), `node_not_saturated`, `not_mysql`, `no_dominant_query`, `no_data`. CPU `no_dominant_query` has confidence low when a culprit is impossible by construction: no `mysql_report.node`, so no `percent_of_node_cpu_used`, or the node saturated by load while its window CPU used is below `cpu_culprit_min_node_cpu_used_percent` — then check `io_diagnosis`. Disk `no_dominant_query` has confidence low without per-family read bytes or without `percent_of_disk_read`; disk `no_data` (`missing: query_disk_reads`: no statement read from disk, or `accounting.disk_bytes` is not `ok`) becomes `node_not_saturated` when the disk is not saturated. Which assessment is reported: the saturated one; with neither saturated, the CPU one; with **both** saturated, a `query_*_overload` verdict wins over any other, otherwise the one whose top digest has the larger share (`percent_of_node_cpu_used` vs `percent_of_disk_read`), and the other assessment is in `secondary` (same shape, never nested further). `digest` {`digest_id`, `digest_text`, `calls_per_sec`, `bytes_out_per_call`, plus `cpu_cores`, `percent_of_node_cpu_used`, `cpu_role` (cpu) or `disk_read_mb_per_sec`, `percent_of_disk_read`, `disk_read_pages_per_call`, `io_role` (disk)}; a `query_disk_overload` summary adds the pages-per-call reading (≤ 4: buffer-pool misses; ≥ 100: a scan). `evidence` (disk: `io_verdict`, `node_disk_read_mb_per_sec`, `query_disk_read_coverage_percent`, `disk_victims`, `commit_victims`, `top_disk_family`, `top_disk_family_read_mb_per_sec`, `mysql_family_disk_read_mb_per_sec`; cpu: `cpu_victims` and the node CPU fields — the victim counts are the `victims` values above) and `thresholds` carry every number used. When the reported verdict is `query_disk_overload`, `io_diagnosis.next_steps` starts with a pointer to `mysql_report.overload_cause` and the digest (a copy; the cached diagnosis is untouched).
 
 ```bash
 curl -s localhost:9200/api/diagnose | jq '.mysql_report.top_digests[] | {digest_text, cpu_role, victim_of, cpu_cores, percent_of_node_cpu_used, time_breakdown_percent}'
-curl -s localhost:9200/api/diagnose | jq '.mysql_report.overload_cause | {verdict, resource, confidence, summary, digest, checks}'
+curl -s localhost:9200/api/diagnose | jq '.mysql_report | {accounting, node, query_disk_read_coverage_percent, disk: .top_digests_by_disk_read[0] | {digest_text, disk_read_mb_per_sec, percent_of_disk_read, disk_read_pages_per_call, io_role, time_breakdown_percent}}'
+curl -s localhost:9200/api/diagnose | jq '.mysql_report.overload_cause | {verdict, resource, confidence, summary, digest, checks, secondary: .secondary.verdict}'
 curl -s localhost:9200/api/diagnose | jq '.process_report.top_families_cpu[] | {family, process_count, cpu_percent, net: .network.inbound}'
 ```
 
 ### Configuration
 
-`process.report_top_n`, `report_top_cpu`, `report_top_mem`, `report_top_families_cpu`, `report_top_families_mem`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `cpu_culprit_percent_of_node_cpu_used`, `cpu_culprit_min_node_cpu_used_percent`, `victim_wait_percent`, `overload_node_cpu_percent`, `overload_node_load`, `sample_queries`, `fold_system_schemas`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`, `MYSQL_SAMPLE_QUERIES`, `MYSQL_FOLD_SYSTEM_SCHEMAS`.
+`process.report_top_n`, `report_top_cpu`, `report_top_mem`, `report_top_families_cpu`, `report_top_families_mem`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `cpu_culprit_percent_of_node_cpu_used`, `cpu_culprit_min_node_cpu_used_percent`, `victim_wait_percent`, `io_culprit_percent_of_disk_read`, `io_culprit_min_node_disk_read_mb_per_sec`, `enable_delayacct`, `overload_node_cpu_percent`, `overload_node_load`, `sample_queries`, `fold_system_schemas`; `process.include_io` (per-family read bytes for the disk `mysqld_top_consumer` check); and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`, `MYSQL_SAMPLE_QUERIES`, `MYSQL_FOLD_SYSTEM_SCHEMAS`, `MYSQL_ENABLE_DELAYACCT`.
 
 Removed `mysql:` keys still load but are ignored, with one startup warning each: `culprit_cpu_share_percent` (now `cpu_culprit_percent_of_node_cpu_used`), `culprit_min_cpu_percent` (now `cpu_culprit_min_node_cpu_used_percent`), `victim_runq_ratio` (now `victim_wait_percent`), `overload_min_node_cpu_percent`, `top_n`, `stale_seconds` (no replacement).
 
@@ -1718,7 +1746,7 @@ Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound p
 | `obs_agent_family_outbound_peer_bytes_total` | `family, peer_ip, service_port, flow` |
 | `obs_agent_family_inbound_peer_bytes_total` | `family, peer_ip, service_port, flow` |
 | `obs_agent_mysql_queries_total`, `_query_cpu_seconds_total`, `_query_runq_wait_seconds_total`, `_query_wall_seconds_total` | `command` |
-| `obs_agent_mysql_query_bytes_total` | `command, flow` |
+| `obs_agent_mysql_query_bytes_total` (result bytes; `flow="out"` only) | `command, flow` |
 | `obs_agent_mysql_digest_{cpu_seconds,calls,bytes_out,runq_wait_seconds}_total` | `digest_id` |
 | `obs_agent_mysql_digest_info` (=1) | `digest_id, digest_text` |
 | `obs_agent_mysql_digest_coverage_ratio` | — |
@@ -1765,7 +1793,14 @@ Alert rules: `deploy/prometheus/obs-agent-alerts.yaml` (tests: `promtool test ru
 - The eBPF programs are **x86_64 only** (register-level access via a local `pt_regs` layout); on other architectures the netflow and mysql_query loaders refuse to start (`network_source: "unavailable: …"`). The kernel floor is **5.5** (BTF/CO-RE helpers such as `bpf_probe_read_kernel`), not 5.4.
 - The result-bytes kretprobes use `RetprobeMaxActive=2048` via tracefs when available. When tracefs is unavailable the loader falls back to the kernel default instance count, and with the default many concurrent slow-client senders can make the kernel drop kretprobe returns and under-count `bytes_out` / `bytes_tx`. Tracefs-based probes can leave `ebpf_*` events in `/sys/kernel/tracing/kprobe_events` after a crash.
 - Lifetime counters for a family or outbound-peer label that was idle for more than 1 h restart from 0 if it returns (bounded memory; a normal Prometheus counter reset).
-- `COM_QUERY` length is read as a 4-byte `unsigned int` (MySQL 5.7 through 26.x). `run_delay` needs scheduler stats; on kernels where it reads 0 the report sets `accounting.cpu_wait: run_delay_unavailable` and omits `time_breakdown_percent.cpu_wait`, `victim_of` and `top_digests_by_wait`.
+- `COM_QUERY` length is read as a 4-byte `unsigned int` (MySQL 5.7 through 26.x). `run_delay` needs scheduler stats; on kernels where it reads 0 the report sets `accounting.cpu_wait: run_delay_unavailable`, omits `time_breakdown_percent.cpu_wait` and `victims.cpu`, and leaves run-queue wait out of `victim_of` and `top_digests_by_wait`.
+- Per-statement disk bytes are the thread's `ioac` deltas, charged at bio submission to the thread that submitted it: a read merged into another task's in-flight read counts for the first submitter. InnoDB read-ahead, page cleaners and other background reads are not per statement, so `percent_of_disk_read` summed over all statements can be < 100 % (`query_disk_read_coverage_percent` says how much is explained). Buffered writes are charged when the page is dirtied, not when it is flushed.
+- `disk_wait` is `delays->blkio_delay`: synchronous block-I/O wait, excluding swap-in. It needs delay accounting on in every poll of the window (see `accounting.disk_wait`).
+- Commit wait needs `log_write_up_to` in mysqld's symbols (and `emit_all_queries: true`). Nested calls count once (the outermost frame); sequential calls inside one command add up. A thread's own fsync of the log counts once, as block-I/O wait (`disk_wait`) — for the block I/O itself. **ext4 caveat:** an fsync that waits for the jbd2 journal commit sleeps outside `io_schedule`, so that wait is not block-I/O wait; inside a `log_write_up_to` frame it shows as commit wait (outside one, in `other`).
+- The kernel object reads `task_struct.ioac` / `delays` through CO-RE flavor structs guarded by `bpf_core_field_exists`, so it loads on kernels without `CONFIG_TASK_IO_ACCOUNTING` / `CONFIG_TASK_DELAY_ACCT`; those signals are then reported unavailable in `accounting` and their values omitted.
+- `query_disk_read_coverage_percent` can be present while `node.disk_*` is absent: the `node` block needs node CPU for every poll, the coverage does not.
+- The disk `mysqld_top_consumer` check needs per-process I/O (`process.include_io`, default true); without per-family read bytes the disk verdict has low confidence and `missing: family_disk_io`.
+- `bytes_in` (it was the SQL text length, not network bytes) is removed from digests, commands and Prometheus (`obs_agent_mysql_query_bytes_total{flow="in"}` is gone). The ClickHouse `mysql_digest_stats.bytes_in` column stays until the schema migration of the next plan; new rows carry its default 0.
 - **Not verified at runtime in the development environment** (compile-checked only, on arm64 Linux): verifier acceptance, attach behaviour and byte/connection counts on x86_64. Run the verification commands in the spec/plan before relying on the numbers.
 
 ### Prepared statements and command names
@@ -1808,8 +1843,10 @@ sudo bpftool map show name ps_text; sudo bpftool map show name ps_exec
 | Component | CPU | Memory |
 |---|---|---|
 | netflow eBPF (~100k hook calls/s) | ~0.4 % | ~6 MB maps |
-| mysql in-kernel aggregation (20k QPS) | ~0.2 % kernel + < 0.1 % userspace; kernel text hashing (≤ 511 iterations per COM_QUERY / COM_STMT_PREPARE at entry, prepares hashed twice) unmeasured | agg maps 2 × 16 384 (~3 MB) + `cmd_events` ringbuf 4 MB + `text_events` ringbuf 1 MB + `text_seen` LRU 32 768 (~2–3 MB) + digests (~5 MB) + text cache (~5 MB typical; ≤ ~26 MB, ≤ ~43 MB with `sample_queries`, if every cached hash is a distinct digest) |
+| mysql in-kernel aggregation (20k QPS) | ~0.2 % kernel + < 0.1 % userspace; kernel text hashing (≤ 511 iterations per COM_QUERY / COM_STMT_PREPARE at entry, prepares hashed twice) unmeasured | agg maps 2 × 16 384 × 96 B (~3.1 MB) + `mysql_pending` 8 192 × 640 B (~5.2 MB) + `cmd_events` ringbuf 4 MB + `text_events` ringbuf 1 MB + `text_seen` LRU 32 768 (~2–3 MB) + digests (~5 MB) + text cache (~5 MB typical; ≤ ~26 MB, ≤ ~43 MB with `sample_queries`, if every cached hash is a distinct digest) |
 | mysql prepared-statement text (`ps_text` 16 384 × 520 B, `ps_exec`) | one map update per prepare / execute | ~9 MB maps (preallocated LRU) |
+| mysql commit wait (`log_write_up_to` uprobe + uretprobe, only inside `dispatch_command`) | ~1–2 µs per commit | — |
+| kernel delay accounting (`enable_delayacct`) | kernel-wide, typically < 1 % | — |
 | family grouping (10 s scan) | ~0.02 % | < 1 MB |
 | netinv (per /api/diagnose) | 20–50 ms per call | transient |
 
@@ -1845,7 +1882,7 @@ All in database `clickhouse.database` (default `obs`), `MergeTree` partitioned b
 
 | Table | One row per |
 |---|---|
-| `mysql_digest_stats` | host, pid, digest, interval — calls, cpu/runq/wall/wall_max ns, bytes in/out |
+| `mysql_digest_stats` | host, pid, digest, interval — calls, cpu/runq/wall/wall_max ns, bytes out (`bytes_in` is no longer filled: default 0 until the next schema migration, §20) |
 | `mysql_digest_text` | digest (`ReplacingMergeTree`, no TTL) — `digest_text`, `sample_query` (NULL unless both privacy flags below) |
 | `mysql_slow_queries` | slow query — latency, `digest_id` computed from the event text, `query` |
 | `netflow_peer_stats` | host, family, pid, direction, peer (`IPv6`; IPv4 as `::ffff:a.b.c.d`), service port, interval — bytes rx/tx, conns opened/closed |

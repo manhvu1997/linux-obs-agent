@@ -69,8 +69,8 @@ type OverloadCheck struct {
 }
 
 // OverloadEvidence is the numeric basis of the verdict. Node CPU is the
-// window value from mysql_report.node (source "window"), or the latest 5 s
-// sample when the window value is unavailable (source "sample"). The disk
+// window value from mysql_report.node (source "window"), or the latest
+// collector sample when the window value is unavailable (source "sample"). The disk
 // fields are filled for resource "disk", the CPU fields for resource "cpu".
 type OverloadEvidence struct {
 	NodeCPUUsedPercent      float64  `json:"node_cpu_used_percent"`
