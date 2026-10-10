@@ -1,14 +1,12 @@
 package overload
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
-	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 )
-
-var now = time.Unix(1_800_000_000, 0)
 
 func metrics(cpu, load1 float64, ncpu int) model.NodeMetrics {
 	var m model.NodeMetrics
@@ -18,13 +16,19 @@ func metrics(cpu, load1 float64, ncpu int) model.NodeMetrics {
 	return m
 }
 
-func mysqlReport(role string, ofNode float64, victims int) *model.MySQLAnalysis {
+func f(v float64) *float64 { return &v }
+
+// report: the top digest did pct % of the node's CPU work; the node used nodeUsed % over the window.
+func report(role string, pct, nodeUsed float64, victims int) *model.MySQLAnalysis {
 	return &model.MySQLAnalysis{
-		VictimDigests: victims,
-		Thresholds:    &model.QueryRoleThresholds{CulpritCPUSharePercent: 20, CulpritMinCPUPercent: 5},
+		WindowSeconds:           60,
+		Node:                    &model.MySQLNodeWindow{NumCPU: 8, CPUUsedCores: nodeUsed / 100 * 8, CPUUsedPercent: nodeUsed},
+		QueryCPUCoveragePercent: f(58),
+		Victims:                 map[string]int{"cpu": victims},
+		Thresholds:              &model.QueryRoleThresholds{CPUCulpritPercentOfNodeCPUUsed: 20, CPUCulpritMinNodeCPUUsedPercent: 50},
 		TopDigests: []model.QueryDigestStats{{
-			PID: 42, DigestID: "abc", DigestText: "select * from t",
-			CPUSharePercent: 80, CPUPercentOfCore: ofNode * 8, CPUPercentOfNode: ofNode, Role: role,
+			PID: 42, DigestID: "abc", DigestText: "select * from t", Command: "query", SampleQuery: "select * from t where id = 7",
+			CPUCores: pct / 100 * nodeUsed / 100 * 8, PercentOfNodeCPUUsed: f(pct), CallsPerSec: 40, BytesOutPerCall: 1300, CPURole: role,
 		}},
 	}
 }
@@ -38,68 +42,92 @@ var (
 func TestVerdicts(t *testing.T) {
 	cases := []struct {
 		name     string
-		in       Inputs
-		verdict  model.OverloadVerdict
-		conf     model.IOConfidence
-		checksOK []bool // node, mysqld, digest, victims
+		m        model.NodeMetrics
+		r        *model.MySQLAnalysis
+		fams     []model.FamilyStats
+		want     model.OverloadVerdict
+		wantConf model.IOConfidence
 	}{
-		{"all four pass", Inputs{metrics(95, 4, 8), mysqlReport(querystats.RoleCulprit, 50, 3), mysqlTop, pidFam},
-			model.OverloadByQuery, model.ConfidenceHigh, []bool{true, true, true, true}},
-		{"no victims lowers confidence", Inputs{metrics(95, 4, 8), mysqlReport(querystats.RoleCulprit, 50, 0), mysqlTop, pidFam},
-			model.OverloadByQuery, model.ConfidenceMedium, []bool{true, true, true, false}},
-		{"saturated by load alone", Inputs{metrics(40, 16, 8), mysqlReport(querystats.RoleCulprit, 50, 1), mysqlTop, pidFam},
-			model.OverloadByQuery, model.ConfidenceHigh, []bool{true, true, true, true}},
-		{"idle node: culprit is not an overload", Inputs{metrics(20, 1, 8), mysqlReport(querystats.RoleCulprit, 50, 1), mysqlTop, pidFam},
-			model.OverloadNodeNotSaturated, model.ConfidenceHigh, []bool{false, true, true, true}},
-		{"other family burns the CPU", Inputs{metrics(95, 4, 8), mysqlReport(querystats.RoleCulprit, 50, 1), nginxTop, pidFam},
-			model.OverloadNotMySQL, model.ConfidenceHigh, []bool{true, false, true, true}},
-		{"culprit but small share of node", Inputs{metrics(95, 4, 8), mysqlReport(querystats.RoleCulprit, 5, 1), mysqlTop, pidFam},
-			model.OverloadNoDominantQuery, model.ConfidenceHigh, []bool{true, true, false, true}},
-		{"large share of node but not culprit", Inputs{metrics(95, 4, 8), mysqlReport("", 50, 1), mysqlTop, pidFam},
-			model.OverloadNoDominantQuery, model.ConfidenceHigh, []bool{true, true, false, true}},
-		{"no process families", Inputs{metrics(95, 4, 8), mysqlReport(querystats.RoleCulprit, 50, 1), nil, nil},
-			model.OverloadByQuery, model.ConfidenceLow, []bool{true, false, true, true}},
+		{"culprit, saturated, victims", metrics(20, 1, 8), report("culprit", 27, 90, 2), mysqlTop, model.OverloadQueryCPU, model.ConfidenceHigh},
+		{"culprit, saturated, no victims", metrics(20, 1, 8), report("culprit", 27, 90, 0), mysqlTop, model.OverloadQueryCPU, model.ConfidenceMedium},
+		{"culprit, saturated, no families", metrics(20, 1, 8), report("culprit", 27, 90, 1), nil, model.OverloadQueryCPU, model.ConfidenceLow},
+		{"saturated by load only", metrics(20, 16, 8), report("culprit", 27, 60, 1), mysqlTop, model.OverloadQueryCPU, model.ConfidenceHigh},
+		{"idle node", metrics(90, 1, 8), report("", 90, 5, 0), mysqlTop, model.OverloadNodeNotSaturated, model.ConfidenceHigh},
+		{"another family burns the CPU", metrics(20, 1, 8), report("culprit", 27, 90, 1), nginxTop, model.OverloadNotMySQL, model.ConfidenceHigh},
+		{"spread over many digests", metrics(20, 1, 8), report("", 9, 90, 1), mysqlTop, model.OverloadNoDominantQuery, model.ConfidenceHigh},
 	}
 	for _, c := range cases {
-		r := Assess(c.in, Thresholds{}, now)
-		if r.Verdict != c.verdict || r.Confidence != c.conf {
-			t.Errorf("%s: verdict %s/%s, want %s/%s (%s)", c.name, r.Verdict, r.Confidence, c.verdict, c.conf, r.Summary)
-		}
-		if len(r.Checks) != 4 {
-			t.Fatalf("%s: %d checks, want 4", c.name, len(r.Checks))
-		}
-		for i, want := range c.checksOK {
-			if r.Checks[i].Passed != want {
-				t.Errorf("%s: check %s passed=%v, want %v (%s)", c.name, r.Checks[i].Name, r.Checks[i].Passed, want, r.Checks[i].Detail)
+		t.Run(c.name, func(t *testing.T) {
+			in := Inputs{Metrics: c.m, MySQL: c.r, Families: c.fams}
+			if c.fams != nil {
+				in.PIDFamilies = pidFam
 			}
+			got := Assess(in, Thresholds{}, time.Unix(0, 0))
+			if got.Verdict != c.want || got.Confidence != c.wantConf || got.Resource != "cpu" {
+				t.Fatalf("verdict %s/%s/%s, want %s/%s/cpu; summary %s", got.Verdict, got.Confidence, got.Resource, c.want, c.wantConf, got.Summary)
+			}
+			if len(got.Checks) != 4 {
+				t.Fatalf("checks = %d, want 4 (always all reported)", len(got.Checks))
+			}
+		})
+	}
+}
+
+func TestWindowValueWinsOverLatestSample(t *testing.T) {
+	// latest 5 s sample says 95 %, but over the window the node used 40 %.
+	got := Assess(Inputs{Metrics: metrics(95, 1, 8), MySQL: report("", 30, 40, 0), Families: mysqlTop, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
+	if got.Verdict != model.OverloadNodeNotSaturated || got.Evidence.NodeCPUSource != "window" {
+		t.Fatalf("verdict %s source %s", got.Verdict, got.Evidence.NodeCPUSource)
+	}
+}
+
+func TestNoWindowFallsBackToSample(t *testing.T) {
+	r := report("culprit", 27, 90, 1)
+	r.Node = nil
+	got := Assess(Inputs{Metrics: metrics(92, 1, 8), MySQL: r, Families: mysqlTop, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
+	if got.Evidence.NodeCPUSource != "sample" || !got.Checks[0].Passed || !contains(got.Missing, "node_cpu_window") {
+		t.Fatalf("source %s node check %v missing %v", got.Evidence.NodeCPUSource, got.Checks[0].Passed, got.Missing)
+	}
+}
+
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
 		}
 	}
+	return false
 }
 
 func TestNilAndNoData(t *testing.T) {
-	if Assess(Inputs{Metrics: metrics(95, 4, 8)}, Thresholds{}, now) != nil {
-		t.Fatal("nil MySQL report must yield nil")
+	if Assess(Inputs{Metrics: metrics(90, 1, 8)}, Thresholds{}, time.Unix(0, 0)) != nil {
+		t.Fatal("nil MySQL report must give nil")
 	}
-	r := Assess(Inputs{Metrics: metrics(95, 4, 8), MySQL: &model.MySQLAnalysis{
-		TopDigests: []model.QueryDigestStats{{DigestID: querystats.OtherDigestID, Role: querystats.RoleCulprit}},
-	}}, Thresholds{}, now)
-	if r.Verdict != model.OverloadNoData || r.DigestID != "" {
-		t.Fatalf("only <other> digest: verdict %s digest %q, want no_data and no candidate", r.Verdict, r.DigestID)
+	r := report("culprit", 27, 90, 0)
+	r.TopDigests = []model.QueryDigestStats{{DigestID: "other"}}
+	got := Assess(Inputs{Metrics: metrics(90, 1, 8), MySQL: r}, Thresholds{}, time.Unix(0, 0))
+	if got.Verdict != model.OverloadNoData || got.Digest != nil {
+		t.Fatalf("verdict %s digest %+v", got.Verdict, got.Digest)
 	}
 }
 
-func TestEvidenceAndThresholdsEchoed(t *testing.T) {
-	r := Assess(Inputs{metrics(95, 4, 8), mysqlReport(querystats.RoleCulprit, 50, 2), mysqlTop, pidFam}, Thresholds{}, now)
-	e := r.Evidence
-	if e.LoadNormalised != 0.5 || e.NumCPU != 8 || e.DigestCPUPercentOfNode != 50 || e.VictimDigests != 2 ||
-		e.MySQLFamily != "mysql.service" || e.MySQLFamilyCPU != 70 || e.TopFamily != "mysql.service" {
-		t.Fatalf("evidence = %+v", e)
+func TestDigestBlockEvidenceAndSummary(t *testing.T) {
+	got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: report("culprit", 27, 90, 1), Families: mysqlTop, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
+	d := got.Digest
+	if d == nil || d.DigestID != "abc" || d.PercentOfNodeCPUUsed == nil || *d.PercentOfNodeCPUUsed != 27 || d.CallsPerSec != 40 || d.CPURole != "culprit" {
+		t.Fatalf("digest = %+v", d)
 	}
-	th := r.Thresholds
-	if th.NodeCPUPercent != 85 || th.NodeLoad != 1.5 || th.MinNodeCPUPercent != 20 || th.CulpritCPUSharePct != 20 {
+	ev := got.Evidence
+	if ev.NodeCPUUsedPercent != 90 || ev.NumCPU != 8 || ev.QueryCPUCoveragePercent == nil || *ev.QueryCPUCoveragePercent != 58 || ev.CPUVictims != 1 || ev.WindowSeconds != 60 {
+		t.Fatalf("evidence = %+v", ev)
+	}
+	th := got.Thresholds
+	if th.NodeCPUPercent != 85 || th.NodeLoad != 1.5 || th.CPUCulpritPercentOfNodeCPUUsed != 20 || th.CPUCulpritMinNodeCPUUsedPercent != 50 {
 		t.Fatalf("thresholds = %+v", th)
 	}
-	if r.PID != 42 || r.DigestID != "abc" {
-		t.Fatalf("candidate = %d/%s", r.PID, r.DigestID)
+	for _, want := range []string{"abc", "27% of all CPU work", "mysql.service", "58% of mysqld CPU"} {
+		if !strings.Contains(got.Summary, want) {
+			t.Fatalf("summary %q lacks %q", got.Summary, want)
+		}
 	}
 }

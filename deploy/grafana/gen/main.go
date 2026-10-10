@@ -406,7 +406,7 @@ GROUP BY host, client ORDER BY bytesOut DESC LIMIT 50`), 12)
 	b.row("Diagnose snapshots")
 	b.add(chTable("Snapshots (fetch one with the query in deploy/grafana/README.md)", `SELECT ts, host, reason, verdict,
   JSONExtractString(report, 'mysql_report', 'overload_cause', 'verdict') AS overload,
-  JSONExtractString(report, 'mysql_report', 'overload_cause', 'digest_id') AS overloadDigest,
+  JSONExtractString(report, 'mysql_report', 'overload_cause', 'digest', 'digest_id') AS overloadDigest,
   length(report) AS reportBytes
 FROM obs.diagnose_snapshots
 WHERE $__timeFilter(ts) AND `+hostF+`

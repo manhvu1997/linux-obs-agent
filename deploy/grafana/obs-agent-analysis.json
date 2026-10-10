@@ -781,7 +781,7 @@
             "uid": "${ds_clickhouse}"
           },
           "format": 1,
-          "rawSql": "SELECT ts, host, reason, verdict,\n  JSONExtractString(report, 'mysql_report', 'overload_cause', 'verdict') AS overload,\n  JSONExtractString(report, 'mysql_report', 'overload_cause', 'digest_id') AS overloadDigest,\n  length(report) AS reportBytes\nFROM obs.diagnose_snapshots\nWHERE $__timeFilter(ts) AND host IN (${host:singlequote})\nORDER BY ts DESC LIMIT 100",
+          "rawSql": "SELECT ts, host, reason, verdict,\n  JSONExtractString(report, 'mysql_report', 'overload_cause', 'verdict') AS overload,\n  JSONExtractString(report, 'mysql_report', 'overload_cause', 'digest', 'digest_id') AS overloadDigest,\n  length(report) AS reportBytes\nFROM obs.diagnose_snapshots\nWHERE $__timeFilter(ts) AND host IN (${host:singlequote})\nORDER BY ts DESC LIMIT 100",
           "editorType": "sql",
           "queryType": "table"
         }

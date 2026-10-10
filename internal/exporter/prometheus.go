@@ -440,11 +440,7 @@ func (p *PrometheusExporter) withOverloadCause(a *model.MySQLAnalysis, m model.N
 	}
 	var th overload.Thresholds
 	if p.mysqlCfg != nil {
-		th = overload.Thresholds{
-			NodeCPUPercent:    p.mysqlCfg.OverloadNodeCPUPercent,
-			NodeLoad:          p.mysqlCfg.OverloadNodeLoad,
-			MinNodeCPUPercent: p.mysqlCfg.OverloadMinNodeCPUPercent,
-		}
+		th = overload.Thresholds{NodeCPUPercent: p.mysqlCfg.OverloadNodeCPUPercent, NodeLoad: p.mysqlCfg.OverloadNodeLoad}
 	}
 	cp := *a
 	cp.OverloadCause = overload.Assess(in, th, time.Now())
