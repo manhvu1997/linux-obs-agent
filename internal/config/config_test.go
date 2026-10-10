@@ -118,3 +118,18 @@ func TestMySQLOverloadThresholds(t *testing.T) {
 		t.Fatal("overload_min_node_cpu_percent 0 accepted with mysql enabled")
 	}
 }
+
+func TestMySQLRoleThresholds(t *testing.T) {
+	m := Defaults().MySQL
+	if m.CPUCulpritPercentOfNodeCPUUsed != 20 || m.CPUCulpritMinNodeCPUUsedPercent != 50 || m.VictimWaitPercent != 50 {
+		t.Fatalf("defaults = %v / %v / %v", m.CPUCulpritPercentOfNodeCPUUsed, m.CPUCulpritMinNodeCPUUsedPercent, m.VictimWaitPercent)
+	}
+	for _, bad := range []float64{0, -1, 101} {
+		c := Defaults()
+		c.MySQL.Enabled = true
+		c.MySQL.VictimWaitPercent = bad
+		if err := c.validate(); err == nil {
+			t.Fatalf("victim_wait_percent %v accepted", bad)
+		}
+	}
+}

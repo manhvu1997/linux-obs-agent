@@ -964,28 +964,14 @@ type SlowQuery struct {
 	DigestID string
 }
 
-// MySQLProcessStats holds aggregated per-PID query statistics enriched with
-// /proc metadata by the userspace analyzer.
-type MySQLProcessStats struct {
-	PID          uint32  `json:"pid"`
-	Comm         string  `json:"comm"`
-	Cmdline      string  `json:"cmdline,omitempty"`
-	CgroupPath   string  `json:"cgroup_path,omitempty"`
-	TotalQueries uint64  `json:"total_queries"`
-	SlowQueries  uint64  `json:"slow_queries"`
-	AvgLatencyMs float64 `json:"avg_latency_ms"`
-	MaxLatencyMs float64 `json:"max_latency_ms"`
-}
-
 // MySQLAnalysis is the full MySQL diagnostic report returned by
 // GET /api/diagnose when MySQL tracing is enabled.
 type MySQLAnalysis struct {
-	Type              string              `json:"type"` // always "mysql_analysis"
-	Timestamp         time.Time           `json:"timestamp"`
-	SlowThresholdMs   uint64              `json:"slow_threshold_ms"`
-	MysqldPath        string              `json:"mysqld_path"`
-	RecentSlowQueries []MySQLSlowEvent    `json:"recent_slow_queries"`
-	TopProcesses      []MySQLProcessStats `json:"top_processes"`
+	Type              string           `json:"type"` // always "mysql_analysis"
+	Timestamp         time.Time        `json:"timestamp"`
+	SlowThresholdMs   uint64           `json:"slow_threshold_ms"`
+	MysqldPath        string           `json:"mysqld_path"`
+	RecentSlowQueries []MySQLSlowEvent `json:"recent_slow_queries"`
 
 	// Query digests (present when mysql.emit_all_queries is on).
 	WindowSeconds        int                  `json:"window_seconds,omitempty"`

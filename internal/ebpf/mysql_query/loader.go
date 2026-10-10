@@ -1,11 +1,9 @@
 // Package mysql_query provides an always-on MySQL slow-query latency tracer
 // via eBPF uprobes on the mysqld binary.
 //
-// Design: per-PID statistics (total/slow query counts, total/max latency) are
-// aggregated in-kernel inside a BPF_MAP_TYPE_LRU_HASH.  TopSlowPIDs() does a
-// single batch map read every poll interval – no per-query userspace wakeup.
-// Only slow-query outlier events (latency > slow_query_threshold_ns) are emitted
-// to the ringbuf.
+// Design: statements are aggregated in-kernel and drained once per poll
+// interval (DrainAgg) – no per-query userspace wakeup. Only slow-query outlier
+// events (latency > slow_query_threshold_ns) are emitted to the slow ringbuf.
 //
 // # Mechanism
 //
@@ -17,7 +15,8 @@
 // keyed by {tgid, command, text hash}; DrainAgg returns the sums. Statement
 // text is sent once per (command, hash) on TextEvents. CmdEvents carries only
 // commands that could not be aggregated (map full, or a hash marked unsafe).
-// COM_QUERY additionally feeds the per-PID stats map and slow-query events.
+// COM_QUERY additionally feeds slow-query events (and the kernel's per-PID
+// stats map, which nothing in userspace reads any more).
 // With emitAll == false only COM_QUERY is tracked and no per-command events
 // are emitted (legacy behaviour).
 //
@@ -36,7 +35,6 @@
 //
 //	l := NewLoader(100_000_000, "/usr/sbin/mysqld", true) // 100ms threshold
 //	err := l.Start(ctx)                                    // attach probes, start consumers
-//	stats := l.TopSlowPIDs(10, 0)                         // poll every 5 s
 //	rows, _ := l.DrainAgg()                               // per-interval sums, every command
 //	ev := <-l.CmdEvents                                   // only commands that could not be aggregated
 //	l.Stop()
@@ -51,8 +49,6 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
-	"sort"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -60,7 +56,6 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
-	"golang.org/x/sys/unix"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
@@ -441,75 +436,6 @@ func attachKretprobeMaxActive(sym string, prog *ebpf.Program) (link.Link, error)
 	return link.Kretprobe(sym, prog, nil)
 }
 
-// ─── Map polling ──────────────────────────────────────────────────────────────
-
-// MySQLPIDStat is the Go-side view of one mysql_pid_stats_t LRU entry.
-type MySQLPIDStat struct {
-	PID            uint32
-	Comm           string
-	TotalQueries   uint64
-	SlowQueries    uint64
-	TotalLatencyNs uint64
-	MaxLatencyNs   uint64
-	LastSeenTs     uint64
-}
-
-// monotonicNowNs returns the current CLOCK_MONOTONIC time in nanoseconds.
-// Must match the time base used by bpf_ktime_get_ns() in the kernel.
-func monotonicNowNs() uint64 {
-	var ts unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
-		return 0
-	}
-	return uint64(ts.Sec)*1_000_000_000 + uint64(ts.Nsec)
-}
-
-// TopSlowPIDs batch-reads the in-kernel LRU map and returns the top-n PIDs
-// sorted by slow_queries descending.
-//
-// staleNs is the maximum age of last_seen_ts before an entry is ignored
-// (pass 0 for the default 60 s window).
-func (l *Loader) TopSlowPIDs(n int, staleNs uint64) []MySQLPIDStat {
-	if staleNs == 0 {
-		staleNs = 60 * uint64(time.Second)
-	}
-	now := monotonicNowNs()
-
-	var all []MySQLPIDStat
-	var key uint32
-	var val MysqlQueryMysqlPidStatsT // bpf2go-generated type
-
-	iter := l.objs.MysqlPidStats.Iterate()
-	for iter.Next(&key, &val) {
-		if now > 0 && val.LastSeenTs > 0 && now-val.LastSeenTs > staleNs {
-			continue
-		}
-		if val.TotalQueries == 0 {
-			continue
-		}
-		all = append(all, MySQLPIDStat{
-			PID:            key,
-			Comm:           nullTermU8(val.Comm[:]),
-			TotalQueries:   val.TotalQueries,
-			SlowQueries:    val.SlowQueries,
-			TotalLatencyNs: val.TotalLatencyNs,
-			MaxLatencyNs:   val.MaxLatencyNs,
-			LastSeenTs:     val.LastSeenTs,
-		})
-	}
-	if err := iter.Err(); err != nil {
-		slog.Warn("mysql_query: TopSlowPIDs map iterate", "err", err)
-	}
-
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].SlowQueries > all[j].SlowQueries
-	})
-	if len(all) > n {
-		all = all[:n]
-	}
-	return all
-}
-
 // ─── Ringbuf consumer ─────────────────────────────────────────────────────────
 
 // recordReader is the subset of *ringbuf.Reader the consumers use.
@@ -616,28 +542,4 @@ func nullTermU8(b []uint8) string {
 		end++
 	}
 	return string(b[:end])
-}
-
-// ReadCmdline reads /proc/<pid>/cmdline and returns the command line with
-// NUL-separators replaced by spaces (best-effort).
-func ReadCmdline(pid uint32) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimRight(strings.ReplaceAll(string(data), "\x00", " "), " ")
-}
-
-// ReadCgroup returns the cgroup v2 path from /proc/<pid>/cgroup (best-effort).
-func ReadCgroup(pid uint32) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
-	if err != nil {
-		return ""
-	}
-	line := strings.SplitN(string(data), "\n", 2)[0]
-	parts := strings.SplitN(line, ":", 3)
-	if len(parts) == 3 {
-		return parts[2]
-	}
-	return ""
 }

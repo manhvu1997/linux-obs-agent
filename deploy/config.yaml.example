@@ -348,8 +348,6 @@ mysql:
   mysqld_path: /usr/sbin/mysqld      # path to mysqld binary for uprobe
   slow_query_threshold_ms: 2000       # emit ringbuf event when query > 100 ms
   poll_interval: 5s
-  top_n: 5
-  stale_seconds: 60
   max_recent_queries: 20
   # Query digests: one kernel event per command → per-pattern CPU, run-queue
   # wait, wall time and bytes. Ranks by TOTAL CPU so the query that causes a
@@ -374,6 +372,14 @@ mysql:
   culprit_cpu_share_percent: 20
   culprit_min_cpu_percent: 5
   victim_runq_ratio: 5
+  # cpu_role "culprit": the digest did >= cpu_culprit_percent_of_node_cpu_used % of all
+  # CPU work on this server over digest_window, while the node used >=
+  # cpu_culprit_min_node_cpu_used_percent % of its CPU (an idle server never has a culprit).
+  cpu_culprit_percent_of_node_cpu_used: 20
+  cpu_culprit_min_node_cpu_used_percent: 50
+  # victim_of: waiting (for a CPU) >= victim_wait_percent % of the digest's time and
+  # latency_ms_avg >= slow_query_threshold_ms.
+  victim_wait_percent: 50
   # mysql_report.overload_cause: "culprit" only means a digest dominates MySQL's
   # query CPU. verdict query_overload additionally needs the node saturated
   # (cpu% >= overload_node_cpu_percent OR load1/NumCPU >= overload_node_load),

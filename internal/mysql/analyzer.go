@@ -3,10 +3,10 @@
 // The Analyzer:
 //  1. Starts the eBPF mysql_query module at agent startup (attaches uprobes to
 //     dispatch_command inside the mysqld binary).
-//  2. Polls the in-kernel LRU map every cfg.PollInterval (default 5 s).
-//  3. Enriches each PID with /proc metadata (cmdline, cgroup path).
+//  2. Drains the kernel aggregation every cfg.PollInterval (default 5 s) and
+//     samples node and mysqld CPU for the same interval.
+//  3. Publishes a *model.MySQLAnalysis snapshot accessible via Latest().
 //  4. Maintains a ring of the most recent slow-query events (from the ringbuf).
-//  5. Publishes a *model.MySQLAnalysis snapshot accessible via Latest().
 //
 // Unlike the fsync/writeback analyzers, the snapshot is always published when
 // there is data – MySQL slow queries are valuable regardless of system-wide
@@ -38,7 +38,8 @@ type Analyzer struct {
 	loader *mysqlq.Loader
 
 	agg     *querystats.Aggregator
-	text    *textCache // set in Start, before started is published
+	host    *hostSampler // poll goroutine only
+	text    *textCache   // set in Start, before started is published
 	digests atomic.Pointer[querystats.Snapshot]
 	started atomic.Bool
 
@@ -63,16 +64,20 @@ func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 		cfg:    cfg,
 		coll:   coll,
 		loader: mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, cfg.EmitAllQueries),
+		host:   newHostSampler(),
 		agg: querystats.New(querystats.Config{
-			Window:                 cfg.DigestWindow,
-			TopN:                   cfg.TopDigests,
-			TopNBytes:              10,
-			CulpritCPUSharePercent: cfg.CulpritCPUSharePercent,
-			CulpritMinCPUPercent:   cfg.CulpritMinCPUPercent,
-			VictimRunqRatio:        cfg.VictimRunqRatio,
-			SlowWallNs:             thresholdNs,
-			StickyMax:              cfg.StickyDigestsMax,
-			StickyTTL:              cfg.StickyDigestTTL,
+			Window:                       cfg.DigestWindow,
+			TopN:                         cfg.TopDigests,
+			TopNBytes:                    10,
+			CulpritCPUSharePercent:       cfg.CulpritCPUSharePercent,
+			CulpritMinCPUPercent:         cfg.CulpritMinCPUPercent,
+			VictimRunqRatio:              cfg.VictimRunqRatio,
+			CPUCulpritPercentOfNodeUsed:  cfg.CPUCulpritPercentOfNodeCPUUsed,
+			CPUCulpritMinNodeUsedPercent: cfg.CPUCulpritMinNodeCPUUsedPercent,
+			VictimWaitPercent:            cfg.VictimWaitPercent,
+			SlowWallNs:                   thresholdNs,
+			StickyMax:                    cfg.StickyDigestsMax,
+			StickyTTL:                    cfg.StickyDigestTTL,
 		}),
 	}
 }
@@ -97,6 +102,7 @@ func (a *Analyzer) Start(ctx context.Context) error {
 	}
 	defer a.loader.Stop()
 	a.text = newTextCache(32768, textCacheHooks{forget: a.loader.ForgetText, markUnsafe: a.loader.MarkUnsafe})
+	a.host.prime()
 	a.started.Store(true)
 	defer a.started.Store(false)
 
@@ -327,72 +333,55 @@ func (a *Analyzer) HashMismatches() uint64 {
 
 // ─── Internal ─────────────────────────────────────────────────────────────────
 
-// poll reads the LRU map, enriches each PID, and publishes a new snapshot.
-// Always publishes when there is data (no CPU/mem pressure gate).
+// poll drains the kernel aggregation and records one tick.
 func (a *Analyzer) poll() {
 	now := time.Now()
-	if entries, err := a.loader.DrainAgg(); err != nil {
+	entries, err := a.loader.DrainAgg()
+	if err != nil {
 		slog.Warn("mysql: draining kernel aggregation", "err", err)
-	} else {
-		a.applyAgg(entries, now, a.loader.PreparedTextTracking())
+		entries = nil
 	}
+	a.tick(now, entries, a.loader.PreparedTextTracking())
+}
+
+// tick records one poll — the drained statements and the host CPU over the
+// same interval, in the same bucket — and publishes the digest snapshot and
+// the report. It does not touch the loader, so it is testable.
+func (a *Analyzer) tick(now time.Time, entries []mysqlq.AggEntry, preparedTracking bool) {
+	a.applyAgg(entries, now, preparedTracking)
+	a.agg.AddHost(a.host.sample(a.agg.WindowPIDs(now)), now)
 	snap := a.agg.Snapshot(now)
 	a.digests.Store(&snap)
 
-	staleNs := uint64(a.cfg.StaleSeconds) * uint64(time.Second)
-	raw := a.loader.TopSlowPIDs(a.cfg.TopN, staleNs)
-	if len(raw) == 0 && len(snap.TopByCPU) == 0 {
-		return
-	}
-
-	processes := make([]model.MySQLProcessStats, 0, len(raw))
-	for _, r := range raw {
-		avgMs := 0.0
-		if r.TotalQueries > 0 {
-			avgMs = float64(r.TotalLatencyNs) / float64(r.TotalQueries) / 1e6
-		}
-		processes = append(processes, model.MySQLProcessStats{
-			PID:          r.PID,
-			Comm:         r.Comm,
-			Cmdline:      mysqlq.ReadCmdline(r.PID),
-			CgroupPath:   mysqlq.ReadCgroup(r.PID),
-			TotalQueries: r.TotalQueries,
-			SlowQueries:  r.SlowQueries,
-			AvgLatencyMs: avgMs,
-			MaxLatencyMs: float64(r.MaxLatencyNs) / 1e6,
-		})
-	}
-
-	// Copy the current recent slow-query ring under lock.
 	a.recentMu.Lock()
 	recent := make([]model.MySQLSlowEvent, len(a.recentSlowQueries))
 	copy(recent, a.recentSlowQueries)
 	a.recentMu.Unlock()
-
-	analysis := &model.MySQLAnalysis{
+	if len(snap.TopByCPU) == 0 && len(recent) == 0 {
+		return
+	}
+	a.latest.Store(&model.MySQLAnalysis{
 		Type:              "mysql_analysis",
-		Timestamp:         time.Now(),
+		Timestamp:         now,
 		SlowThresholdMs:   a.cfg.SlowQueryThresholdMs,
 		MysqldPath:        a.cfg.MysqldPath,
 		RecentSlowQueries: recent,
-		TopProcesses:      processes,
 
-		WindowSeconds:        snap.WindowSeconds,
-		CPUAccounting:        snap.CPUAccounting,
-		QueryCPUMsTotal:      snap.QueryCPUMsTotal,
-		DroppedEvents:        a.loader.Dropped(),
-		Thresholds:           &snap.Thresholds,
-		TopDigests:           snap.TopByCPU,
-		TopDigestsByBytesOut: snap.TopByBytesOut,
-		VictimDigests:        snap.VictimDigests,
-	}
-
-	a.latest.Store(analysis)
-	slog.Debug("mysql: analysis updated",
-		"processes", len(processes),
-		"recent_slow", len(recent),
-		"digests", len(snap.TopByCPU),
-	)
+		WindowSeconds:           snap.WindowSeconds,
+		CPUAccounting:           snap.CPUAccounting,
+		QueryCPUMsTotal:         snap.QueryCPUMsTotal,
+		Node:                    snap.Node,
+		QueryCPUCoveragePercent: snap.QueryCPUCoveragePercent,
+		DroppedEvents:           a.Dropped(),
+		Thresholds:              &snap.Thresholds,
+		TopDigests:              snap.TopByCPU,
+		TopDigestsByWait:        snap.TopByWait,
+		TopDigestsByBytesOut:    snap.TopByBytesOut,
+		VictimDigests:           snap.VictimDigests,
+		Victims:                 snap.Victims,
+		Accounting:              snap.Accounting,
+	})
+	slog.Debug("mysql: analysis updated", "recent_slow", len(recent), "digests", len(snap.TopByCPU))
 }
 
 // drainSlowEvents consumes the ringbuf slow-event channel, appends to the

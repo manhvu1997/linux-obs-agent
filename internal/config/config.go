@@ -422,12 +422,8 @@ type MySQLConfig struct {
 	// SlowQueryThresholdMs: report queries that take longer than this (milliseconds).
 	// Default 100 ms.  Set via MYSQL_SLOW_QUERY_THRESHOLD_MS.
 	SlowQueryThresholdMs uint64 `yaml:"slow_query_threshold_ms"`
-	// PollInterval: how often to batch-read the in-kernel LRU stats map.
+	// PollInterval: how often to drain the kernel aggregation and sample host CPU.
 	PollInterval time.Duration `yaml:"poll_interval"`
-	// TopN: max number of processes to include per MySQLAnalysis.
-	TopN int `yaml:"top_n"`
-	// StaleSeconds: ignore LRU entries not updated within this window.
-	StaleSeconds int `yaml:"stale_seconds"`
 	// MaxRecentQueries: max slow-query events to keep in the recent ring.
 	MaxRecentQueries int `yaml:"max_recent_queries"`
 
@@ -459,6 +455,15 @@ type MySQLConfig struct {
 	CulpritMinCPUPercent float64 `yaml:"culprit_min_cpu_percent"`
 	// VictimRunqRatio: run-queue wait > cpu × ratio (and wall ≥ slow threshold) marks "victim".
 	VictimRunqRatio float64 `yaml:"victim_runq_ratio"`
+	// CPUCulpritPercentOfNodeCPUUsed: cpu_role "culprit" needs at least this
+	// % of the node's CPU used over digest_window …
+	CPUCulpritPercentOfNodeCPUUsed float64 `yaml:"cpu_culprit_percent_of_node_cpu_used"`
+	// … while the node used at least this % of its CPU capacity (so an idle
+	// server never shows a culprit).
+	CPUCulpritMinNodeCPUUsedPercent float64 `yaml:"cpu_culprit_min_node_cpu_used_percent"`
+	// VictimWaitPercent: victim_of needs waits ≥ this % of wall time (and
+	// latency ≥ slow_query_threshold_ms).
+	VictimWaitPercent float64 `yaml:"victim_wait_percent"`
 	// mysql_report.overload_cause: a digest overloads the node only when the
 	// node is saturated (cpu% >= OverloadNodeCPUPercent OR load1/NumCPU >=
 	// OverloadNodeLoad), mysqld is the top CPU family, and the digest is a
@@ -592,8 +597,6 @@ func Defaults() *Config {
 			MysqldPath:            "/usr/sbin/mysqld",
 			SlowQueryThresholdMs:  100, // 100 ms
 			PollInterval:          5 * time.Second,
-			TopN:                  20,
-			StaleSeconds:          60,
 			MaxRecentQueries:      100,
 
 			EmitAllQueries:         true,
@@ -606,6 +609,10 @@ func Defaults() *Config {
 			CulpritCPUSharePercent: 20,
 			CulpritMinCPUPercent:   5,
 			VictimRunqRatio:        5,
+
+			CPUCulpritPercentOfNodeCPUUsed:  20,
+			CPUCulpritMinNodeCPUUsedPercent: 50,
+			VictimWaitPercent:               50,
 
 			OverloadNodeCPUPercent:    85,
 			OverloadNodeLoad:          1.5,
@@ -802,6 +809,11 @@ func (c *Config) validate() error {
 		}
 		if c.MySQL.CulpritCPUSharePercent <= 0 || c.MySQL.CulpritMinCPUPercent <= 0 || c.MySQL.VictimRunqRatio <= 0 {
 			return fmt.Errorf("mysql.culprit_cpu_share_percent, culprit_min_cpu_percent and victim_runq_ratio must be > 0")
+		}
+		for _, v := range []float64{c.MySQL.CPUCulpritPercentOfNodeCPUUsed, c.MySQL.CPUCulpritMinNodeCPUUsedPercent, c.MySQL.VictimWaitPercent} {
+			if v <= 0 || v > 100 {
+				return fmt.Errorf("mysql.cpu_culprit_percent_of_node_cpu_used, cpu_culprit_min_node_cpu_used_percent and victim_wait_percent must be in (0, 100]")
+			}
 		}
 		if c.MySQL.OverloadNodeCPUPercent <= 0 || c.MySQL.OverloadNodeLoad <= 0 || c.MySQL.OverloadMinNodeCPUPercent <= 0 {
 			return fmt.Errorf("mysql.overload_node_cpu_percent, overload_node_load and overload_min_node_cpu_percent must be > 0")
