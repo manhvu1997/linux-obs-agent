@@ -9,19 +9,22 @@ CREATE DATABASE IF NOT EXISTS obs;
 -- GRANT INSERT ON obs.* TO obs_agent;
 
 CREATE TABLE IF NOT EXISTS obs.mysql_digest_stats (
-  window_start DateTime('UTC'),
-  window_end   DateTime('UTC'),
-  host         LowCardinality(String),
-  pid          UInt32,
-  digest_id    String,
-  command      LowCardinality(String),
-  calls        UInt64,
-  cpu_ns       UInt64,
-  runq_ns      UInt64,
-  wall_ns      UInt64,
-  wall_max_ns  UInt64,
-  bytes_in     UInt64,
-  bytes_out    UInt64
+  window_start     DateTime('UTC'),
+  window_end       DateTime('UTC'),
+  host             LowCardinality(String),
+  pid              UInt32,
+  digest_id        String,
+  command          LowCardinality(String),
+  calls            UInt64,
+  cpu_ns           UInt64,
+  runq_ns          UInt64,
+  wall_ns          UInt64,
+  wall_max_ns      UInt64,
+  bytes_out        UInt64,
+  disk_read_bytes  UInt64,
+  disk_write_bytes UInt64,
+  io_wait_ns       Nullable(UInt64),
+  redo_wait_ns     Nullable(UInt64)
 ) ENGINE = MergeTree
 PARTITION BY toDate(window_end)
 ORDER BY (host, digest_id, window_end)
@@ -84,6 +87,23 @@ CREATE TABLE IF NOT EXISTS obs.family_stats (
 ) ENGINE = MergeTree
 PARTITION BY toDate(window_end)
 ORDER BY (host, family, window_end)
+TTL window_end + INTERVAL 30 DAY
+SETTINGS ttl_only_drop_parts = 1;
+
+-- Denominators per host and flush interval (shares over any range). NULL =
+-- that interval had a poll without a valid delta.
+CREATE TABLE IF NOT EXISTS obs.host_stats (
+  window_start     DateTime('UTC'),
+  window_end       DateTime('UTC'),
+  host             LowCardinality(String),
+  cpu_count        UInt16,
+  node_cpu_used_ns Nullable(UInt64),
+  mysqld_cpu_ns    Nullable(UInt64),
+  disk_read_bytes  Nullable(UInt64),
+  disk_write_bytes Nullable(UInt64)
+) ENGINE = MergeTree
+PARTITION BY toDate(window_end)
+ORDER BY (host, window_end)
 TTL window_end + INTERVAL 30 DAY
 SETTINGS ttl_only_drop_parts = 1;
 

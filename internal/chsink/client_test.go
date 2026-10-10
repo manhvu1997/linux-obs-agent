@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,18 @@ func TestInsertRequestShape(t *testing.T) {
 	}
 	if gotEnc != "gzip" || gotUser != "u" || gotPass != "p" || gotBody != "{\"a\":1}\n" {
 		t.Errorf("enc=%q user=%q pass=%q body=%q", gotEnc, gotUser, gotPass, gotBody)
+	}
+}
+
+func TestInsertSkipsUnknownFields(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = r.URL.Query() }))
+	defer srv.Close()
+	if _, err := testClient(t, srv.URL).Insert(context.Background(), TableDigestStats, []byte{}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("input_format_skip_unknown_fields") != "1" {
+		t.Fatalf("query params = %v", got)
 	}
 }
 

@@ -56,6 +56,8 @@ func (c *Client) Insert(ctx context.Context, table string, gz []byte) (Outcome, 
 	q.Set("query", "INSERT INTO "+c.db+"."+table+" FORMAT JSONEachRow")
 	q.Set("async_insert", "1")
 	q.Set("wait_for_async_insert", "1")
+	// An agent newer than the table schema loses only the new columns, not the batch.
+	q.Set("input_format_skip_unknown_fields", "1")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"?"+q.Encode(), bytes.NewReader(gz))
 	if err != nil {
 		return OutcomeReject, err
