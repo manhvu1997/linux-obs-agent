@@ -150,13 +150,22 @@ func (s *Sink) Flush(ctx context.Context, now time.Time) {
 	s.mu.Unlock()
 	w := flushWindow{start, end}
 
+	// Host and Digests are drained back to back, before either is encoded,
+	// so a poll landing between the two drains is rare (it is then split
+	// across adjacent windows; sums over a range stay exact).
 	var hw querystats.HostWindow
 	if s.src.Host != nil {
 		hw = s.src.Host()
+	}
+	var d []querystats.DigestDelta
+	var folded uint64
+	if s.src.Digests != nil {
+		d, folded = s.src.Digests()
+	}
+	if s.src.Host != nil {
 		enqueueRows(s, TableHostStats, hostRows(s.host, w, hw))
 	}
 	if s.src.Digests != nil {
-		d, folded := s.src.Digests()
 		s.m.dropped.WithLabelValues(TableDigestStats, "drain_cap").Add(float64(folded))
 		// Text rows come from the folded slice, so <minor> gets its text once.
 		d = foldMinor(d, s.cfg.MinDigestSharePercent, s.src.SlowWallNs)

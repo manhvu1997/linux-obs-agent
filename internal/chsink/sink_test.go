@@ -397,3 +397,41 @@ func TestFlushWithoutHostSourceWritesNullWaits(t *testing.T) {
 		}
 	}
 }
+
+// Flush drains Host and then Digests back to back, before either batch is
+// encoded, and before any Insert: the window between the two drains (where a
+// poll could be split across flush windows) stays as short as possible.
+func TestFlushDrainsHostThenDigestsBeforeEncoding(t *testing.T) {
+	var order []string
+	ins := &fakeIns{hook: func() { order = append(order, "insert") }}
+	var s *Sink
+	src := Sources{
+		Host: func() querystats.HostWindow {
+			order = append(order, "host")
+			return querystats.HostWindow{Samples: 1, NumCPU: 2, NodeCPUUsedNs: 5, NodeOK: true, IOWaitOK: true, RedoWaitOK: true}
+		},
+		Digests: func() ([]querystats.DigestDelta, uint64) {
+			order = append(order, "digests")
+			s.mu.Lock()
+			n := len(s.buf)
+			s.mu.Unlock()
+			if n != 0 {
+				t.Errorf("Digests drained after %d batch(es) were encoded: the host batch must wait", n)
+			}
+			return digestSource("a")()
+		},
+	}
+	s = NewSink(testCfg(), "h", ins, src, tStart)
+	s.Flush(context.Background(), tStart.Add(time.Minute))
+	if len(order) < 3 || order[0] != "host" || order[1] != "digests" {
+		t.Fatalf("order = %v, want host, digests, then inserts", order)
+	}
+	for _, o := range order[2:] {
+		if o != "insert" {
+			t.Fatalf("order = %v, want host, digests, then inserts", order)
+		}
+	}
+	if got := ins.tables(); len(got) < 2 || got[0] != TableHostStats || got[1] != TableDigestStats {
+		t.Errorf("tables sent = %v, want host_stats then mysql_digest_stats first", got)
+	}
+}

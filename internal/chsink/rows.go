@@ -122,8 +122,12 @@ type SnapshotRow struct {
 }
 
 // digestRows renders the interval's digest deltas. hw says which waits every
-// poll measured: io_wait_ns / redo_wait_ns are written only when hw has
-// samples and the matching flag is set, NULL otherwise (never a partial 0).
+// poll of the host window measured: io_wait_ns / redo_wait_ns are written
+// only when hw has samples and the matching flag is set, NULL otherwise. The
+// host and digest drains are separate, so a poll that straddles a flush can
+// land in adjacent windows: when wait availability changes at that moment, one
+// window may carry a measured wait that includes one unmeasured poll (sums
+// over a range stay exact).
 func digestRows(host string, w flushWindow, d []querystats.DigestDelta, hw querystats.HostWindow) []DigestStatRow {
 	ioOK := hw.Samples > 0 && hw.IOWaitOK
 	redoOK := hw.Samples > 0 && hw.RedoWaitOK
