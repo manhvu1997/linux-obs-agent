@@ -1764,7 +1764,7 @@ Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound p
 | `obs_agent_mysql_digest_{cpu_seconds,calls,disk_read_bytes}_total` (`minimal`, `full`); `…_{runq_wait_seconds,bytes_out,io_wait_seconds}_total` (`full`; `io_wait` only while measured) | `digest_id` |
 | `obs_agent_mysql_digest_info` (=1) | `digest_id, digest_text` |
 | `obs_agent_mysql_digest_coverage_ratio` | — |
-| `obs_agent_mysql_query_cpu_coverage_ratio` (0–1, absent while unknown) | — |
+| `obs_agent_mysql_query_cpu_coverage_ratio` (≈ 0–1, not clamped, absent while unknown) | — |
 | `obs_agent_mysql_io_wait_available`, `obs_agent_mysql_redo_wait_available` (1/0) | — |
 | `obs_agent_node_disk_read_bytes_total`, `obs_agent_node_disk_write_bytes_total` (counters), `obs_agent_node_physical_disks` (gauge) | — |
 | `obs_agent_pressure_io_full_avg10`, `_io_some_avg10`, `_cpu_some_avg10` (gauges, percent; only when PSI is available) | — |

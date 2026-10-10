@@ -340,6 +340,14 @@ func TestQueryCPUCoverageRatio(t *testing.T) {
 	if got := testutil.ToFloat64(gaugeOf(t, c, "obs_agent_mysql_query_cpu_coverage_ratio")); got != 0.58 {
 		t.Fatalf("coverage = %v", got)
 	}
+	want := `
+# HELP obs_agent_mysql_query_cpu_coverage_ratio Fraction (≈ 0–1, not clamped: tick granularity can read slightly above 1) of the traced mysqld processes' CPU spent inside dispatch_command over the digest window (absent while unknown).
+# TYPE obs_agent_mysql_query_cpu_coverage_ratio gauge
+obs_agent_mysql_query_cpu_coverage_ratio 0.58
+`
+	if err := testutil.CollectAndCompare(c, strings.NewReader(want), "obs_agent_mysql_query_cpu_coverage_ratio"); err != nil {
+		t.Fatal(err)
+	}
 	s.QueryCPUCoveragePercent = nil
 	if n := testutil.CollectAndCount(c, "obs_agent_mysql_query_cpu_coverage_ratio"); n != 0 {
 		t.Fatal("unknown coverage must not be exported")

@@ -44,7 +44,7 @@ var (
 	myDigestIOWaitDesc = prometheus.NewDesc("obs_agent_mysql_digest_io_wait_seconds_total",
 		"Seconds statements of this digest waited for block I/O (full mode).", []string{"digest_id"}, nil)
 	myQueryCoverageDesc = prometheus.NewDesc("obs_agent_mysql_query_cpu_coverage_ratio",
-		"Share (0-1) of the traced mysqld processes' CPU spent inside dispatch_command over the digest window (absent while unknown).", nil, nil)
+		"Fraction (≈ 0–1, not clamped: tick granularity can read slightly above 1) of the traced mysqld processes' CPU spent inside dispatch_command over the digest window (absent while unknown).", nil, nil)
 	myIOAvailDesc = prometheus.NewDesc("obs_agent_mysql_io_wait_available",
 		"1 when per-statement block-I/O wait is measured over the whole digest window (delay accounting on), else 0.", nil, nil)
 	myRedoAvailDesc = prometheus.NewDesc("obs_agent_mysql_redo_wait_available",
