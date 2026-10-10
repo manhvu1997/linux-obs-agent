@@ -163,3 +163,15 @@ func TestDrainAggBeforeStart(t *testing.T) {
 		t.Fatalf("DrainAgg before Start = %v, %v; want nil and an error", got, err)
 	}
 }
+
+func TestCommitWaitOption(t *testing.T) {
+	if a := NewLoader(0, "", true).Accounting(); a.RedoDisabled || a.Redo {
+		t.Fatalf("default loader: %+v; want commit wait enabled (not disabled) and not yet attached", a)
+	}
+	if a := NewLoader(0, "", true, WithCommitWait(false)).Accounting(); !a.RedoDisabled || a.Redo {
+		t.Fatalf("WithCommitWait(false): %+v; want RedoDisabled", a)
+	}
+	if a := NewLoader(0, "", true, WithCommitWait(true)).Accounting(); a.RedoDisabled {
+		t.Fatalf("WithCommitWait(true): %+v", a)
+	}
+}

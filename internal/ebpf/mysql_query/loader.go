@@ -16,8 +16,9 @@
 // text is sent once per (command, hash) on TextEvents. CmdEvents carries only
 // commands that could not be aggregated (map full, or a hash marked unsafe).
 // COM_QUERY and COM_STMT_EXECUTE additionally feed slow-query events.
-// With emitAll == false only COM_QUERY is tracked and no per-command events
-// are emitted (legacy behaviour).
+// With emitAll == false only COM_QUERY and COM_STMT_EXECUTE are tracked (per-PID
+// stats and slow events), nothing is aggregated and no per-command events are
+// emitted (legacy behaviour).
 //
 // Prepared statements: COM_STMT_EXECUTE carries only a statement id. Two
 // optional uprobes recover its SQL text — Prepared_statement::prepare stores
@@ -32,8 +33,8 @@
 //
 // Disk bytes (ioac) and block-I/O wait (delay accounting) are per-thread
 // deltas inside dispatch_command; commit wait comes from optional uprobes on
-// InnoDB log_write_up_to. Accounting() and RedoTracking() say which of them
-// the running kernel and mysqld provide.
+// InnoDB log_write_up_to (off with WithCommitWait(false)). Accounting() and
+// RedoTracking() say which of them the running kernel and mysqld provide.
 //
 // # Lifecycle
 //
@@ -71,6 +72,7 @@ type Loader struct {
 	thresholdNs uint64
 	mysqldPath  string // absolute path to the mysqld binary
 	emitAll     bool
+	commitWait  bool // attach the log_write_up_to probes (WithCommitWait)
 
 	objs         MysqlQueryObjects
 	links        []link.Link
@@ -135,12 +137,16 @@ type Accounting struct {
 	DiskBytes  bool // task_struct.ioac.read_bytes/write_bytes (CONFIG_TASK_IO_ACCOUNTING)
 	BlkioDelay bool // task_struct.delays (CONFIG_TASK_DELAY_ACCT); also needs delay accounting switched on
 	Redo       bool // log_write_up_to uprobes attached
+	// RedoDisabled: commit wait switched off by configuration
+	// (WithCommitWait(false), mysql.commit_wait: false); Redo is then false.
+	RedoDisabled bool
 }
 
 // Accounting is valid after Start.
 func (l *Loader) Accounting() Accounting {
 	a := l.acct
 	a.Redo = l.redoTracking.Load()
+	a.RedoDisabled = !l.commitWait
 	return a
 }
 
@@ -184,28 +190,46 @@ func (l *Loader) TextDropped() uint64 { return l.textDropped.Load() }
 // aggregation entry per distinct text instead of per statement shape.
 func (l *Loader) LiteralSkip() bool { return l.literalSkip.Load() }
 
+// Option configures a Loader.
+type Option func(*Loader)
+
+// WithCommitWait controls the uprobe/uretprobe pair on InnoDB
+// log_write_up_to (default on). The probes trap on every log_write_up_to call
+// by any mysqld thread — the BPF filter runs after the trap and the
+// uretprobe hijacks every return — and MySQL 5.7 page cleaners call it once
+// per flushed page, so heavy flushing pays ~2-5 µs per call on mysqld
+// threads (estimated, not measured). false never attaches them.
+func WithCommitWait(enabled bool) Option { return func(l *Loader) { l.commitWait = enabled } }
+
 // NewLoader creates a Loader.
 //   - thresholdNs: minimum query latency in nanoseconds that triggers a ringbuf
 //     event (0 → default 100 000 000 ns = 100 ms).
 //   - mysqldPath: absolute path to the mysqld binary (0 → "/usr/sbin/mysqld").
 //   - emitAll: measure every command (aggregated in the kernel, read with
 //     DrainAgg; CmdEvents only carries commands that could not be
-//     aggregated); false keeps the legacy COM_QUERY-only stats + slow events.
-func NewLoader(thresholdNs uint64, mysqldPath string, emitAll bool) *Loader {
+//     aggregated); false keeps the legacy COM_QUERY / COM_STMT_EXECUTE-only
+//     stats + slow events.
+//   - opts: WithCommitWait.
+func NewLoader(thresholdNs uint64, mysqldPath string, emitAll bool, opts ...Option) *Loader {
 	if thresholdNs == 0 {
 		thresholdNs = 100_000_000 // 100 ms
 	}
 	if mysqldPath == "" {
 		mysqldPath = "/usr/sbin/mysqld"
 	}
-	return &Loader{
+	l := &Loader{
 		thresholdNs: thresholdNs,
 		mysqldPath:  mysqldPath,
 		emitAll:     emitAll,
+		commitWait:  true,
 		SlowEvents:  make(chan model.EBPFEvent, 256),
 		CmdEvents:   make(chan CmdEvent, 8192),
 		TextEvents:  make(chan TextEvent, 4096),
 	}
+	for _, o := range opts {
+		o(l)
+	}
+	return l
 }
 
 // Start loads the eBPF objects, configures the slow-query threshold, attaches
@@ -340,7 +364,10 @@ func (l *Loader) Start(ctx context.Context) error {
 	}
 
 	// Commit wait. Optional, and only meaningful when commands are aggregated.
-	if l.emitAll {
+	switch {
+	case !l.commitWait:
+		hooks.RedoErr = errors.New("not attached: mysql.commit_wait is off")
+	case l.emitAll:
 		if err := hooks.RedoErr; err != nil {
 			slog.Warn("mysql_query: commit wait unavailable (no log_write_up_to symbol)", "mysqld_path", l.mysqldPath, "err", err)
 		} else if err := l.attachRedo(exe, hooks.Redo); err != nil {
@@ -349,7 +376,7 @@ func (l *Loader) Start(ctx context.Context) error {
 		} else {
 			l.redoTracking.Store(true)
 		}
-	} else {
+	default:
 		hooks.RedoErr = errors.New("not attached: emit_all_queries is off")
 	}
 	// The summary reports what is attached, not what resolved.

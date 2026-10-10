@@ -444,6 +444,13 @@ type MySQLConfig struct {
 	// when it reads 0 (kernel ≥ 5.14 defaults to 0; needed for per-statement
 	// disk_wait). Env MYSQL_ENABLE_DELAYACCT.
 	EnableDelayAcct bool `yaml:"enable_delayacct"`
+	// CommitWait attaches the uprobe/uretprobe pair on InnoDB log_write_up_to
+	// that measures per-statement commit wait. They fire on every
+	// log_write_up_to call by any mysqld thread (on MySQL 5.7 the page
+	// cleaners call it once per flushed page), ~2-5 µs per call (estimated,
+	// not measured). Default true. Env MYSQL_COMMIT_WAIT. false = no redo
+	// probes; accounting.commit_wait reports commit_wait_disabled.
+	CommitWait bool `yaml:"commit_wait"`
 	// DigestWindow: rolling window for top_digests. Env MYSQL_DIGEST_WINDOW.
 	DigestWindow time.Duration `yaml:"digest_window"`
 	// TopDigests: digests in mysql_report.top_digests (ranked by total CPU).
@@ -603,6 +610,7 @@ func Defaults() *Config {
 			EmitAllQueries:                   true,
 			SampleQueries:                    true,
 			FoldSystemSchemas:                true,
+			CommitWait:                       true,
 			DigestWindow:                     60 * time.Second,
 			TopDigests:                       20,
 			StickyDigestsMax:                 50,
@@ -721,6 +729,9 @@ func applyMySQLEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("MYSQL_ENABLE_DELAYACCT"); v != "" {
 		cfg.MySQL.EnableDelayAcct = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("MYSQL_COMMIT_WAIT"); v != "" {
+		cfg.MySQL.CommitWait = v == "true" || v == "1" || v == "yes"
 	}
 	if v := os.Getenv("MYSQL_DIGEST_WINDOW"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {

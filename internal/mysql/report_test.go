@@ -92,6 +92,7 @@ func TestAccountingReasons(t *testing.T) {
 		{"delayacct off", mysqlq.Accounting{DiskBytes: true, BlkioDelay: true, Redo: true}, false, "", reasonDelayAcctOff, ""},
 		{"no delays field", mysqlq.Accounting{DiskBytes: true, Redo: true}, true, "", reasonNoBlkioDelay, ""},
 		{"no ioac, no redo probe", mysqlq.Accounting{BlkioDelay: true}, true, reasonNoIOAccounting, "", reasonNoRedoProbe},
+		{"commit wait switched off", mysqlq.Accounting{DiskBytes: true, BlkioDelay: true, RedoDisabled: true}, true, "", "", reasonCommitWaitOff},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := config.Defaults().MySQL
@@ -104,5 +105,26 @@ func TestAccountingReasons(t *testing.T) {
 				t.Fatalf("reasons = %q / %q / %q", h.QueryDiskReason, h.IOWaitReason, h.RedoWaitReason)
 			}
 		})
+	}
+}
+
+// mysql.commit_wait: false reaches the loader, whose accounting then says
+// the commit wait was switched off (commit_wait_disabled), not unavailable.
+func TestCommitWaitConfigReachesLoader(t *testing.T) {
+	cfg := config.Defaults().MySQL
+	cfg.CommitWait = false
+	a := NewAnalyzer(&cfg, nil)
+	if !a.acct().RedoDisabled {
+		t.Fatal("mysql.commit_wait false did not reach the loader")
+	}
+	a.delayAcct = func() (bool, error) { return true, nil }
+	var h querystats.HostDelta
+	a.setReasons(&h)
+	if h.RedoWaitReason != reasonCommitWaitOff || reasonCommitWaitOff != "commit_wait_disabled" {
+		t.Fatalf("commit reason %q", h.RedoWaitReason)
+	}
+	cfg2 := config.Defaults().MySQL
+	if NewAnalyzer(&cfg2, nil).acct().RedoDisabled {
+		t.Fatal("default config must keep commit wait on")
 	}
 }

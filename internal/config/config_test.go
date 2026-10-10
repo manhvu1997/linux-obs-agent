@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -84,6 +86,30 @@ func TestMySQLEnableDelayAcct(t *testing.T) {
 	applyMySQLEnvOverrides(c)
 	if !c.MySQL.EnableDelayAcct {
 		t.Fatal("MYSQL_ENABLE_DELAYACCT=true not applied")
+	}
+}
+
+func TestMySQLCommitWait(t *testing.T) {
+	if !Defaults().MySQL.CommitWait {
+		t.Fatal("mysql.commit_wait must default to true")
+	}
+	t.Setenv("MYSQL_COMMIT_WAIT", "false")
+	c := Defaults()
+	applyMySQLEnvOverrides(c)
+	if c.MySQL.CommitWait {
+		t.Fatal("MYSQL_COMMIT_WAIT=false not applied")
+	}
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte("mysql:\n  commit_wait: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MYSQL_COMMIT_WAIT", "")
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MySQL.CommitWait {
+		t.Fatal("yaml commit_wait: false not applied")
 	}
 }
 

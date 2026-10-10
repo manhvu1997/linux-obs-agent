@@ -1018,7 +1018,8 @@ type MySQLAnalysis struct {
 	//   "disk_wait"   → "ok" | "blkio_delay_unavailable" (kernel lacks
 	//                   task_struct.delays) | "delayacct_disabled"
 	//                   (sysctl kernel.task_delayacct=0)
-	//   "commit_wait" → "ok" | "log_write_up_to_unavailable" (redo probes not attached)
+	//   "commit_wait" → "ok" | "log_write_up_to_unavailable" (redo probes not
+	//                   attached) | "commit_wait_disabled" (mysql.commit_wait: false)
 	Accounting map[string]string `json:"accounting,omitempty"`
 }
 

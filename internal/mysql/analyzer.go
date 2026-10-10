@@ -38,6 +38,7 @@ const (
 	reasonNoBlkioDelay   = "blkio_delay_unavailable"
 	reasonDelayAcctOff   = "delayacct_disabled"
 	reasonNoRedoProbe    = "log_write_up_to_unavailable"
+	reasonCommitWaitOff  = "commit_wait_disabled" // mysql.commit_wait: false
 )
 
 // Analyzer owns the mysql_query eBPF loader and produces MySQLAnalysis snapshots.
@@ -77,7 +78,7 @@ type Analyzer struct {
 // is not used (MySQL analysis is always published when data is available).
 func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 	thresholdNs := cfg.SlowQueryThresholdMs * uint64(time.Millisecond)
-	loader := mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, cfg.EmitAllQueries)
+	loader := mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, cfg.EmitAllQueries, mysqlq.WithCommitWait(cfg.CommitWait))
 	return &Analyzer{
 		cfg:       cfg,
 		coll:      coll,
@@ -429,7 +430,10 @@ func (a *Analyzer) setReasons(h *querystats.HostDelta) {
 	case err != nil || !on:
 		h.IOWaitReason = reasonDelayAcctOff
 	}
-	if !acct.Redo {
+	switch {
+	case acct.RedoDisabled:
+		h.RedoWaitReason = reasonCommitWaitOff
+	case !acct.Redo:
 		h.RedoWaitReason = reasonNoRedoProbe
 	}
 	a.logDelayAcct(h.IOWaitReason)
