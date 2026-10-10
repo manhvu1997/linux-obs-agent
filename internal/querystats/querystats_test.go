@@ -270,3 +270,24 @@ func TestVictimDigestsCountedBeyondTopN(t *testing.T) {
 		t.Fatalf("victims[cpu] = %d, want 2 counted beyond top_digests", got)
 	}
 }
+
+// A digest that reads the disk but burns little CPU is still exported.
+func TestDiskReadDigestIsSticky(t *testing.T) {
+	a := New(cfg())
+	cpu := digestDelta(1, "SELECT a FROM t", 10, 9e9)
+	disk := digestDelta(1, "SELECT * FROM big", 10, 1e6)
+	disk.DiskReadBytes = 500 << 20
+	a.AddDeltas([]Delta{cpu, disk}, t0)
+	h := okHost(30e9, 40e9, 4e9)
+	h.DiskOK, h.DiskReadBytes = true, 600<<20
+	a.AddHost(h, t0)
+	s := a.Snapshot(t0)
+	if !exported(s, disk.Digest.ID) {
+		t.Fatal("top disk-read digest missing from the export set")
+	}
+	for _, e := range s.Exported {
+		if e.ID == disk.Digest.ID && e.Counters.DiskReadBytes != 500<<20 {
+			t.Fatalf("lifetime disk read = %d", e.Counters.DiskReadBytes)
+		}
+	}
+}

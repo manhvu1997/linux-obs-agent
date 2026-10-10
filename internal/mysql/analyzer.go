@@ -493,6 +493,10 @@ func (a *Analyzer) DrainDigests() ([]querystats.DigestDelta, uint64) {
 	return a.agg.DrainDigests()
 }
 
+// EnableHostDrain / DrainHost expose the host deltas for ClickHouse host_stats.
+func (a *Analyzer) EnableHostDrain()                 { a.agg.EnableHostDrain() }
+func (a *Analyzer) DrainHost() querystats.HostWindow { return a.agg.DrainHost() }
+
 // recordSlow appends one slow event to the recent ring and the drain.
 func (a *Analyzer) recordSlow(slow model.MySQLSlowEvent) {
 	maxRecent := a.cfg.MaxRecentQueries

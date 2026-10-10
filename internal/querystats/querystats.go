@@ -242,6 +242,8 @@ type Aggregator struct {
 	drain       map[key]*acc
 	drainMax    int
 	drainFolded uint64
+	// hdrain is the host_stats accumulator, nil until EnableHostDrain.
+	hdrain *hostDrain
 }
 
 func New(cfg Config) *Aggregator {
@@ -430,9 +432,11 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 	waitOf := func(s model.QueryDigestStats) float64 { return float64(waitNs(s, av)) }
 	byWait := topBy(nonZero(stats, waitOf), a.cfg.TopNWait, waitOf)
 	var byDisk []model.QueryDigestStats
+	var stickyDisk []model.QueryDigestStats
 	if av.diskBytes {
 		readOf := func(s model.QueryDigestStats) float64 { return float64(s.DiskReadBytes) }
 		byDisk = topBy(nonZero(stats, readOf), a.cfg.TopNDiskRead, readOf)
+		stickyDisk = topBy(nonZero(stats, readOf), a.cfg.TopN, readOf)
 	}
 	byCPU := topBy(stats, a.cfg.TopN, func(s model.QueryDigestStats) float64 { return float64(s.CPUNs) })
 	bytesOut := func(s model.QueryDigestStats) float64 { return float64(s.BytesOut) }
@@ -440,7 +444,7 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 	// Sticky entry uses top-TopN by bytes (spec §4.2); the reported list stays TopNBytes.
 	stickyOut := topBy(stats, a.cfg.TopN, bytesOut)
 
-	for _, list := range [][]model.QueryDigestStats{byCPU, stickyOut} {
+	for _, list := range [][]model.QueryDigestStats{byCPU, stickyOut, stickyDisk} {
 		for _, s := range list {
 			a.markSticky(s.DigestID, stats, now)
 		}
@@ -527,6 +531,10 @@ func (a *Aggregator) markSticky(id string, stats []model.QueryDigestStats, now t
 		l.c.WallNs += s.WallNs
 		l.c.RunqNs += s.RunqNs
 		l.c.BytesOut += s.BytesOut
+		l.c.DiskReadBytes += s.DiskReadBytes
+		l.c.DiskWriteBytes += s.DiskWriteBytes
+		l.c.IOWaitNs += s.IOWaitNs
+		l.c.RedoWaitNs += s.RedoWaitNs
 	}
 	a.life[id] = l
 }

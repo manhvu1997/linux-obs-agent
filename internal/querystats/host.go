@@ -71,6 +71,9 @@ func (a *Aggregator) AddHost(h HostDelta, at time.Time) {
 	if h.RedoWaitReason != "" {
 		x.redoBad, x.redoWaitReason = true, h.RedoWaitReason
 	}
+	if a.hdrain != nil {
+		a.hdrain.add(h)
+	}
 }
 
 // WindowPIDs returns the PIDs with digest data in the window ending at now,
