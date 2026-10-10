@@ -151,17 +151,18 @@ type alertRule struct {
 	Name, Severity, Literal string  // Literal: the threshold text in the rule expression
 	Threshold               float64 // in the panel's unit
 	Panel                   bool    // drawn on an Overview panel
+	Below                   bool    // fires below the line (red below, green above)
 }
 
 var alertRules = []alertRule{
-	{"MySQLQueriesStarvedForCPU", "critical", "> 0.3", 30, true},
-	{"MySQLQueriesStalledOnDisk", "critical", "> 0.3", 30, true},
-	{"MySQLDigestCPUHog", "warning", "> 0.2", 20, true},
-	{"MySQLDigestDiskReadHog", "warning", "> 0.2", 20, true},
-	{"MySQLCommitsStalledOnRedo", "warning", "> 0.2", 20, true},
-	{"MySQLQueriesSpillingToDisk", "info", "> 10 * 1048576", 10 * 1048576, true},
-	{"ObsAgentMySQLIOWaitUnavailable", "info", "== 0", 0.5, true},
-	{"ObsAgentMySQLAccountingDegraded", "info", "increase(obs_agent_mysql_hash_mismatch_total[10m]) > 0", 0, false},
+	{"MySQLQueriesStarvedForCPU", "critical", "> 0.3", 30, true, false},
+	{"MySQLQueriesStalledOnDisk", "critical", "> 0.3", 30, true, false},
+	{"MySQLDigestCPUHog", "warning", "> 0.2", 20, true, false},
+	{"MySQLDigestDiskReadHog", "warning", "> 0.2", 20, true, false},
+	{"MySQLCommitsStalledOnRedo", "warning", "> 0.2", 20, true, false},
+	{"MySQLQueriesSpillingToDisk", "info", "> 10 * 1048576", 10 * 1048576, true, false},
+	{"ObsAgentMySQLIOWaitUnavailable", "info", "== 0", 0.5, true, true},
+	{"ObsAgentMySQLAccountingDegraded", "info", "increase(obs_agent_mysql_hash_mismatch_total[10m]) > 0", 0, false, false},
 }
 
 func rule(name string) alertRule {
@@ -175,13 +176,18 @@ func rule(name string) alertRule {
 
 // withAlert draws r's threshold as a dashed red line and names the alert.
 func withAlert(p Panel, r alertRule) Panel {
-	p = dashedLine(p, r.Threshold)
+	p = dashedLine(p, r.Threshold, r.Below)
 	p.Description += fmt.Sprintf("\nAlert: %s (%s) fires at %v.", r.Name, r.Severity, r.Threshold)
 	return p
 }
 
-// dashedLine draws v as a dashed red threshold line (green below, red above).
-func dashedLine(p Panel, v float64) Panel {
+// dashedLine draws v as a dashed threshold line: green below and red above,
+// or the reverse when invert is set (a value that is bad when low).
+func dashedLine(p Panel, v float64, invert bool) Panel {
+	low, high := "green", "red"
+	if invert {
+		low, high = "red", "green"
+	}
 	if p.FieldConfig == nil {
 		p.FieldConfig = map[string]any{"defaults": map[string]any{}, "overrides": []any{}}
 	}
@@ -191,7 +197,7 @@ func dashedLine(p Panel, v float64) Panel {
 		p.FieldConfig["defaults"] = d
 	}
 	d["thresholds"] = map[string]any{"mode": "absolute", "steps": []any{
-		map[string]any{"color": "green", "value": nil}, map[string]any{"color": "red", "value": v}}}
+		map[string]any{"color": low, "value": nil}, map[string]any{"color": high, "value": v}}}
 	custom, _ := d["custom"].(map[string]any)
 	if custom == nil {
 		custom = map[string]any{}
@@ -320,8 +326,10 @@ func overview() Dashboard {
 	perDigest := func(m, win string) string {
 		return `sum by (instance, digest_id) (rate(` + m + `{` + inst + `,digest_id!="other"}[` + win + `]))`
 	}
+	// The node's disk read rate as a denominator: a node that read nothing
+	// is filtered out (no point) instead of giving NaN or +Inf.
 	nodeRead := func(win string) string {
-		return `rate(obs_agent_node_disk_read_bytes_total{` + inst + `}[` + win + `])`
+		return `(rate(obs_agent_node_disk_read_bytes_total{` + inst + `}[` + win + `]) > 0)`
 	}
 	withText := ` * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{` + inst + `}`
 	const (
@@ -338,7 +346,7 @@ func overview() Dashboard {
 	b.add(Panel{Type: "alertlist", Title: "Firing obs-agent alerts", Datasource: promDS,
 		Options: map[string]any{"viewMode": "list", "groupMode": "default", "maxItems": 20, "sortOrder": 1,
 			"stateFilter":              map[string]any{"firing": true, "pending": true},
-			"alertInstanceLabelFilter": `{instance=~"$instance"}`}}, 24)
+			"alertInstanceLabelFilter": `{instance=~"${instance:regex}"}`}}, 24)
 
 	b.row("What is overloading this server?")
 	b.add(withAlert(described(promStat("Top CPU digest — % of node CPU used", "percent",
@@ -353,9 +361,13 @@ func overview() Dashboard {
 		"{{instance}} {{digest_text}}"),
 		"the heaviest digest's disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m, per instance.",
 		"share of the disk's reads caused by one statement; red means a disk culprit — the alert also needs node disk reads > 5 MiB/s. "+
-			"Empty or NaN when the disk read nothing."),
+			"No value when the disk read nothing (the denominator is filtered with > 0)."),
 		rule("MySQLDigestDiskReadHog")), 8)
-	b.add(described(promStat("Query CPU coverage", "percent", `100 * obs_agent_mysql_query_cpu_coverage_ratio{`+inst+`}`, "{{instance}}"),
+	coverage := promStat("Query CPU coverage", "percent", `100 * obs_agent_mysql_query_cpu_coverage_ratio{`+inst+`}`, "{{instance}}")
+	// Neither high nor low is an alarm: a neutral colour, not Grafana's default red from 80.
+	coverage.FieldConfig["defaults"].(map[string]any)["thresholds"] = map[string]any{"mode": "absolute",
+		"steps": []any{map[string]any{"color": "blue", "value": nil}}}
+	b.add(described(coverage,
 		"CPU spent inside statements (dispatch_command) ÷ mysqld's CPU × 100.",
 		"how much of mysqld's CPU the statements explain; low = CPU outside query execution (connections, InnoDB background threads, replication). "+
 			"Absent when mysqld's CPU is not known."), 8)
@@ -389,7 +401,7 @@ func overview() Dashboard {
 		digSum(digCPU),
 		`100 * `+digSum(digCPU)+` / scalar(sum(`+nodeCores("5m")+`))`,
 		digSum(digRead)+` / 1048576`,
-		`100 * `+digSum(digRead)+` / scalar(sum(`+nodeRead("5m")+`))`,
+		`100 * `+digSum(digRead)+` / on () group_left () sum(`+nodeRead("5m")+`)`,
 		digSum(digRead)+` / `+digSum("obs_agent_mysql_digest_calls_total")+` / 16384`)
 	top.Transformations = []map[string]any{{"id": "merge", "options": map[string]any{}},
 		{"id": "organize", "options": map[string]any{
@@ -447,7 +459,7 @@ func overview() Dashboard {
 		[2]string{`obs_agent_cpu_steal_percent{` + inst + `}`, "{{instance}} steal"}),
 		"/proc/stat deltas over the 5 s collection interval: usage = user + system, iowait and steal as a share of all CPU time.",
 		"the dashed 85% line is the node-saturation condition of MySQLQueriesStarvedForCPU and MySQLDigestCPUHog. "+
-			"iowait is idle time while a task waits for I/O, not lost work: read PSI io instead. High steal = the hypervisor is taking the CPU."), 85), 12)
+			"iowait is idle time while a task waits for I/O, not lost work: read PSI io instead. High steal = the hypervisor is taking the CPU."), 85, false), 12)
 	b.add(described(prom("Load (1m) and blocked tasks", "short",
 		[2]string{`obs_agent_load1{` + inst + `}`, "{{instance}} load1"},
 		[2]string{`obs_agent_procs_blocked{` + inst + `}`, "{{instance}} D-state"}),
@@ -483,7 +495,7 @@ func overview() Dashboard {
 		[2]string{`obs_agent_pressure_io_full_avg10{` + inst + `}`, "{{instance}} io full"},
 		[2]string{`obs_agent_pressure_io_some_avg10{` + inst + `}`, "{{instance}} io some"}),
 		"/proc/pressure/io avg10: full = share of time no task could progress because of I/O, some = at least one task waited.",
-		"io full is lost work, unlike iowait; the dashed 10% line is the io-full condition of MySQLQueriesStalledOnDisk. Absent when the kernel has no PSI."), 10), 12)
+		"io full is lost work, unlike iowait; the dashed 10% line is the io-full condition of MySQLQueriesStalledOnDisk. Absent when the kernel has no PSI."), 10, false), 12)
 	b.add(described(prom("Network throughput", "Bps",
 		[2]string{`obs_agent_net_rx_bytes_per_sec{` + inst + `}`, "{{instance}} {{interface}} rx"},
 		[2]string{`obs_agent_net_tx_bytes_per_sec{` + inst + `}`, "{{instance}} {{interface}} tx"}),
@@ -575,7 +587,9 @@ func analysis() Dashboard {
 		"url": "/d/obs-agent-overview/obs-agent-overview?$__url_time_range"}}
 
 	// Node totals of the selected hosts over the selected range, from
-	// host_stats: the denominators of every "% of node" share.
+	// host_stats: the denominators of every "% of node" share. They divide
+	// through nullIf(x, 0), never greatest(x, 1): greatest ignores NULL on
+	// ClickHouse >= 24.12, which would turn "not measured" into a huge share.
 	hostSum := func(col string) string {
 		return `(SELECT sum(` + col + `) FROM obs.host_stats WHERE $__timeFilter(window_end) AND ` + hostF + `)`
 	}
@@ -587,9 +601,9 @@ func analysis() Dashboard {
 	topDigests := chTable("Top digests", `SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,
   sum(s.cpu_ns) / 1e9 / `+rangeS+` AS cpuCores,
   max(s.cpu_ns / greatest(dateDiff('second', s.window_start, s.window_end), 1)) / 1e9 AS peakCores,
-  100 * sum(s.cpu_ns) / greatest(`+hostSum("node_cpu_used_ns")+`, 1) AS pctNodeCpu,
+  100 * sum(s.cpu_ns) / nullIf(`+hostSum("node_cpu_used_ns")+`, 0) AS pctNodeCpu,
   sum(s.disk_read_bytes) / `+rangeS+` / 1048576 AS readMBs,
-  100 * sum(s.disk_read_bytes) / greatest(`+hostSum("disk_read_bytes")+`, 1) AS pctDiskRead,
+  100 * sum(s.disk_read_bytes) / nullIf(`+hostSum("disk_read_bytes")+`, 0) AS pctDiskRead,
   sum(s.disk_read_bytes) / greatest(sum(s.calls), 1) / 16384 AS pagesPerCall,
   sum(s.disk_write_bytes) / `+rangeS+` / 1048576 AS writeMBs,
   100 * sum(s.runq_ns) / greatest(sum(s.wall_ns), 1) AS cpuWaitPct,
@@ -597,7 +611,7 @@ func analysis() Dashboard {
   100 * sum(s.redo_wait_ns) / greatest(sum(s.wall_ns), 1) AS commitWaitPct,
   sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS latencyMsAvg,
   max(s.wall_max_ns) / 1e6 AS latencyMsMax,
-  if(pctNodeCpu >= 20 AND 100 * `+hostSum("node_cpu_used_ns")+` / greatest(`+nodeCPUCapacityS+` * 1e9, 1) >= 50, 'culprit', '') AS cpuRole,
+  if(pctNodeCpu >= 20 AND 100 * `+hostSum("node_cpu_used_ns")+` / nullIf(`+nodeCPUCapacityS+` * 1e9, 0) >= 50, 'culprit', '') AS cpuRole,
   if(pctDiskRead >= 20 AND `+hostSum("disk_read_bytes")+` / `+rangeS+` / 1048576 >= 5, 'culprit', '') AS ioRole,
   multiIf(latencyMsAvg < ${slow_ms} OR cpuWaitPct + ifNull(diskWaitPct, 0) + ifNull(commitWaitPct, 0) < 50, '',
           cpuWaitPct >= ifNull(diskWaitPct, 0) AND cpuWaitPct >= ifNull(commitWaitPct, 0), 'cpu',
@@ -624,7 +638,7 @@ GROUP BY s.digest_id ORDER BY cpuCores DESC LIMIT 50`)
 	// shareTS: the 10 digests with the most col over the range, as a share
 	// of host_stats.hostCol per bucket.
 	shareTS := func(col, hostCol string) string {
-		return `SELECT d.time AS time, d.digest AS digest, 100 * d.v / greatest(h.v, 1) AS pct
+		return `SELECT d.time AS time, d.digest AS digest, 100 * d.v / nullIf(h.v, 0) AS pct
 FROM (SELECT ` + flushBucket + ` AS time, digest_id AS digest, sum(` + col + `) AS v FROM obs.mysql_digest_stats
       WHERE $__timeFilter(window_end) AND ` + hostF + `
         AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND ` + hostF + `
@@ -641,7 +655,7 @@ ORDER BY time`
 		"per bucket: digest disk_read_bytes ÷ host_stats disk_read_bytes × 100, for the 10 digests with the most disk reads over the range.",
 		"above 20% (and node reads ≥ 5 MiB/s) a digest is a disk culprit; compare pagesPerCall in Top digests to tell misses from scans."), 12)
 	nodeTS := chTS("Node CPU used and disk reads", "percent", `SELECT `+flushBucket+` AS time,
-  100 * sum(node_cpu_used_ns) / greatest(sum(cpu_count * dateDiff('second', window_start, window_end)) * 1e9, 1) AS cpuUsedPct,
+  100 * sum(node_cpu_used_ns) / nullIf(sum(cpu_count * dateDiff('second', window_start, window_end)) * 1e9, 0) AS cpuUsedPct,
   sum(disk_read_bytes) / `+flushBucketS+` / 1048576 AS diskReadMBs
 FROM obs.host_stats
 WHERE $__timeFilter(window_end) AND `+hostF+`

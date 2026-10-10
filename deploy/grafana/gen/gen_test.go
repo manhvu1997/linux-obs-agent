@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -419,6 +421,37 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 			if got := thresholdOf(p); got != ar.Threshold {
 				t.Errorf("panel %q: threshold line %v, alert %s fires at %v", p.Title, got, ar.Name, ar.Threshold)
 			}
+			d, _ := p.FieldConfig["defaults"].(map[string]any)
+			custom, _ := d["custom"].(map[string]any)
+			style, _ := custom["thresholdsStyle"].(map[string]any)
+			if style["mode"] != "dashed" {
+				t.Errorf("panel %q: threshold style %v, want dashed", p.Title, style["mode"])
+			}
+			// The side of the line where the alert fires is red.
+			wantLow, wantHigh := "green", "red"
+			if ar.Below {
+				wantLow, wantHigh = "red", "green"
+			}
+			if lo, hi := thresholdColors(p); lo != wantLow || hi != wantHigh {
+				t.Errorf("panel %q: colours %s below / %s above the line, want %s / %s", p.Title, lo, hi, wantLow, wantHigh)
+			}
+			// The line is the rule's literal in the panel's unit.
+			want, ok := literalThreshold(ar.Literal)
+			if !ok {
+				t.Errorf("%s: cannot read a number from literal %q", ar.Name, ar.Literal)
+				continue
+			}
+			if u, _ := d["unit"].(string); u == "percent" {
+				want *= 100
+			}
+			if strings.HasPrefix(strings.TrimSpace(ar.Literal), "==") {
+				// A 0/1 gauge compared for equality: the line sits half-way to the other state.
+				if math.Abs(ar.Threshold-want) != 0.5 {
+					t.Errorf("%s: line %v does not separate %v from the other state", ar.Name, ar.Threshold, want)
+				}
+			} else if math.Abs(ar.Threshold-want) > 1e-9 {
+				t.Errorf("%s: literal %q is %v in the panel unit, Threshold is %v", ar.Name, ar.Literal, want, ar.Threshold)
+			}
 		}
 	}
 	for _, ar := range alertRules {
@@ -426,6 +459,50 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 			t.Errorf("no Overview panel draws alert %s", ar.Name)
 		}
 	}
+}
+
+var literalRe = regexp.MustCompile(`(?:>=|<=|==|!=|>|<)\s*([0-9.e+]+(?:\s*\*\s*[0-9.e+]+)*)\s*$`)
+
+// literalThreshold evaluates the number of a rule literal such as "> 0.3",
+// "== 0" or "> 10 * 1048576" (a product of numbers after the last comparison).
+func literalThreshold(lit string) (float64, bool) {
+	m := literalRe.FindStringSubmatch(strings.TrimSpace(lit))
+	if m == nil {
+		return 0, false
+	}
+	v := 1.0
+	for _, f := range strings.Split(m[1], "*") {
+		x, err := strconv.ParseFloat(strings.TrimSpace(f), 64)
+		if err != nil {
+			return 0, false
+		}
+		v *= x
+	}
+	return v, true
+}
+
+func TestLiteralThreshold(t *testing.T) {
+	for lit, want := range map[string]float64{"> 0.3": 0.3, "== 0": 0, "> 10 * 1048576": 10 * 1048576, "increase(x[10m]) > 0": 0} {
+		if got, ok := literalThreshold(lit); !ok || got != want {
+			t.Errorf("literalThreshold(%q) = %v %v, want %v", lit, got, ok, want)
+		}
+	}
+	if _, ok := literalThreshold("rate(x[5m])"); ok {
+		t.Error("a literal without a comparison must not parse")
+	}
+}
+
+// thresholdColors returns the colours below and above a panel's line.
+func thresholdColors(p Panel) (string, string) {
+	d, _ := p.FieldConfig["defaults"].(map[string]any)
+	th, _ := d["thresholds"].(map[string]any)
+	steps, _ := th["steps"].([]any)
+	if len(steps) < 2 {
+		return "", ""
+	}
+	lo, _ := steps[0].(map[string]any)["color"].(string)
+	hi, _ := steps[1].(map[string]any)["color"].(string)
+	return lo, hi
 }
 
 // thresholdOf returns the red step of a panel's dashed threshold, or -1.
@@ -588,5 +665,117 @@ func TestPromQLCheckRejectsGroupLeftParenTrap(t *testing.T) {
 	}
 	if err := exec.Command(bin, "check", "rules", f).Run(); err == nil {
 		t.Fatal("promtool accepted group_left followed by a parenthesised expression")
+	}
+}
+
+// greatestArgs returns the argument text of every greatest(...) call in sql.
+func greatestArgs(sql string) []string {
+	var out []string
+	for i := 0; ; {
+		j := strings.Index(sql[i:], "greatest(")
+		if j < 0 {
+			return out
+		}
+		start := i + j + len("greatest(")
+		depth, k := 1, start
+		for ; k < len(sql) && depth > 0; k++ {
+			switch sql[k] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+		}
+		out = append(out, sql[start:k-1])
+		i = start
+	}
+}
+
+// nodeTotalRe matches a value that comes from host_stats: the table itself,
+// a column only host_stats has, or the h alias the share panels join it as.
+var nodeTotalRe = regexp.MustCompile(`host_stats|node_cpu_used_ns|mysqld_cpu_ns|cpu_count|\bh\.`)
+
+// greatest() ignores NULL arguments on ClickHouse >= 24.12, so greatest(x, 1)
+// over an unmeasured (NULL) node total returns 1 and the share becomes
+// ~100 × the numerator. Node-total denominators must use nullIf(x, 0).
+func TestNodeTotalsNotGuardedByGreatest(t *testing.T) {
+	d := dashboards()["obs-agent-analysis.json"]
+	var sqls []string
+	for _, p := range d.Panels {
+		for _, tg := range p.Targets {
+			sqls = append(sqls, tg.RawSQL)
+		}
+	}
+	for _, tv := range d.Templating.List {
+		if s, _ := tv.Query.(string); s != "" {
+			sqls = append(sqls, s)
+		}
+	}
+	for _, sql := range sqls {
+		for _, a := range greatestArgs(sql) {
+			if nodeTotalRe.MatchString(a) {
+				t.Errorf("greatest() over a host_stats total (use nullIf(..., 0)): greatest(%s)", a)
+			}
+		}
+	}
+	if got := greatestArgs("greatest(sum(a), 1) + greatest((SELECT sum(b) FROM obs.host_stats), 1)"); len(got) != 2 || !nodeTotalRe.MatchString(got[1]) {
+		t.Fatalf("greatestArgs self-check failed: %q", got)
+	}
+}
+
+// Grafana expands a multi-value variable in the alert list's label filter with
+// the glob format, which matches nothing on "All" with more than one instance.
+func TestAlertListFilterUsesRegexFormat(t *testing.T) {
+	for _, p := range dashboards()["obs-agent-overview.json"].Panels {
+		if p.Type == "alertlist" {
+			if f, _ := p.Options["alertInstanceLabelFilter"].(string); !strings.Contains(f, "${instance:regex}") {
+				t.Errorf("alert list filter %q does not use ${instance:regex}", f)
+			}
+			return
+		}
+	}
+	t.Fatal("no alert list")
+}
+
+// Without explicit thresholds Grafana colours a background stat red from 80,
+// so a healthy high value would show red.
+func TestBackgroundStatsHaveThresholds(t *testing.T) {
+	for name, d := range dashboards() {
+		for _, p := range d.Panels {
+			if p.Type != "stat" || p.Options["colorMode"] != "background" {
+				continue
+			}
+			def, _ := p.FieldConfig["defaults"].(map[string]any)
+			th, _ := def["thresholds"].(map[string]any)
+			if steps, _ := th["steps"].([]any); len(steps) == 0 {
+				t.Errorf("%s: background stat %q has no explicit thresholds", name, p.Title)
+			}
+		}
+	}
+}
+
+// A node that read nothing must give no point, not NaN or +Inf: every
+// division by the node's disk read rate filters it with > 0.
+func TestNodeDiskReadDenominatorGuarded(t *testing.T) {
+	any := regexp.MustCompile(`rate\(obs_agent_node_disk_read_bytes_total\{[^}]*\}\[[^\]]+\]\)`)
+	guarded := regexp.MustCompile(`\(rate\(obs_agent_node_disk_read_bytes_total\{[^}]*\}\[[^\]]+\]\) > 0\)`)
+	n := 0
+	for _, p := range dashboards()["obs-agent-overview.json"].Panels {
+		for _, tg := range p.Targets {
+			if !strings.Contains(tg.Expr, "digest_disk_read_bytes_total") {
+				continue
+			}
+			all := len(any.FindAllString(tg.Expr, -1))
+			if all == 0 {
+				continue
+			}
+			n++
+			if g := len(guarded.FindAllString(tg.Expr, -1)); g != all {
+				t.Errorf("panel %q %s: node disk read denominator not guarded with > 0: %s", p.Title, tg.RefID, tg.Expr)
+			}
+		}
+	}
+	if n < 3 {
+		t.Fatalf("found only %d digest ÷ node disk read expressions", n)
 	}
 }

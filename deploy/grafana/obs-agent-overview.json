@@ -105,7 +105,7 @@
         "overrides": []
       },
       "options": {
-        "alertInstanceLabelFilter": "{instance=~\"$instance\"}",
+        "alertInstanceLabelFilter": "{instance=~\"${instance:regex}\"}",
         "groupMode": "default",
         "maxItems": 20,
         "sortOrder": 1,
@@ -217,7 +217,7 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * topk by (instance) (1, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m])) * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{instance=~\"$instance\"}",
+          "expr": "100 * topk by (instance) (1, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0)) * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} {{digest_text}}",
           "instant": true
         }
@@ -255,7 +255,7 @@
         },
         "textMode": "value_and_name"
       },
-      "description": "Formula: the heaviest digest's disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m, per instance.\nReading: share of the disk's reads caused by one statement; red means a disk culprit — the alert also needs node disk reads > 5 MiB/s. Empty or NaN when the disk read nothing.\nAlert: MySQLDigestDiskReadHog (warning) fires at 20."
+      "description": "Formula: the heaviest digest's disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m, per instance.\nReading: share of the disk's reads caused by one statement; red means a disk culprit — the alert also needs node disk reads > 5 MiB/s. No value when the disk read nothing (the denominator is filtered with > 0).\nAlert: MySQLDigestDiskReadHog (warning) fires at 20."
     },
     {
       "id": 5,
@@ -285,6 +285,15 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
           "unit": "percent"
         },
         "overrides": []
@@ -414,7 +423,7 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * topk(10, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]))",
+          "expr": "100 * topk(10, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0))",
           "legendFormat": "{{instance}} {{digest_id}}"
         }
       ],
@@ -537,7 +546,7 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / scalar(sum(rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m])))",
+          "expr": "100 * sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on () group_left () sum((rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0))",
           "instant": true,
           "format": "table"
         },
@@ -1676,11 +1685,11 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
               },
               {
-                "color": "red",
+                "color": "green",
                 "value": 0.5
               }
             ]
