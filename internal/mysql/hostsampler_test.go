@@ -122,3 +122,26 @@ func TestHostSamplerDiskDelta(t *testing.T) {
 		t.Fatalf("read counter went backwards (device removed): DiskOK must be false, got %+v", d)
 	}
 }
+
+// A disk appearing (hot-plug, a new volume attached) adds its whole
+// cumulative count to the sum: rebaseline instead of reporting it as one
+// poll's reads, then resume deltas from the new set.
+func TestHostSamplerDiskSetChangeRebaselines(t *testing.T) {
+	f := &fakeHost{
+		node:    []collector.NodeCPUTimes{nodeTimes(0, 0), nodeTimes(1, 2), nodeTimes(2, 4), nodeTimes(3, 6)},
+		nodeErr: []bool{false, false, false, false},
+		disk: []collector.NodeDiskBytes{
+			{ReadBytes: 1000, WriteBytes: 50, Disks: 1},
+			{ReadBytes: 900_000, WriteBytes: 90_000, Disks: 2}, // second disk appears with its history
+			{ReadBytes: 901_000, WriteBytes: 90_100, Disks: 2},
+		},
+	}
+	h := f.sampler()
+	h.prime()
+	if d := h.sample(nil); d.DiskOK {
+		t.Fatalf("disk set changed: DiskOK must be false, got %+v", d)
+	}
+	if d := h.sample(nil); !d.DiskOK || d.DiskReadBytes != 1000 || d.DiskWriteBytes != 100 {
+		t.Fatalf("after rebaseline got %+v", d)
+	}
+}

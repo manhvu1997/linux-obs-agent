@@ -54,11 +54,12 @@ func (h *hostSampler) sample(pids []uint32) querystats.HostDelta {
 	switch {
 	case err != nil:
 		h.haveDisk = false
-	case h.haveDisk && dk.ReadBytes >= h.prevDisk.ReadBytes && dk.WriteBytes >= h.prevDisk.WriteBytes:
+	case h.haveDisk && dk.Disks == h.prevDisk.Disks && dk.ReadBytes >= h.prevDisk.ReadBytes && dk.WriteBytes >= h.prevDisk.WriteBytes:
 		d.DiskOK = true
 		d.DiskReadBytes, d.DiskWriteBytes = dk.ReadBytes-h.prevDisk.ReadBytes, dk.WriteBytes-h.prevDisk.WriteBytes
 		h.prevDisk = dk
-	default: // no baseline, or a counter went backwards (device removed): rebaseline
+	default: // no baseline, the set of physical disks changed (a new disk adds its
+		// whole history to the sum), or a counter went backwards: rebaseline
 		h.prevDisk, h.haveDisk = dk, true
 	}
 	next := make(map[uint32]uint64, len(pids))
