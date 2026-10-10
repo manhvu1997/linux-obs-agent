@@ -17,6 +17,13 @@ type HostDelta struct {
 	NodeOK         bool   // false: no valid node delta for this poll
 	MysqldCPUNs    uint64 // Σ utime+stime of the traced PIDs
 	MysqldPartial  bool   // a traced PID had no usable baseline (new, restarted or gone)
+	DiskReadBytes  uint64 // physical disks, bytes read this poll
+	DiskWriteBytes uint64
+	DiskOK         bool // false: no valid /proc/diskstats delta this poll
+	// Why a per-statement signal is unavailable this poll; "" = available.
+	QueryDiskReason string // per-statement disk bytes (ioac)
+	IOWaitReason    string // per-statement block-I/O wait (delay accounting)
+	RedoWaitReason  string // per-statement commit wait (log_write_up_to probes)
 }
 
 // hostAcc is one bucket's host deltas.

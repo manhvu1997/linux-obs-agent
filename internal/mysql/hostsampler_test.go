@@ -10,6 +10,7 @@ import (
 type fakeHost struct {
 	node    []collector.NodeCPUTimes // consumed one per call
 	nodeErr []bool
+	disk    []collector.NodeDiskBytes // consumed one per call; nil → reader errors
 	pid     map[uint32]uint64
 	pidErr  map[uint32]bool
 }
@@ -29,6 +30,14 @@ func (f *fakeHost) sampler() *hostSampler {
 			return 0, errors.New("gone")
 		}
 		return f.pid[pid], nil
+	}
+	h.nodeDisk = func() (collector.NodeDiskBytes, error) {
+		if len(f.disk) == 0 {
+			return collector.NodeDiskBytes{}, errors.New("no disk data")
+		}
+		d := f.disk[0]
+		f.disk = f.disk[1:]
+		return d, nil
 	}
 	return h
 }
@@ -95,5 +104,21 @@ func TestHostSamplerVanishedOrRestartedPIDIsPartial(t *testing.T) {
 	f.pidErr[7] = true
 	if d := h.sample([]uint32{7}); !d.MysqldPartial {
 		t.Fatalf("vanished: got %+v", d)
+	}
+}
+
+func TestHostSamplerDiskDelta(t *testing.T) {
+	f := &fakeHost{
+		node:    []collector.NodeCPUTimes{nodeTimes(0, 0), nodeTimes(1, 2), nodeTimes(2, 4)},
+		nodeErr: []bool{false, false, false},
+		disk:    []collector.NodeDiskBytes{{ReadBytes: 1000, WriteBytes: 50, Disks: 1}, {ReadBytes: 5000, WriteBytes: 150, Disks: 1}, {ReadBytes: 4000, WriteBytes: 200, Disks: 1}},
+	}
+	h := f.sampler()
+	h.prime()
+	if d := h.sample(nil); !d.DiskOK || d.DiskReadBytes != 4000 || d.DiskWriteBytes != 100 {
+		t.Fatalf("got %+v", d)
+	}
+	if d := h.sample(nil); d.DiskOK {
+		t.Fatalf("read counter went backwards (device removed): DiskOK must be false, got %+v", d)
 	}
 }
