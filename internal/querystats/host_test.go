@@ -10,7 +10,7 @@ import (
 
 func digestDelta(pid uint32, sql string, calls, cpuNs uint64) Delta {
 	return Delta{PID: pid, Command: "query", Digest: sqldigest.Normalize(sql), Calls: calls,
-		CPUNs: cpuNs, CPUMaxNs: cpuNs, WallNs: cpuNs, WallMaxNs: cpuNs}
+		CPUNs: cpuNs, WallNs: cpuNs, WallMaxNs: cpuNs}
 }
 
 func okHost(used, total, mysqld uint64) HostDelta {

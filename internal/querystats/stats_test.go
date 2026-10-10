@@ -13,7 +13,7 @@ func busyHost(usedNs uint64) HostDelta {
 func TestPerDigestFormulas(t *testing.T) {
 	a := New(cfg()) // window 60 s
 	a.AddDeltas([]Delta{{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT a FROM t", 1, 1).Digest,
-		Calls: 120, CPUNs: 12e9, CPUMaxNs: 1e9, RunqNs: 6e9, WallNs: 24e9, WallMaxNs: 2e9, BytesOut: 120_000}}, t0)
+		Calls: 120, CPUNs: 12e9, RunqNs: 6e9, WallNs: 24e9, WallMaxNs: 2e9, BytesOut: 120_000}}, t0)
 	a.AddHost(busyHost(36e9), t0) // node used 36 s of 40 s → 90 %
 	s := a.Snapshot(t0)
 	d := s.TopByCPU[0]
@@ -39,7 +39,7 @@ func TestTimeBreakdownSumsTo100(t *testing.T) {
 	a := New(cfg())
 	// cpu + runq (5 ms) exceed wall (4 ms) by tick rounding.
 	a.AddDeltas([]Delta{{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT 1", 1, 1).Digest,
-		Calls: 1, CPUNs: 3e6, CPUMaxNs: 3e6, RunqNs: 2e6, WallNs: 4e6, WallMaxNs: 4e6}}, t0)
+		Calls: 1, CPUNs: 3e6, RunqNs: 2e6, WallNs: 4e6, WallMaxNs: 4e6}}, t0)
 	tb := a.Snapshot(t0).TopByCPU[0].TimeBreakdown
 	if tb == nil || tb.CPUWait == nil || tb.Other < 0 || !near(tb.CPU+*tb.CPUWait+tb.Other, 100) || !near(tb.Other, 0) {
 		t.Fatalf("breakdown = %+v", tb)
@@ -93,9 +93,9 @@ func TestVictimOfCPU(t *testing.T) {
 	a := New(cfg()) // slow threshold 10 ms
 	a.AddDeltas([]Delta{
 		// waited 60 % of a 50 ms average: victim
-		{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT v FROM t", 1, 1).Digest, Calls: 10, CPUNs: 100e6, CPUMaxNs: 10e6, RunqNs: 300e6, WallNs: 500e6, WallMaxNs: 60e6},
+		{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT v FROM t", 1, 1).Digest, Calls: 10, CPUNs: 100e6, RunqNs: 300e6, WallNs: 500e6, WallMaxNs: 60e6},
 		// waited 60 % but fast (5 ms average): not a victim
-		{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT f FROM t", 1, 1).Digest, Calls: 10, CPUNs: 10e6, CPUMaxNs: 1e6, RunqNs: 30e6, WallNs: 50e6, WallMaxNs: 6e6},
+		{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT f FROM t", 1, 1).Digest, Calls: 10, CPUNs: 10e6, RunqNs: 30e6, WallNs: 50e6, WallMaxNs: 6e6},
 	}, t0)
 	s := a.Snapshot(t0)
 	got := map[string]string{}
@@ -117,7 +117,7 @@ func TestNoRunDelayOmitsCPUWait(t *testing.T) {
 	a := New(cfg())
 	// 1000 calls that clearly waited (wall − cpu > 10 ms each) with run_delay 0.
 	a.AddDeltas([]Delta{{PID: 1, Command: "query", Digest: digestDelta(1, "SELECT v FROM t", 1, 1).Digest,
-		Calls: 1000, CPUNs: 1e9, CPUMaxNs: 1e6, WallNs: 50e9, WallMaxNs: 60e6}}, t0)
+		Calls: 1000, CPUNs: 1e9, WallNs: 50e9, WallMaxNs: 60e6}}, t0)
 	s := a.Snapshot(t0.Add(time.Second))
 	d := s.TopByCPU[0]
 	if s.Accounting[AccountingKeyCPUWait] != AccountingNoRunDelay || d.TimeBreakdown == nil || d.TimeBreakdown.CPUWait != nil || d.VictimOf != "" || len(s.TopByWait) != 0 {
@@ -134,10 +134,18 @@ func TestOtherDigestHasNoNewRoles(t *testing.T) {
 	a := New(c)
 	a.AddDeltas([]Delta{digestDelta(1, "SELECT a FROM t", 10, 1e6), digestDelta(1, "SELECT b FROM t", 10, 30e9)}, t0) // b folds into <other>
 	a.AddHost(busyHost(36e9), t0)
+	found := false
 	for _, d := range a.Snapshot(t0).TopByCPU {
-		if d.DigestID == OtherDigestID && (d.CPURole != "" || d.VictimOf != "") {
+		if d.DigestID != OtherDigestID {
+			continue
+		}
+		found = true
+		if d.CPURole != "" || d.VictimOf != "" {
 			t.Fatalf("<other> got roles %q / %q", d.CPURole, d.VictimOf)
 		}
+	}
+	if !found {
+		t.Fatal("no <other> row in TopByCPU")
 	}
 }
 

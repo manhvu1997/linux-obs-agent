@@ -69,9 +69,6 @@ func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 			Window:                       cfg.DigestWindow,
 			TopN:                         cfg.TopDigests,
 			TopNBytes:                    10,
-			CulpritCPUSharePercent:       cfg.CulpritCPUSharePercent,
-			CulpritMinCPUPercent:         cfg.CulpritMinCPUPercent,
-			VictimRunqRatio:              cfg.VictimRunqRatio,
 			CPUCulpritPercentOfNodeUsed:  cfg.CPUCulpritPercentOfNodeCPUUsed,
 			CPUCulpritMinNodeUsedPercent: cfg.CPUCulpritMinNodeCPUUsedPercent,
 			VictimWaitPercent:            cfg.VictimWaitPercent,
@@ -288,7 +285,7 @@ func (a *Analyzer) applyAgg(entries []mysqlq.AggEntry, now time.Time, preparedTr
 	for _, en := range entries {
 		d, ok := a.text.resolve(textKey{en.Command, en.Hash}, aggSums{
 			PID: en.PID, Calls: en.Calls, WallNs: en.WallNs, WallMaxNs: en.WallMaxNs, CPUNs: en.CPUNs,
-			CPUMaxNs: en.CPUMaxNs, RunqNs: en.RunqNs, BytesIn: en.BytesIn, BytesOut: en.BytesOut,
+			RunqNs: en.RunqNs, BytesIn: en.BytesIn, BytesOut: en.BytesOut,
 		}, byCommand)
 		if ok {
 			deltas = append(deltas, d)
@@ -368,8 +365,6 @@ func (a *Analyzer) tick(now time.Time, entries []mysqlq.AggEntry, preparedTracki
 		RecentSlowQueries: recent,
 
 		WindowSeconds:           snap.WindowSeconds,
-		CPUAccounting:           snap.CPUAccounting,
-		QueryCPUMsTotal:         snap.QueryCPUMsTotal,
 		Node:                    snap.Node,
 		QueryCPUCoveragePercent: snap.QueryCPUCoveragePercent,
 		DroppedEvents:           a.Dropped(),
@@ -377,7 +372,6 @@ func (a *Analyzer) tick(now time.Time, entries []mysqlq.AggEntry, preparedTracki
 		TopDigests:              snap.TopByCPU,
 		TopDigestsByWait:        snap.TopByWait,
 		TopDigestsByBytesOut:    snap.TopByBytesOut,
-		VictimDigests:           snap.VictimDigests,
 		Victims:                 snap.Victims,
 		Accounting:              snap.Accounting,
 	})

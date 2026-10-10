@@ -975,15 +975,10 @@ type MySQLAnalysis struct {
 
 	// Query digests (present when mysql.emit_all_queries is on).
 	WindowSeconds        int                  `json:"window_seconds,omitempty"`
-	CPUAccounting        string               `json:"cpu_accounting,omitempty"` // "ok" | "run_delay_unavailable"
-	QueryCPUMsTotal      float64              `json:"query_cpu_ms_total"`       // all commands, all PIDs, in the window
 	DroppedEvents        uint64               `json:"dropped_events"`
 	Thresholds           *QueryRoleThresholds `json:"thresholds,omitempty"`
-	TopDigests           []QueryDigestStats   `json:"top_digests,omitempty"` // by total CPU
+	TopDigests           []QueryDigestStats   `json:"top_digests,omitempty"` // by on-CPU time
 	TopDigestsByBytesOut []QueryDigestStats   `json:"top_digests_by_bytes_out,omitempty"`
-	// VictimDigests counts digests with role "victim" across all digests in
-	// the window, not only those listed in top_digests.
-	VictimDigests int `json:"victim_digests"`
 
 	// Node is the node CPU over the window (absent when a poll in the window
 	// had no valid /proc/stat delta).
@@ -998,10 +993,16 @@ type MySQLAnalysis struct {
 	// of that call; never set on the analyzer's cached snapshot.
 	OverloadCause *QueryOverload `json:"overload_cause,omitempty"`
 
-	// New role-based fields:
+	// TopDigestsByWait ranks the digests with measured run-queue wait by
+	// total wait (absent when the kernel lacks scheduler stats).
 	TopDigestsByWait []QueryDigestStats `json:"top_digests_by_wait,omitempty"`
-	Victims          map[string]int     `json:"victims,omitempty"`
-	Accounting       map[string]string  `json:"accounting,omitempty"`
+	// Victims counts digests per victim_of kind (e.g. "cpu") over ALL digests
+	// in the window, not only those listed in top_digests.
+	Victims map[string]int `json:"victims,omitempty"`
+	// Accounting reports which time sources are available: key "cpu_wait" →
+	// "ok" | "run_delay_unavailable" (no run-queue time; cpu_wait and
+	// victim_of are then omitted).
+	Accounting map[string]string `json:"accounting,omitempty"`
 }
 
 // ─── DB Inspector (sidecar) ───────────────────────────────────────────────────
@@ -1035,36 +1036,17 @@ type QueryCounters struct {
 }
 
 // QueryDigestStats is one digest's aggregate over the report window.
-// Ranking by CPUMsTotal separates the query that consumes the CPU (culprit)
-// from queries that are slow only because they waited for a CPU (victims).
+// Ranking by on-CPU time separates the query that consumes the CPU (cpu_role
+// culprit) from queries slowed by waiting for it (victim_of cpu).
 type QueryDigestStats struct {
-	PID           uint32  `json:"pid"`
-	DigestID      string  `json:"digest_id"`
-	Command       string  `json:"command"`
-	DigestText    string  `json:"digest_text"`
-	SampleQuery   string  `json:"sample_query,omitempty"`
-	Normalized    bool    `json:"normalized"`
-	Truncated     bool    `json:"truncated"`
-	Calls         uint64  `json:"calls"`
-	CPUMsTotal    float64 `json:"cpu_ms_total"`
-	CPUMsAvg      float64 `json:"cpu_ms_avg"`
-	CPUMsMax      float64 `json:"cpu_ms_max"`
-	RunqWaitMsAvg float64 `json:"runq_wait_ms_avg"`
-	WallMsAvg     float64 `json:"wall_ms_avg"`
-	WallMsMax     float64 `json:"wall_ms_max"`
-	BytesInTotal  uint64  `json:"bytes_in_total"`
-	BytesOutTotal uint64  `json:"bytes_out_total"`
-	BytesOutAvg   float64 `json:"bytes_out_avg"`
-	// CPUSharePercent is this digest's share of the same mysqld's QUERY CPU
-	// in the window — relative, not a share of mysqld or node CPU.
-	CPUSharePercent float64 `json:"cpu_share_percent"`
-	// CPUPercentOfCore is cpu_ms_total over the window as % of one core: the
-	// absolute scale (100 = one core fully busy for the whole window).
-	CPUPercentOfCore float64 `json:"cpu_percent_of_core"`
-	// CPUPercentOfNode is CPUPercentOfCore / NumCPU: the share of the whole
-	// node's CPU capacity (100 = every core busy for the whole window).
-	CPUPercentOfNode float64 `json:"cpu_percent_of_node"`
-	Role             string  `json:"role"`
+	PID         uint32 `json:"pid"`
+	DigestID    string `json:"digest_id"`
+	Command     string `json:"command"`
+	DigestText  string `json:"digest_text"`
+	SampleQuery string `json:"sample_query,omitempty"`
+	Normalized  bool   `json:"normalized"`
+	Truncated   bool   `json:"truncated"`
+	Calls       uint64 `json:"calls"`
 	// CallsPerSec = calls ÷ window.
 	CallsPerSec float64 `json:"calls_per_sec"`
 	// CPUCores = on-CPU time ÷ window: 1.3 = this digest kept 1.3 cores busy.
@@ -1101,9 +1083,6 @@ type TimeBreakdown struct {
 
 // QueryRoleThresholds echoes the culprit/victim cut-offs into the report.
 type QueryRoleThresholds struct {
-	CulpritCPUSharePercent          float64 `json:"culprit_cpu_share_percent"`
-	CulpritMinCPUPercent            float64 `json:"culprit_min_cpu_percent"`
-	VictimRunqRatio                 float64 `json:"victim_runq_ratio"`
 	CPUCulpritPercentOfNodeCPUUsed  float64 `json:"cpu_culprit_percent_of_node_cpu_used"`
 	CPUCulpritMinNodeCPUUsedPercent float64 `json:"cpu_culprit_min_node_cpu_used_percent"`
 	VictimWaitPercent               float64 `json:"victim_wait_percent"`

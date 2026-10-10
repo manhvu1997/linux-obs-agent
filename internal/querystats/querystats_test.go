@@ -48,45 +48,6 @@ func TestRanksByTotalCPUNotPerCall(t *testing.T) {
 	}
 }
 
-func TestRoles(t *testing.T) {
-	a := New(cfg())
-	for i := 0; i < 100; i++ {
-		a.Add(ev("SELECT COUNT(*) FROM big", t0, 400, 5, 410, 20))
-		a.Add(ev("SELECT * FROM users WHERE id = 1", t0, 0.003, 38, 41, 1200))
-	}
-	s := a.Snapshot(t0.Add(time.Second))
-	roles := map[string]string{}
-	for _, d := range s.TopByCPU {
-		roles[d.DigestText] = d.Role
-	}
-	if roles["select count ( * ) from big"] != RoleCulprit {
-		t.Fatalf("big scan role = %q", roles["select count ( * ) from big"])
-	}
-	if roles["select * from users where id = ?"] != RoleVictim {
-		t.Fatalf("point select role = %q", roles["select * from users where id = ?"])
-	}
-	if s.CPUAccounting != AccountingOK {
-		t.Fatalf("accounting = %q", s.CPUAccounting)
-	}
-}
-
-func TestRunDelayUnavailableFallback(t *testing.T) {
-	a := New(cfg())
-	for i := 0; i < 1000; i++ {
-		a.Add(ev("SELECT * FROM users WHERE id = 1", t0, 1, 0, 50, 10))
-	}
-	a.Add(ev("SELECT COUNT(*) FROM big", t0, 5000, 0, 5000, 10))
-	s := a.Snapshot(t0.Add(time.Second))
-	if s.CPUAccounting != AccountingNoRunDelay {
-		t.Fatalf("accounting = %q", s.CPUAccounting)
-	}
-	for _, d := range s.TopByCPU {
-		if d.DigestText == "select * from users where id = ?" && d.Role != RoleVictim {
-			t.Fatalf("expected victim via wall-cpu fallback, got %q", d.Role)
-		}
-	}
-}
-
 func TestWindowRollOff(t *testing.T) {
 	a := New(cfg())
 	a.Add(ev("SELECT 1", t0, 1, 0, 1, 1))
@@ -208,8 +169,8 @@ func TestOtherDigestHasNoRoleAndIsNotSticky(t *testing.T) {
 	for _, d := range s.TopByCPU {
 		if d.DigestID == OtherDigestID {
 			found = true
-			if d.Role != "" {
-				t.Fatalf("other role = %q", d.Role)
+			if d.CPURole != "" || d.VictimOf != "" {
+				t.Fatalf("other cpu_role = %q, victim_of = %q", d.CPURole, d.VictimOf)
 			}
 		}
 	}
@@ -275,39 +236,7 @@ func TestStickyCounterMonotonic(t *testing.T) {
 	}
 }
 
-// Your idle prod case: monitoring queries are 86 % of ~0.2 s of query CPU per
-// minute. High share, negligible absolute cost → no culprit.
-func TestIdleServerDominantDigestIsNotCulprit(t *testing.T) {
-	a := New(cfg())
-	for i := 0; i < 56; i++ { // 56 × 3.3 ms ≈ 185 ms
-		a.Add(ev("SELECT * FROM information_schema.tables", t0, 3.3, 0, 3.7, 5000))
-	}
-	for i := 0; i < 10; i++ { // 10 × 2.9 ms ≈ 29 ms
-		a.Add(ev("SELECT * FROM jobs WHERE id = 1", t0, 2.9, 0, 3, 100))
-	}
-	s := a.Snapshot(t0.Add(time.Second))
-	top := s.TopByCPU[0]
-	if top.CPUSharePercent < 80 {
-		t.Fatalf("share = %.1f, want > 80 (setup)", top.CPUSharePercent)
-	}
-	if top.Role != "" {
-		t.Fatalf("role = %q, want none: %.2f %% of a core is below the floor", top.Role, top.CPUPercentOfCore)
-	}
-}
-
-func TestBusyServerDominantDigestIsCulprit(t *testing.T) {
-	a := New(cfg())
-	for i := 0; i < 60; i++ { // 60 × 500 ms = 30 s of CPU in 60 s = 50 % of a core
-		a.Add(ev("SELECT COUNT(*) FROM big GROUP BY x", t0, 500, 1, 510, 50))
-	}
-	a.Add(ev("SELECT * FROM jobs WHERE id = 1", t0, 5, 0, 5, 100))
-	s := a.Snapshot(t0.Add(time.Second))
-	if top := s.TopByCPU[0]; top.Role != RoleCulprit {
-		t.Fatalf("role = %q (share %.1f, of core %.1f), want culprit", top.Role, top.CPUSharePercent, top.CPUPercentOfCore)
-	}
-}
-
-func TestCPUPercentOfCoreAndQueryTotal(t *testing.T) {
+func TestCPUCoresAndQueryTotal(t *testing.T) {
 	a := New(cfg()) // 60 s window
 	for i := 0; i < 3; i++ {
 		a.Add(ev("SELECT 1 FROM a", t0, 1000, 0, 1000, 1)) // 3 s
@@ -317,29 +246,8 @@ func TestCPUPercentOfCoreAndQueryTotal(t *testing.T) {
 	if s.QueryCPUMsTotal != 3600 {
 		t.Fatalf("query_cpu_ms_total = %v, want 3600", s.QueryCPUMsTotal)
 	}
-	if got := s.TopByCPU[0].CPUPercentOfCore; got != 5 {
-		t.Fatalf("cpu_percent_of_core = %v, want 5 (3 s / 60 s)", got)
-	}
-	if got := s.Thresholds.CulpritMinCPUPercent; got != 5 {
-		t.Fatalf("thresholds.culprit_min_cpu_percent = %v, want default 5", got)
-	}
-	// Exactly at the 5 % floor with an 83 % share → culprit (>= on both).
-	if s.TopByCPU[0].Role != RoleCulprit {
-		t.Fatalf("role at floor = %q, want culprit", s.TopByCPU[0].Role)
-	}
-}
-
-func TestCPUPercentOfNode(t *testing.T) {
-	c := cfg()
-	c.NumCPU = 4
-	a := New(c) // 60 s window
-	for i := 0; i < 6; i++ {
-		a.Add(ev("SELECT 1 FROM a", t0, 10_000, 0, 10_000, 1)) // 60 s = one core
-	}
-	s := a.Snapshot(t0.Add(time.Second))
-	d := s.TopByCPU[0]
-	if d.CPUPercentOfCore != 100 || d.CPUPercentOfNode != 25 {
-		t.Fatalf("of core %v / of node %v, want 100 / 25 on 4 CPUs", d.CPUPercentOfCore, d.CPUPercentOfNode)
+	if got := s.TopByCPU[0].CPUCores; got != 0.05 {
+		t.Fatalf("cpu_cores = %v, want 0.05 (3 s / 60 s)", got)
 	}
 }
 
@@ -349,11 +257,16 @@ func TestVictimDigestsCountedBeyondTopN(t *testing.T) {
 	a := New(c)
 	for i := 0; i < 100; i++ {
 		a.Add(ev("SELECT COUNT(*) FROM big", t0, 400, 5, 410, 20))
-		a.Add(ev("SELECT * FROM users WHERE id = 1", t0, 0.003, 38, 41, 1200))
-		a.Add(ev("SELECT * FROM jobs WHERE id = 1", t0, 0.003, 38, 41, 1200))
+		for _, n := range []string{"a", "b"} {
+			// waits 30 of 50 ms (60 %) and slow (≥ 10 ms): victim_of cpu.
+			a.Add(ev("SELECT v"+n+" FROM t", t0, 1, 30, 50, 0))
+		}
 	}
 	s := a.Snapshot(t0.Add(time.Second))
-	if len(s.TopByCPU) != 1 || s.VictimDigests != 2 {
-		t.Fatalf("top %d, victims %d; want 1 listed and 2 victims counted", len(s.TopByCPU), s.VictimDigests)
+	if len(s.TopByCPU) != 1 || s.TopByCPU[0].VictimOf != "" {
+		t.Fatalf("top = %+v, want only the non-victim big scan listed", s.TopByCPU)
+	}
+	if got := s.Victims[VictimCPU]; got != 2 {
+		t.Fatalf("victims[cpu] = %d, want 2 counted beyond top_digests", got)
 	}
 }

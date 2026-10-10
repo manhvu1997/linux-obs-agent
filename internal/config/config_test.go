@@ -52,8 +52,7 @@ func TestNetflowEnvOverride(t *testing.T) {
 func TestMySQLDigestDefaults(t *testing.T) {
 	m := Defaults().MySQL
 	if m.Enabled || !m.EmitAllQueries || m.DigestWindow != 60*time.Second || m.TopDigests != 20 ||
-		m.StickyDigestsMax != 50 || m.StickyDigestTTL != time.Hour ||
-		m.CulpritCPUSharePercent != 20 || m.CulpritMinCPUPercent != 5 || m.VictimRunqRatio != 5 {
+		m.StickyDigestsMax != 50 || m.StickyDigestTTL != time.Hour {
 		t.Fatalf("mysql defaults = %+v", m)
 	}
 	c := Defaults()
@@ -108,14 +107,14 @@ func TestProcessReportListSizes(t *testing.T) {
 
 func TestMySQLOverloadThresholds(t *testing.T) {
 	m := Defaults().MySQL
-	if m.OverloadNodeCPUPercent != 85 || m.OverloadNodeLoad != 1.5 || m.OverloadMinNodeCPUPercent != 20 {
-		t.Fatalf("overload defaults = %v / %v / %v", m.OverloadNodeCPUPercent, m.OverloadNodeLoad, m.OverloadMinNodeCPUPercent)
+	if m.OverloadNodeCPUPercent != 85 || m.OverloadNodeLoad != 1.5 {
+		t.Fatalf("overload defaults = %v / %v", m.OverloadNodeCPUPercent, m.OverloadNodeLoad)
 	}
 	c := Defaults()
 	c.MySQL.Enabled = true
-	c.MySQL.OverloadMinNodeCPUPercent = 0
+	c.MySQL.OverloadNodeLoad = 0
 	if err := c.validate(); err == nil {
-		t.Fatal("overload_min_node_cpu_percent 0 accepted with mysql enabled")
+		t.Fatal("overload_node_load 0 accepted with mysql enabled")
 	}
 }
 

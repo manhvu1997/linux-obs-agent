@@ -30,7 +30,7 @@ groups:
           severity: warning
         annotations:
           summary: "MySQL queries on {{ $labels.instance }} spend more than 30% of their time waiting for a CPU"
-          description: "Slow queries here are cascade victims of CPU saturation. Fix the culprit digest (role=culprit in mysql_report.top_digests) instead of tuning the slow queries."
+          description: "Slow queries here are cascade victims of CPU saturation. Fix the culprit digest (cpu_role=culprit in mysql_report.top_digests; mysql_report.overload_cause names it) instead of tuning the slow queries."
           diagnose: "http://{{ $labels.instance }}/api/diagnose"
 
       - alert: MySQLDigestResultSizeSpike

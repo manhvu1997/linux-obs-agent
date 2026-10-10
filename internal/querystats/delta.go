@@ -10,9 +10,9 @@ import (
 // as drained from the kernel's aggregation map. A single Event is a Delta of
 // one call (DeltaFromEvent).
 //
-// CPUMaxNs and WallMaxNs must be set whenever Calls > 1: they are folded with
-// max() and are not derived from the sums, so a zero there loses the
-// digest's maximum. For one call they equal CPUNs and WallNs.
+// WallMaxNs must be set whenever Calls > 1: it is folded with max() and is
+// not derived from the sums, so a zero there loses the digest's maximum. For
+// one call it equals WallNs.
 type Delta struct {
 	PID         uint32
 	Command     string
@@ -23,7 +23,6 @@ type Delta struct {
 	WallNs      uint64
 	WallMaxNs   uint64
 	CPUNs       uint64
-	CPUMaxNs    uint64
 	RunqNs      uint64
 	BytesIn     uint64
 	BytesOut    uint64
@@ -33,7 +32,7 @@ type Delta struct {
 func DeltaFromEvent(e Event) Delta {
 	return Delta{
 		PID: e.PID, Command: e.Command, Digest: e.Digest, SampleQuery: e.SampleQuery, Truncated: e.Truncated,
-		Calls: 1, WallNs: e.WallNs, WallMaxNs: e.WallNs, CPUNs: e.CPUNs, CPUMaxNs: e.CPUNs,
+		Calls: 1, WallNs: e.WallNs, WallMaxNs: e.WallNs, CPUNs: e.CPUNs,
 		RunqNs: e.RunqNs, BytesIn: e.BytesIn, BytesOut: e.BytesOut,
 	}
 }

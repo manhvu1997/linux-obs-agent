@@ -8,7 +8,6 @@
 package querystats
 
 import (
-	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -21,7 +20,6 @@ const (
 	AccountingOK         = "ok"
 	AccountingNoRunDelay = "run_delay_unavailable"
 	RoleCulprit          = "culprit"
-	RoleVictim           = "victim"
 	OtherDigestID        = "other"
 	OtherDigestText      = "<other>"
 
@@ -53,16 +51,12 @@ type Config struct {
 	MaxDigests                   int           // 5000 per bucket and in lifetime table
 	TopN                         int           // 20
 	TopNBytes                    int           // 10
-	CulpritCPUSharePercent       float64       // 20
-	CulpritMinCPUPercent         float64       // 5: culprit also needs ≥ this % of one core over Window
-	VictimRunqRatio              float64       // 5
 	SlowWallNs                   uint64        // victim needs wall_avg >= this
 	StickyMax                    int           // 50
 	StickyTTL                    time.Duration // 1h
-	NumCPU                       int           // runtime.NumCPU(): scale of CPUPercentOfNode
 	CPUCulpritPercentOfNodeUsed  float64       // 20: cpu_role culprit needs ≥ this % of the node's CPU used
 	CPUCulpritMinNodeUsedPercent float64       // 50: … and the node ≥ this % busy over the window
-	VictimWaitPercent            float64       // 50: victim_of needs waits ≥ this % of wall
+	VictimWaitPercent            float64       // 50: victim_of needs waits ≥ this % of its time (time_breakdown_percent.cpu_wait)
 	TopNWait                     int           // 10
 }
 
@@ -82,23 +76,11 @@ func (c Config) withDefaults() Config {
 	if c.TopNBytes <= 0 {
 		c.TopNBytes = 10
 	}
-	if c.CulpritCPUSharePercent <= 0 {
-		c.CulpritCPUSharePercent = 20
-	}
-	if c.CulpritMinCPUPercent <= 0 {
-		c.CulpritMinCPUPercent = 5
-	}
-	if c.VictimRunqRatio <= 0 {
-		c.VictimRunqRatio = 5
-	}
 	if c.StickyMax <= 0 {
 		c.StickyMax = 50
 	}
 	if c.StickyTTL <= 0 {
 		c.StickyTTL = time.Hour
-	}
-	if c.NumCPU <= 0 {
-		c.NumCPU = runtime.NumCPU()
 	}
 	if c.CPUCulpritPercentOfNodeUsed <= 0 {
 		c.CPUCulpritPercentOfNodeUsed = 20
@@ -129,18 +111,14 @@ type ExportedDigest struct {
 // Snapshot is the read-only result of one Snapshot call.
 type Snapshot struct {
 	WindowSeconds int
-	CPUAccounting string
 	// QueryCPUMsTotal is the on-CPU time of every command in the window, all
-	// PIDs: the absolute scale behind each digest's CPUSharePercent.
+	// PIDs (the denominator of the Prometheus digest coverage ratio).
 	QueryCPUMsTotal float64
 	Thresholds      model.QueryRoleThresholds
-	// VictimDigests counts victim digests over ALL digests in the window:
-	// victims burn little CPU, so most never reach TopByCPU.
-	VictimDigests int
-	TopByCPU      []model.QueryDigestStats
-	TopByBytesOut []model.QueryDigestStats
-	Exported      []ExportedDigest
-	Commands      map[string]model.QueryCounters
+	TopByCPU        []model.QueryDigestStats
+	TopByBytesOut   []model.QueryDigestStats
+	Exported        []ExportedDigest
+	Commands        map[string]model.QueryCounters
 	// Node is the node CPU over the window; nil when the window has no host
 	// sample or a poll in it had no valid node delta.
 	Node *model.MySQLNodeWindow
@@ -148,8 +126,11 @@ type Snapshot struct {
 	// when a poll in the window was partial or mysqld CPU is 0.
 	QueryCPUCoveragePercent *float64
 	TopByWait               []model.QueryDigestStats
-	Victims                 map[string]int
-	Accounting              map[string]string
+	// Victims counts digests per victim_of kind over ALL digests in the
+	// window: victims burn little CPU, so most never reach TopByCPU.
+	Victims map[string]int
+	// Accounting: AccountingKeyCPUWait → AccountingOK | AccountingNoRunDelay.
+	Accounting map[string]string
 }
 
 type key struct {
@@ -158,10 +139,10 @@ type key struct {
 }
 
 type acc struct {
-	command, text, sample          string
-	normalized, truncated          bool
-	calls, cpu, cpuMax, runq, wall uint64
-	wallMax, in, out               uint64
+	command, text, sample  string
+	normalized, truncated  bool
+	calls, cpu, runq, wall uint64
+	wallMax, in, out       uint64
 }
 
 func (x *acc) add(d Delta) {
@@ -171,7 +152,6 @@ func (x *acc) add(d Delta) {
 	x.wall += d.WallNs
 	x.in += d.BytesIn
 	x.out += d.BytesOut
-	x.cpuMax = max(x.cpuMax, d.CPUMaxNs)
 	x.wallMax = max(x.wallMax, d.WallMaxNs)
 	x.truncated = x.truncated || d.Truncated
 	if x.sample == "" {
@@ -186,7 +166,6 @@ func (x *acc) merge(y *acc) {
 	x.wall += y.wall
 	x.in += y.in
 	x.out += y.out
-	x.cpuMax = max(x.cpuMax, y.cpuMax)
 	x.wallMax = max(x.wallMax, y.wallMax)
 	x.truncated = x.truncated || y.truncated
 	if x.sample == "" {
@@ -357,39 +336,34 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 	if a.waited >= noRunDelayMinEvents && a.runqSum == 0 {
 		acct = AccountingNoRunDelay
 	}
-	cpuByPID := make(map[uint32]uint64)
 	var cpuAll uint64
-	for k, x := range merged {
-		cpuByPID[k.pid] += x.cpu
+	for _, x := range merged {
 		cpuAll += x.cpu
 	}
 
 	hw := a.hostTotals(bs)
 	node := hw.node(a.cfg.Window)
 
-	// Build node denominator for new role calculations
+	// The node's CPU used over the same polls: denominator of
+	// percent_of_node_cpu_used and the cpu_role gate.
 	var nd *nodeDenom
 	if used, ok := hw.nodeUsedNs(); ok && used > 0 && node != nil {
 		nd = &nodeDenom{usedNs: used, usedPercent: node.CPUUsedPercent}
 	}
 
 	stats := make([]model.QueryDigestStats, 0, len(merged))
-	victimsOld := 0
-	newVictims := make(map[string]int)
+	victims := make(map[string]int)
 	for k, x := range merged {
-		s := a.toStats(k, x, cpuByPID[k.pid], acct)
+		s := toStats(k, x)
 		a.addNewStats(&s, k, x, acct, nd)
-		if s.Role == RoleVictim {
-			victimsOld++
-		}
 		if s.VictimOf != "" {
-			newVictims[s.VictimOf]++
+			victims[s.VictimOf]++
 		}
 		stats = append(stats, s)
 	}
 	byWait := topBy(waiting(stats), a.cfg.TopNWait, func(s model.QueryDigestStats) float64 { return float64(s.RunqNs) })
-	byCPU := topBy(stats, a.cfg.TopN, func(s model.QueryDigestStats) float64 { return s.CPUMsTotal })
-	bytesOut := func(s model.QueryDigestStats) float64 { return float64(s.BytesOutTotal) }
+	byCPU := topBy(stats, a.cfg.TopN, func(s model.QueryDigestStats) float64 { return float64(s.CPUNs) })
+	bytesOut := func(s model.QueryDigestStats) float64 { return float64(s.BytesOut) }
 	byOut := topBy(stats, a.cfg.TopNBytes, bytesOut)
 	// Sticky entry uses top-TopN by bytes (spec §4.2); the reported list stays TopNBytes.
 	stickyOut := topBy(stats, a.cfg.TopN, bytesOut)
@@ -426,18 +400,13 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 
 	return Snapshot{
 		WindowSeconds:   int(a.cfg.Window / time.Second),
-		CPUAccounting:   acct,
 		QueryCPUMsTotal: float64(cpuAll) / 1e6,
 		Thresholds: model.QueryRoleThresholds{
-			CulpritCPUSharePercent:          a.cfg.CulpritCPUSharePercent,
-			CulpritMinCPUPercent:            a.cfg.CulpritMinCPUPercent,
-			VictimRunqRatio:                 a.cfg.VictimRunqRatio,
 			CPUCulpritPercentOfNodeCPUUsed:  a.cfg.CPUCulpritPercentOfNodeUsed,
 			CPUCulpritMinNodeCPUUsedPercent: a.cfg.CPUCulpritMinNodeUsedPercent,
 			VictimWaitPercent:               a.cfg.VictimWaitPercent,
 			VictimMinLatencyMs:              float64(a.cfg.SlowWallNs) / 1e6,
 		},
-		VictimDigests:           victimsOld,
 		TopByCPU:                byCPU,
 		TopByBytesOut:           byOut,
 		Exported:                exported,
@@ -445,7 +414,7 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		Node:                    node,
 		QueryCPUCoveragePercent: coverage,
 		TopByWait:               byWait,
-		Victims:                 newVictims,
+		Victims:                 victims,
 		Accounting:              map[string]string{AccountingKeyCPUWait: acct},
 	}
 }
@@ -471,7 +440,6 @@ func (a *Aggregator) markSticky(id string, stats []model.QueryDigestStats, now t
 		l.c.CPUNs += s.CPUNs
 		l.c.WallNs += s.WallNs
 		l.c.RunqNs += s.RunqNs
-		l.c.BytesIn += s.BytesInTotal
 		l.c.BytesOut += s.BytesOut
 	}
 	a.life[id] = l
@@ -509,46 +477,11 @@ func (a *Aggregator) expire(now time.Time) {
 	}
 }
 
-func (a *Aggregator) toStats(k key, x *acc, pidCPU uint64, acct string) model.QueryDigestStats {
-	ms := func(ns uint64) float64 { return float64(ns) / 1e6 }
-	calls := float64(x.calls)
-	cpuAvg, runqAvg, wallAvg := ms(x.cpu)/calls, ms(x.runq)/calls, ms(x.wall)/calls
-	share := 0.0
-	if pidCPU > 0 {
-		share = 100 * float64(x.cpu) / float64(pidCPU)
-	}
-	// Averaged over the full window, so it is understated (never overstated)
-	// while the agent has run for less than one window.
-	ofCore := 100 * float64(x.cpu) / float64(a.cfg.Window.Nanoseconds())
-	wait := runqAvg
-	if acct == AccountingNoRunDelay {
-		wait = wallAvg - cpuAvg
-	}
-	role := ""
-	switch {
-	// share alone is relative to the other queries: on an idle server the
-	// monitoring queries reach 80–90 % of almost nothing. A culprit must also
-	// burn a real fraction of a core.
-	case share >= a.cfg.CulpritCPUSharePercent && ofCore >= a.cfg.CulpritMinCPUPercent:
-		role = RoleCulprit
-	case wait > cpuAvg*a.cfg.VictimRunqRatio && wallAvg >= ms(a.cfg.SlowWallNs):
-		role = RoleVictim
-	}
-	if k.id == OtherDigestID {
-		role = ""
-	}
+// toStats builds a digest's identity fields; addNewStats fills the statistics.
+func toStats(k key, x *acc) model.QueryDigestStats {
 	return model.QueryDigestStats{
 		PID: k.pid, DigestID: k.id, Command: x.command, DigestText: x.text,
-		SampleQuery: x.sample, Normalized: x.normalized, Truncated: x.truncated,
-		Calls:      x.calls,
-		CPUMsTotal: ms(x.cpu), CPUMsAvg: cpuAvg, CPUMsMax: ms(x.cpuMax),
-		RunqWaitMsAvg: runqAvg,
-		WallMsAvg:     wallAvg, WallMsMax: ms(x.wallMax),
-		BytesInTotal: x.in, BytesOutTotal: x.out, BytesOutAvg: float64(x.out) / calls,
-		CPUSharePercent:  share,
-		CPUPercentOfCore: ofCore,
-		CPUPercentOfNode: ofCore / float64(a.cfg.NumCPU),
-		Role:             role,
+		SampleQuery: x.sample, Normalized: x.normalized, Truncated: x.truncated, Calls: x.calls,
 	}
 }
 
