@@ -1,6 +1,7 @@
 package overload
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -27,12 +28,18 @@ func report(role string, pct, nodeUsed float64, victims int) *model.MySQLAnalysi
 		Node:                    &model.MySQLNodeWindow{NumCPU: 8, CPUUsedCores: nodeUsed / 100 * 8, CPUUsedPercent: nodeUsed},
 		QueryCPUCoveragePercent: f(58),
 		Victims:                 map[string]int{"cpu": victims},
+		Accounting:              allMeasured(),
 		Thresholds:              &model.QueryRoleThresholds{CPUCulpritPercentOfNodeCPUUsed: 20, CPUCulpritMinNodeCPUUsedPercent: 50},
 		TopDigests: []model.QueryDigestStats{{
 			PID: 42, DigestID: "abc", DigestText: "select * from t", Command: "query", SampleQuery: "select * from t where id = 7",
 			CPUCores: pct / 100 * nodeUsed / 100 * 8, PercentOfNodeCPUUsed: f(pct), CallsPerSec: 40, BytesOutPerCall: 1300, CPURole: role,
 		}},
 	}
+}
+
+// allMeasured: every wait measured in every poll of the window.
+func allMeasured() map[string]string {
+	return map[string]string{"cpu_wait": "ok", "disk_bytes": "ok", "disk_wait": "ok", "commit_wait": "ok"}
 }
 
 var (
@@ -188,14 +195,15 @@ func TestDigestBlockEvidenceAndSummary(t *testing.T) {
 		t.Fatalf("digest = %+v", d)
 	}
 	ev := got.Evidence
-	if ev.NodeCPUUsedPercent != 90 || ev.NumCPU != 8 || ev.QueryCPUCoveragePercent == nil || *ev.QueryCPUCoveragePercent != 58 || ev.CPUVictims != 1 || ev.WindowSeconds != 60 {
+	if ev.NodeCPUUsedPercent == nil || *ev.NodeCPUUsedPercent != 90 || ev.NumCPU != 8 || ev.QueryCPUCoveragePercent == nil || *ev.QueryCPUCoveragePercent != 58 ||
+		ev.CPUVictims == nil || *ev.CPUVictims != 1 || ev.WindowSeconds != 60 {
 		t.Fatalf("evidence = %+v", ev)
 	}
 	th := got.Thresholds
 	if th.NodeCPUPercent != 85 || th.NodeLoad != 1.5 || th.CPUCulpritPercentOfNodeCPUUsed != 20 || th.CPUCulpritMinNodeCPUUsedPercent != 50 {
 		t.Fatalf("thresholds = %+v", th)
 	}
-	for _, want := range []string{"abc", "27% of all CPU work", "mysql.service", "58% of mysqld CPU"} {
+	for _, want := range []string{"abc", "27% of all CPU work", "mysql.service", "58% of mysqld CPU", "largest wait is the run queue"} {
 		if !strings.Contains(got.Summary, want) {
 			t.Fatalf("summary %q lacks %q", got.Summary, want)
 		}
@@ -299,5 +307,195 @@ func TestAnnotateIODiagnosis(t *testing.T) {
 	}
 	if AnnotateIODiagnosis(nil, oc) != nil {
 		t.Fatal("nil diagnosis stays nil")
+	}
+}
+
+// keys returns the JSON object keys of v.
+func keys(t *testing.T, v any) map[string]bool {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	for k := range m {
+		out[k] = true
+	}
+	return out
+}
+
+var (
+	cpuEvidenceKeys = []string{"node_cpu_used_percent", "node_cpu_source", "node_cpu_used_cores", "num_cpu", "load_normalised",
+		"psi_cpu_some_avg10", "psi_available", "top_family", "top_family_cpu_percent", "mysql_family_cpu_percent",
+		"query_cpu_coverage_percent", "cpu_victims"}
+	diskEvidenceKeys = []string{"io_verdict", "node_disk_read_mb_per_sec", "query_disk_read_coverage_percent", "disk_victims",
+		"commit_victims", "top_disk_family", "top_disk_family_read_mb_per_sec", "mysql_family_disk_read_mb_per_sec"}
+	cpuThresholdKeys  = []string{"node_cpu_percent", "node_load", "cpu_culprit_percent_of_node_cpu_used", "cpu_culprit_min_node_cpu_used_percent"}
+	diskThresholdKeys = []string{"io_culprit_percent_of_disk_read", "io_culprit_min_node_disk_read_mb_per_sec"}
+)
+
+// assertResourceJSON: r carries its own resource's fields and none of the other's.
+func assertResourceJSON(t *testing.T, r *model.QueryOverload) {
+	t.Helper()
+	ownEv, otherEv, ownTh, otherTh := cpuEvidenceKeys, diskEvidenceKeys, cpuThresholdKeys, diskThresholdKeys
+	if r.Resource == "disk" {
+		ownEv, otherEv, ownTh, otherTh = diskEvidenceKeys, cpuEvidenceKeys, diskThresholdKeys, cpuThresholdKeys
+	}
+	ev, th := keys(t, r.Evidence), keys(t, r.Thresholds)
+	for _, k := range otherEv {
+		if ev[k] {
+			t.Errorf("%s evidence has %q: %v", r.Resource, k, ev)
+		}
+	}
+	for _, k := range ownEv {
+		if !ev[k] {
+			t.Errorf("%s evidence lacks %q: %v", r.Resource, k, ev)
+		}
+	}
+	for _, k := range otherTh {
+		if th[k] {
+			t.Errorf("%s thresholds have %q", r.Resource, k)
+		}
+	}
+	for _, k := range ownTh {
+		if !th[k] {
+			t.Errorf("%s thresholds lack %q", r.Resource, k)
+		}
+	}
+	if r.Digest != nil {
+		if has := keys(t, r.Digest)["cpu_cores"]; has != (r.Resource == "cpu") {
+			t.Errorf("%s digest cpu_cores present = %v", r.Resource, has)
+		}
+	}
+}
+
+func TestEvidenceJSONHasOnlyOwnResource(t *testing.T) {
+	// PSI available so psi_* are filled for the CPU assessment.
+	m := metrics(20, 1, 8)
+	m.Pressure.CPU.Available, m.Pressure.CPU.Some.Avg10 = true, 12
+	cpu := Assess(Inputs{Metrics: m, MySQL: report("culprit", 27, 90, 0), Families: mysqlTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHealthy}, Thresholds{}, time.Unix(0, 0))
+	if cpu.Resource != "cpu" || cpu.Secondary != nil {
+		t.Fatalf("precondition: %s secondary %+v", cpu.Resource, cpu.Secondary)
+	}
+	assertResourceJSON(t, cpu)
+	if !strings.Contains(string(mustJSON(t, cpu.Evidence)), `"cpu_victims":0`) {
+		t.Errorf("measured cpu_wait with no victims must report cpu_victims 0: %s", mustJSON(t, cpu.Evidence))
+	}
+
+	diskFams := []model.FamilyStats{{Family: "mysql.service", CPUPercent: 70, ReadBytesPerSec: 40 << 20}, {Family: "backup.service", CPUPercent: 5, ReadBytesPerSec: 1 << 20}}
+	r := diskReport("culprit", 70, 0, 0)
+	r.QueryDiskReadCoveragePercent = f(80)
+	disk := Assess(Inputs{Metrics: m, MySQL: r, Families: diskFams, PIDFamilies: pidFam, IOVerdict: model.VerdictHighDiskThroughput}, Thresholds{}, time.Unix(0, 0))
+	if disk.Resource != "disk" || disk.Secondary != nil {
+		t.Fatalf("precondition: %s secondary %+v", disk.Resource, disk.Secondary)
+	}
+	assertResourceJSON(t, disk)
+}
+
+func TestBothResourcesSecondaryJSONClean(t *testing.T) {
+	r := diskReport("culprit", 40, 1, 0)
+	r.QueryDiskReadCoveragePercent = f(80)
+	r.Node.CPUUsedPercent, r.Node.CPUUsedCores = 90, 7.2
+	r.TopDigests, r.Victims["cpu"] = report("culprit", 27, 90, 1).TopDigests, 1
+	m := metrics(20, 1, 8)
+	m.Pressure.CPU.Available = true
+	got := Assess(Inputs{Metrics: m, MySQL: r, Families: mysqlDiskTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHighDiskThroughput}, Thresholds{}, time.Unix(0, 0))
+	if got.Resource != "disk" || got.Secondary == nil || got.Secondary.Resource != "cpu" {
+		t.Fatalf("primary %s secondary %+v", got.Resource, got.Secondary)
+	}
+	assertResourceJSON(t, got)
+	assertResourceJSON(t, got.Secondary)
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestDiskWaitNotMeasured(t *testing.T) {
+	r := diskReport("culprit", 70, 0, 2)
+	r.Accounting["disk_wait"] = "delayacct_disabled"
+	delete(r.Victims, "disk") // querystats omits the kind when its wait is unmeasured
+	got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: r, Families: mysqlDiskTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHighDiskThroughput}, Thresholds{}, time.Unix(0, 0))
+	if !contains(got.Missing, "disk_wait") || contains(got.Missing, "commit_wait") {
+		t.Fatalf("missing %v, want disk_wait only", got.Missing)
+	}
+	vc := got.Checks[3]
+	for _, want := range []string{"disk waits not measured (accounting.disk_wait = delayacct_disabled)", "2 digest(s) with victim_of commit", "largest wait is disk / commit"} {
+		if !strings.Contains(vc.Detail, want) {
+			t.Fatalf("victims detail %q lacks %q", vc.Detail, want)
+		}
+	}
+	if !vc.Passed || got.Verdict != model.OverloadQueryDisk || got.Confidence != model.ConfidenceHigh {
+		t.Fatalf("commit victims still count: passed %v %s/%s", vc.Passed, got.Verdict, got.Confidence)
+	}
+	ev := keys(t, got.Evidence)
+	if ev["disk_victims"] || !ev["commit_victims"] {
+		t.Fatalf("evidence keys %v: want commit_victims only", ev)
+	}
+}
+
+func TestNoDiskWaitMeasuredMediumConfidence(t *testing.T) {
+	r := diskReport("culprit", 70, 0, 0)
+	r.Accounting["disk_wait"], r.Accounting["commit_wait"] = "delayacct_disabled", "log_write_up_to_unavailable"
+	r.Victims = map[string]int{"cpu": 0}
+	got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: r, Families: mysqlDiskTop, PIDFamilies: pidFam,
+		IOVerdict: model.VerdictHighDiskThroughput}, Thresholds{}, time.Unix(0, 0))
+	if got.Verdict != model.OverloadQueryDisk || got.Confidence != model.ConfidenceMedium {
+		t.Fatalf("%s/%s, want query_disk_overload/medium", got.Verdict, got.Confidence)
+	}
+	if !contains(got.Missing, "disk_wait") || !contains(got.Missing, "commit_wait") {
+		t.Fatalf("missing %v", got.Missing)
+	}
+	if !strings.Contains(got.Summary, "victims could not be measured") || strings.Contains(got.Summary, "0 digest(s)") {
+		t.Fatalf("summary %q", got.Summary)
+	}
+	ev := keys(t, got.Evidence)
+	if ev["disk_victims"] || ev["commit_victims"] {
+		t.Fatalf("unmeasured victim counts emitted: %v", ev)
+	}
+}
+
+func TestCPUWaitNotMeasured(t *testing.T) {
+	r := report("culprit", 27, 90, 0)
+	r.Accounting["cpu_wait"] = "run_delay_unavailable"
+	r.Victims = map[string]int{"disk": 0, "commit": 0}
+	got := Assess(Inputs{Metrics: metrics(20, 1, 8), MySQL: r, Families: mysqlTop, PIDFamilies: pidFam}, Thresholds{}, time.Unix(0, 0))
+	if got.Verdict != model.OverloadQueryCPU || got.Confidence != model.ConfidenceMedium || !contains(got.Missing, "cpu_wait") {
+		t.Fatalf("%s/%s missing %v", got.Verdict, got.Confidence, got.Missing)
+	}
+	if !strings.Contains(got.Checks[3].Detail, "CPU waits not measured (accounting.cpu_wait = run_delay_unavailable)") || got.Checks[3].Passed {
+		t.Fatalf("victims check %+v", got.Checks[3])
+	}
+	if !strings.Contains(got.Summary, "victims could not be measured") || got.Evidence.CPUVictims != nil {
+		t.Fatalf("summary %q cpu_victims %v", got.Summary, got.Evidence.CPUVictims)
+	}
+}
+
+func TestAnnotateIODiagnosisSecondary(t *testing.T) {
+	io := &model.IODiagnosis{Verdict: model.VerdictHighDiskThroughput, NextSteps: []string{"existing step"}}
+	oc := &model.QueryOverload{Verdict: model.OverloadQueryCPU, Resource: "cpu", Digest: &model.OverloadDigest{DigestID: "hot"},
+		Secondary: &model.QueryOverload{Verdict: model.OverloadQueryDisk, Resource: "disk", Digest: &model.OverloadDigest{DigestID: "scan"}}}
+	out := AnnotateIODiagnosis(io, oc)
+	if len(out.NextSteps) != 2 || !strings.Contains(out.NextSteps[0], "overload_cause.secondary") || !strings.Contains(out.NextSteps[0], "scan") {
+		t.Fatalf("next_steps = %v", out.NextSteps)
+	}
+	if len(io.NextSteps) != 1 {
+		t.Fatal("the input diagnosis was mutated")
+	}
+	oc.Secondary.Verdict = model.OverloadNoDominantQuery
+	if AnnotateIODiagnosis(io, oc) != io {
+		t.Fatal("a non-overload secondary must leave the diagnosis unchanged")
 	}
 }
