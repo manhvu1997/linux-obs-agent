@@ -59,6 +59,13 @@
         "type": "constant",
         "query": "60",
         "hide": 2
+      },
+      {
+        "name": "slow_ms",
+        "label": "Slow threshold (ms)",
+        "type": "constant",
+        "query": "100",
+        "hide": 2
       }
     ]
   },
@@ -93,7 +100,7 @@
     {
       "id": 2,
       "type": "table",
-      "title": "Top digests by CPU",
+      "title": "Top digests",
       "gridPos": {
         "h": 8,
         "w": 24,
@@ -112,7 +119,7 @@
             "uid": "${ds_clickhouse}"
           },
           "format": 1,
-          "rawSql": "SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,\n  sum(s.cpu_ns) / 1e9 AS cpuSec,\n  sum(s.cpu_ns) / 1e9 / greatest(dateDiff('second', $__fromTime, $__toTime), 1) AS cpuCores,\n  max(s.cpu_ns / greatest(dateDiff('second', s.window_start, s.window_end), 1)) / 1e9 AS peakCores,\n  100 * sum(s.cpu_ns) / greatest(sum(sum(s.cpu_ns)) OVER (), 1) AS cpuSharePct,\n  sum(s.cpu_ns) / greatest(sum(s.calls), 1) / 1e6 AS cpuMsAvg,\n  sum(s.runq_ns) / greatest(sum(s.calls), 1) / 1e6 AS runqMsAvg,\n  sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS wallMsAvg,\n  max(s.wall_max_ns) / 1e6 AS wallMsMax,\n  sum(s.bytes_out) / greatest(sum(s.calls), 1) AS bytesOutAvg,\n  sum(s.bytes_out) AS bytesOut\nFROM obs.mysql_digest_stats AS s\nLEFT JOIN (SELECT digest_id, digest_text FROM obs.mysql_digest_text FINAL) AS t ON t.digest_id = s.digest_id\nWHERE $__timeFilter(s.window_end) AND s.host IN (${host:singlequote})\nGROUP BY s.digest_id ORDER BY cpuSec DESC LIMIT 50",
+          "rawSql": "SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,\n  sum(s.cpu_ns) / 1e9 / greatest(dateDiff('second', $__fromTime, $__toTime), 1) AS cpuCores,\n  max(s.cpu_ns / greatest(dateDiff('second', s.window_start, s.window_end), 1)) / 1e9 AS peakCores,\n  100 * sum(s.cpu_ns) / greatest((SELECT sum(node_cpu_used_ns) FROM obs.host_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})), 1) AS pctNodeCpu,\n  sum(s.disk_read_bytes) / greatest(dateDiff('second', $__fromTime, $__toTime), 1) / 1048576 AS readMBs,\n  100 * sum(s.disk_read_bytes) / greatest((SELECT sum(disk_read_bytes) FROM obs.host_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})), 1) AS pctDiskRead,\n  sum(s.disk_read_bytes) / greatest(sum(s.calls), 1) / 16384 AS pagesPerCall,\n  sum(s.disk_write_bytes) / greatest(dateDiff('second', $__fromTime, $__toTime), 1) / 1048576 AS writeMBs,\n  100 * sum(s.runq_ns) / greatest(sum(s.wall_ns), 1) AS cpuWaitPct,\n  100 * sum(s.io_wait_ns) / greatest(sum(s.wall_ns), 1) AS diskWaitPct,\n  100 * sum(s.redo_wait_ns) / greatest(sum(s.wall_ns), 1) AS commitWaitPct,\n  sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS latencyMsAvg,\n  max(s.wall_max_ns) / 1e6 AS latencyMsMax,\n  if(pctNodeCpu >= 20 AND 100 * (SELECT sum(node_cpu_used_ns) FROM obs.host_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})) / greatest((SELECT sum(cpu_count * dateDiff('second', window_start, window_end)) FROM obs.host_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})) * 1e9, 1) >= 50, 'culprit', '') AS cpuRole,\n  if(pctDiskRead >= 20 AND (SELECT sum(disk_read_bytes) FROM obs.host_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})) / greatest(dateDiff('second', $__fromTime, $__toTime), 1) / 1048576 >= 5, 'culprit', '') AS ioRole,\n  multiIf(latencyMsAvg < ${slow_ms} OR cpuWaitPct + ifNull(diskWaitPct, 0) + ifNull(commitWaitPct, 0) < 50, '',\n          cpuWaitPct >= ifNull(diskWaitPct, 0) AND cpuWaitPct >= ifNull(commitWaitPct, 0), 'cpu',\n          ifNull(diskWaitPct, 0) >= ifNull(commitWaitPct, 0), 'disk', 'commit') AS victimOf\nFROM obs.mysql_digest_stats AS s\nLEFT JOIN (SELECT digest_id, digest_text FROM obs.mysql_digest_text FINAL) AS t ON t.digest_id = s.digest_id\nWHERE $__timeFilter(s.window_end) AND s.host IN (${host:singlequote})\nGROUP BY s.digest_id ORDER BY cpuCores DESC LIMIT 50",
           "editorType": "sql",
           "queryType": "table"
         }
@@ -125,55 +132,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "bytesOut"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "bytes"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "bytesOutAvg"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "bytes"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "cpuMsAvg"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "ms"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "cpuSec"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "cpuSharePct"
+              "options": "commitWaitPct"
             },
             "properties": [
               {
@@ -185,7 +144,43 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "runqMsAvg"
+              "options": "cpuCores"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cpuWaitPct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "diskWaitPct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "latencyMsAvg"
             },
             "properties": [
               {
@@ -197,7 +192,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "wallMsAvg"
+              "options": "latencyMsMax"
             },
             "properties": [
               {
@@ -209,28 +204,194 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "wallMsMax"
+              "options": "pctDiskRead"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "ms"
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pctNodeCpu"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "peakCores"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "readMBs"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "MiBs"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "writeMBs"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "MiBs"
               }
             ]
           }
         ]
       },
-      "description": "cpuCores: average cores busy over the selected time range (1 = one core; understated when data does not cover the whole range), so a short burst is diluted on a long range. peakCores: the highest rate of one flush interval on one host — sort by it to find bursts. cpuSharePct: share of all query CPU of the selected hosts. wall ≈ cpu: the query itself is expensive; runq ≫ cpu: it waited for CPU (victim); wall ≫ cpu + runq: it waited on locks or I/O. bytesOutAvg: result size per call. Whether a digest overloaded the node (needs node CPU and process families) is in mysql_report.overload_cause, see the Snapshots table."
+      "description": "Formula: per digest over the selected range and hosts: cpuCores = cpu_ns ÷ range seconds (average cores busy); peakCores = the highest cpu_ns ÷ window of one flush interval on one host; pctNodeCpu = cpu_ns ÷ host_stats node_cpu_used_ns × 100; readMBs / writeMBs = disk bytes ÷ range seconds; pctDiskRead = disk_read_bytes ÷ host_stats disk_read_bytes × 100; pagesPerCall = disk_read_bytes per call ÷ 16384; cpuWaitPct / diskWaitPct / commitWaitPct = runq_ns / io_wait_ns / redo_wait_ns ÷ wall_ns × 100; latencyMsAvg = wall_ns per call, latencyMsMax = wall_max_ns. cpuRole = culprit when pctNodeCpu ≥ 20 and the node CPU was ≥ 50% used; ioRole = culprit when pctDiskRead ≥ 20 and the node read ≥ 5 MiB/s; victimOf = cpu / disk / commit (the largest wait) when latencyMsAvg ≥ slow_ms and the three waits are ≥ 50% of wall.\nReading: cpuCores is averaged over the whole range and dilutes a short burst: sort by peakCores to find bursts. A culprit consumes the resource; a victim only waited for it — fix culprits, not victims. pagesPerCall 1–4 = buffer-pool misses, hundreds = a scan. A NULL wait or % column means not measured (no delay accounting, no redo hooks, or no host_stats rows). slow_ms must equal mysql.slow_query_threshold_ms (dashboard settings → variables)."
     },
     {
       "id": 3,
       "type": "timeseries",
-      "title": "CPU of the top 10 digests (cores)",
+      "title": "% of node CPU used — top 10 digests",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
         "y": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT d.time AS time, d.digest AS digest, 100 * d.v / greatest(h.v, 1) AS pct\nFROM (SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, digest_id AS digest, sum(cpu_ns) AS v FROM obs.mysql_digest_stats\n      WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n        AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n                          GROUP BY digest_id ORDER BY sum(cpu_ns) DESC LIMIT 10)\n      GROUP BY time, digest) AS d\nINNER JOIN (SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, sum(node_cpu_used_ns) AS v\n            FROM obs.host_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) GROUP BY time) AS h ON h.time = d.time\nORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "Formula: per bucket (≥ flush interval): digest cpu_ns ÷ host_stats node_cpu_used_ns × 100, for the 10 digests with the most CPU over the range.\nReading: above 20% (and a busy node) a digest is a CPU culprit; a bucket without host_stats rows shows no point."
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "% of node disk reads — top 10 digests",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT d.time AS time, d.digest AS digest, 100 * d.v / greatest(h.v, 1) AS pct\nFROM (SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, digest_id AS digest, sum(disk_read_bytes) AS v FROM obs.mysql_digest_stats\n      WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n        AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\n                          GROUP BY digest_id ORDER BY sum(disk_read_bytes) DESC LIMIT 10)\n      GROUP BY time, digest) AS d\nINNER JOIN (SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, sum(disk_read_bytes) AS v\n            FROM obs.host_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) GROUP BY time) AS h ON h.time = d.time\nORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "Formula: per bucket: digest disk_read_bytes ÷ host_stats disk_read_bytes × 100, for the 10 digests with the most disk reads over the range.\nReading: above 20% (and node reads ≥ 5 MiB/s) a digest is a disk culprit; compare pagesPerCall in Top digests to tell misses from scans."
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Node CPU used and disk reads",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time,\n  100 * sum(node_cpu_used_ns) / greatest(sum(cpu_count * dateDiff('second', window_start, window_end)) * 1e9, 1) AS cpuUsedPct,\n  sum(disk_read_bytes) / greatest($__interval_s, ${flush_s}) / 1048576 AS diskReadMBs\nFROM obs.host_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote})\nGROUP BY time ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "diskReadMBs"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "MiBs"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Formula: per bucket over the selected hosts: cpuUsedPct = node_cpu_used_ns ÷ (cpu_count × window seconds × 1e9) × 100; diskReadMBs = physical-disk read bytes ÷ bucket seconds ÷ 1048576.\nReading: the context for the shares beside it: a 40% share of an idle node is not an overload. Roles in Top digests use 50% CPU and 5 MiB/s."
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "CPU of the top 10 digests (cores)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -254,17 +415,18 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per bucket: digest cpu_ns ÷ 1e9 ÷ bucket seconds (cores), for the 10 digests with the most CPU over the range, summed over the selected hosts.\nReading: absolute cores, independent of node size; a digest that jumps here and in '% of node CPU used' is the one to EXPLAIN."
     },
     {
-      "id": 4,
+      "id": 7,
       "type": "table",
       "title": "CPU regression vs 7 days earlier",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 9
+        "x": 0,
+        "y": 25
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -288,17 +450,18 @@
           "unit": "none"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per digest: CPU seconds in the selected range ÷ CPU seconds in the same range 7 days earlier (digests with > 1 CPU second now).\nReading: ratio ≫ 1 = the digest got more expensive or more frequent than last week (a new query shows a huge ratio); check calls in the drill-down."
     },
     {
-      "id": 5,
+      "id": 8,
       "type": "row",
       "title": "Digest drill-down (set the digest variable)",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 33
       },
       "datasource": {
         "type": "",
@@ -310,14 +473,14 @@
       }
     },
     {
-      "id": 6,
+      "id": 9,
       "type": "timeseries",
       "title": "Calls per second and average latency",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 34
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -341,17 +504,53 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per bucket for the selected digest: calls ÷ bucket seconds; cpu, wall and run-queue ns per call ÷ 1e6 (ms).\nReading: more calls at the same cost = the caller changed; the same calls at a higher cpuMsAvg = the plan or the data changed."
     },
     {
-      "id": 7,
+      "id": 10,
+      "type": "timeseries",
+      "title": "Where the digest's time goes (%)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time,\n  100 * sum(cpu_ns) / greatest(sum(wall_ns), 1) AS cpuPct,\n  100 * sum(runq_ns) / greatest(sum(wall_ns), 1) AS cpuWaitPct,\n  100 * sum(io_wait_ns) / greatest(sum(wall_ns), 1) AS diskWaitPct,\n  100 * sum(redo_wait_ns) / greatest(sum(wall_ns), 1) AS commitWaitPct\nFROM obs.mysql_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND digest_id = '${digest}'\nGROUP BY time ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "Formula: per bucket for the selected digest: cpu_ns, runq_ns, io_wait_ns and redo_wait_ns ÷ wall_ns × 100.\nReading: cpuPct high = the statement itself is expensive; cpuWaitPct high = a victim of CPU overload; diskWaitPct = buffer-pool misses or scans; commitWaitPct = redo-log fsync. The rest of 100% is locks, network or unmeasured; a missing line means not measured."
+    },
+    {
+      "id": 11,
       "type": "table",
       "title": "Per host",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 18
+        "x": 0,
+        "y": 42
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -375,17 +574,18 @@
           "unit": "none"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per host for the selected digest: calls, CPU seconds, and wall ns per call ÷ 1e6.\nReading: one host much slower than the others for the same statement points at that host (data, hardware, load), not the query."
     },
     {
-      "id": 8,
+      "id": 12,
       "type": "row",
       "title": "Slow queries",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 50
       },
       "datasource": {
         "type": "",
@@ -397,14 +597,14 @@
       }
     },
     {
-      "id": 9,
+      "id": 13,
       "type": "table",
       "title": "Latest slow queries (digest filter optional)",
       "gridPos": {
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 51
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -428,17 +628,18 @@
           "unit": "none"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: the newest 200 statements slower than mysql.slow_query_threshold_ms; query is literal-free unless both sample-query privacy flags are on.\nReading: slow is not guilty: check victimOf in Top digests before tuning a slow statement."
     },
     {
-      "id": 10,
+      "id": 14,
       "type": "timeseries",
       "title": "Slow queries per interval",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 59
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -462,17 +663,18 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: count of slow statements per Grafana interval and host (one row per slow statement, so any bucket width is exact).\nReading: a burst on every host at once = shared cause (network, storage, a batch job); on one host = that host."
     },
     {
-      "id": 11,
+      "id": 15,
       "type": "row",
       "title": "Process families",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 67
       },
       "datasource": {
         "type": "",
@@ -484,14 +686,14 @@
       }
     },
     {
-      "id": 12,
+      "id": 16,
       "type": "timeseries",
       "title": "Family CPU (avg)",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 68
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -515,17 +717,18 @@
           "unit": "percent"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per bucket: average of the family's cpu_percent_avg (CPU of all its processes ÷ CPUs × 100), averaged over the selected hosts.\nReading: which service burned CPU when; compare with mysqld to see whether MySQL was the heavy one."
     },
     {
-      "id": 13,
+      "id": 17,
       "type": "timeseries",
       "title": "Family RSS (max)",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 68
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -549,17 +752,18 @@
           "unit": "bytes"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per bucket: the highest summed RSS of the family's processes on any selected host.\nReading: steady growth is a leak or a growing cache."
     },
     {
-      "id": 14,
+      "id": 18,
       "type": "table",
       "title": "Top families",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 76
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -583,17 +787,18 @@
           "unit": "none"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per host and family over the range: average and peak CPU %, peak RSS and peak process count.\nReading: cpuMax ≫ cpuAvg = bursty; a process count that keeps growing = a fork storm or leaked workers."
     },
     {
-      "id": 15,
+      "id": 19,
       "type": "row",
       "title": "Network",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 84
       },
       "datasource": {
         "type": "",
@@ -605,14 +810,14 @@
       }
     },
     {
-      "id": 16,
+      "id": 20,
       "type": "table",
       "title": "Top inbound clients",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 85
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -636,17 +841,18 @@
           "unit": "none"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per client IP, local port and family over the range: TCP bytes both ways and connections opened (peer :: / port 0 = overflow).\nReading: the clients behind the traffic; many connections with few bytes = no connection pool."
     },
     {
-      "id": 17,
+      "id": 21,
       "type": "table",
       "title": "Top outbound peers",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 61
+        "y": 85
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -670,17 +876,18 @@
           "unit": "none"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per remote IP, service port and family over the range: TCP bytes both ways and connections opened.\nReading: the dependencies each service calls most."
     },
     {
-      "id": 18,
+      "id": 22,
       "type": "timeseries",
       "title": "TCP throughput by direction",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 69
+        "y": 93
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -704,17 +911,18 @@
           "unit": "Bps"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per bucket: TCP bytes (both ways) ÷ bucket seconds, inbound vs outbound, for the selected families.\nReading: a change in inbound is a change in client demand; in outbound, in what the services fetch."
     },
     {
-      "id": 19,
+      "id": 23,
       "type": "table",
       "title": "Who talks to MySQL (inbound :3306)",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 69
+        "y": 93
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -738,17 +946,18 @@
           "unit": "none"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: per MySQL host and client IP over the range: bytes received (queries), sent (results) and connections opened on port 3306.\nReading: the client with the largest bytesOut fetches the biggest results; match it to a digest with a large bytes_out."
     },
     {
-      "id": 20,
+      "id": 24,
       "type": "row",
       "title": "Diagnose snapshots",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 77
+        "y": 101
       },
       "datasource": {
         "type": "",
@@ -760,14 +969,14 @@
       }
     },
     {
-      "id": 21,
+      "id": 25,
       "type": "table",
       "title": "Snapshots (fetch one with the query in deploy/grafana/README.md)",
       "gridPos": {
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 78
+        "y": 102
       },
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -791,7 +1000,8 @@
           "unit": "none"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: the newest 100 diagnose snapshots: why each was taken (reason), the I/O verdict, and overload_cause verdict and digest extracted from the stored report.\nReading: a snapshot is the exact /api/diagnose output at that moment; fetch the full report with the SQL in deploy/grafana/README.md."
     }
   ]
 }

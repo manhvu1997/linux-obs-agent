@@ -88,13 +88,43 @@
   "panels": [
     {
       "id": 1,
+      "type": "alertlist",
+      "title": "Firing obs-agent alerts",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "alertInstanceLabelFilter": "{instance=~\"$instance\"}",
+        "groupMode": "default",
+        "maxItems": 20,
+        "sortOrder": 1,
+        "stateFilter": {
+          "firing": true,
+          "pending": true
+        },
+        "viewMode": "list"
+      }
+    },
+    {
+      "id": 2,
       "type": "row",
-      "title": "Node",
+      "title": "What is overloading this server?",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 8
       },
       "datasource": {
         "type": "",
@@ -106,14 +136,766 @@
       }
     },
     {
-      "id": 2,
+      "id": 3,
+      "type": "stat",
+      "title": "Top CPU digest — % of node CPU used",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * topk by (instance) (1, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"})) * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{digest_text}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "Formula: the heaviest digest's on-CPU seconds per second ÷ node CPU cores in use (avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m, per instance.\nReading: share of all CPU work on the server done by the heaviest statement; red (above the line) means a CPU culprit — the alert also needs node CPU ≥ 85%. Needs the digest in the exported set (prometheus_digests minimal or full).\nAlert: MySQLDigestCPUHog (warning) fires at 20."
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Top disk-read digest — % of node disk reads",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * topk by (instance) (1, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m])) * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{digest_text}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "Formula: the heaviest digest's disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m, per instance.\nReading: share of the disk's reads caused by one statement; red means a disk culprit — the alert also needs node disk reads > 5 MiB/s. Empty or NaN when the disk read nothing.\nAlert: MySQLDigestDiskReadHog (warning) fires at 20."
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Query CPU coverage",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * obs_agent_mysql_query_cpu_coverage_ratio{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "Formula: CPU spent inside statements (dispatch_command) ÷ mysqld's CPU × 100.\nReading: how much of mysqld's CPU the statements explain; low = CPU outside query execution (connections, InnoDB background threads, replication). Absent when mysqld's CPU is not known."
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "MySQL — who uses the server",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "text",
+      "title": "How to read this row",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "1. A digest above the dashed line in **% of node CPU used** is the CPU culprit; above it in **% of node disk reads** the disk culprit.\n2. Check **Query CPU vs mysqld CPU**: if mysqld's CPU is far above query CPU, the load is outside statements.\n3. **Top digests** shows cores, shares and pages per call: 1–4 pages = buffer-pool misses, hundreds = a scan.\n4. Confirm in /api/diagnose → mysql_report.overload_cause, which also says whether the node is saturated at all.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "% of node CPU used by top digests",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * topk(10, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"}))",
+          "legendFormat": "{{instance}} {{digest_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "Formula: per digest: on-CPU seconds per second ÷ node CPU cores in use (avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m (the alert's window); top 10.\nReading: a line above the dashed 20% line is a statement doing a fifth of all CPU work on the server; the alert also needs node CPU ≥ 85%. Digest text: obs_agent_mysql_digest_info or the Top digests table.\nAlert: MySQLDigestCPUHog (warning) fires at 20."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "% of node disk reads by top digests",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * topk(10, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} {{digest_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "Formula: per digest: disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m (the alert's window); top 10.\nReading: a line above the dashed 20% line is a statement causing a fifth of the disk's reads; the alert also needs node disk reads > 5 MiB/s.\nAlert: MySQLDigestDiskReadHog (warning) fires at 20."
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "MySQL query CPU vs mysqld CPU (cores)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} query CPU (attributed to digests)"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance) (obs_agent_family_cpu_percent{instance=~\"$instance\",family=~\"$mysql_family\"}) / 100 * on (instance) obs_agent_cpu_count{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} mysqld family CPU"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Formula: query CPU = rate of on-CPU seconds inside dispatch_command (cores); mysqld family CPU = family_cpu_percent / 100 × cpu_count (cores).\nReading: query CPU is what digests can explain. The gap up to the mysqld family's CPU is spent outside statements (reading the next packet, network, InnoDB background threads) and cannot be attributed to a query. Pick the mysqld family with the mysqld family variable if the default regex misses it."
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Top digests (last 5m)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m]))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / scalar(sum((avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"})))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / 1048576",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / scalar(sum(rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m])))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / sum by (digest_id) (rate(obs_agent_mysql_digest_calls_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / 16384",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% disk read"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% node CPU"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "cores"
+          }
+        ]
+      },
+      "description": "Formula: over the last 5m, summed over the selected instances: cores = digest on-CPU s/s; % node CPU = cores ÷ node CPU cores in use × 100; disk MB/s = digest disk-read bytes/s ÷ 1048576; % disk read = digest ÷ node physical-disk read bytes/s × 100; pages/call = disk-read bytes per call ÷ 16384 (InnoDB page).\nReading: the top rows by cores and % disk read are the culprits. pages/call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size), hundreds = a scan (EXPLAIN, index, LIMIT). Only exported digests appear (prometheus_digests minimal: top 20 by CPU ∪ top 20 by disk read); the long tail is in the Analysis dashboard.",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "cores",
+              "Value #B": "% node CPU",
+              "Value #C": "disk MB/s",
+              "Value #D": "% disk read",
+              "Value #E": "pages/call"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "MySQL — who is waiting",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Where query time goes (%)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance) (rate(obs_agent_mysql_query_runq_wait_seconds_total{instance=~\"$instance\"}[5m])) / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} waiting for CPU"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[5m])) / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} on CPU"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance) (rate(obs_agent_mysql_query_io_wait_seconds_total{instance=~\"$instance\"}[5m])) / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} disk wait"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance) (rate(obs_agent_mysql_query_redo_wait_seconds_total{instance=~\"$instance\"}[5m])) / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} commit wait"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "clamp_min(100 - 100 * (sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[5m])) + sum by (instance) (rate(obs_agent_mysql_query_runq_wait_seconds_total{instance=~\"$instance\"}[5m])) + (sum by (instance) (rate(obs_agent_mysql_query_io_wait_seconds_total{instance=~\"$instance\"}[5m])) or 0 * sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total{instance=~\"$instance\"}[5m]))) + (sum by (instance) (rate(obs_agent_mysql_query_redo_wait_seconds_total{instance=~\"$instance\"}[5m])) or 0 * sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total{instance=~\"$instance\"}[5m])))) / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total{instance=~\"$instance\"}[5m])), 0)",
+          "legendFormat": "{{instance}} other (locks, network, unmeasured)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "Formula: each part's seconds per second ÷ statement wall seconds per second × 100, over 5m (the alerts' window), stacked: waiting for CPU (run-queue), on CPU, disk wait (block I/O), commit wait (redo log), other = 100 − the rest (locks, network, and any wait that is not measured).\nReading: waiting for CPU is the bottom band, so its top edge reads directly against the dashed 30% line (MySQLQueriesStarvedForCPU, also needs node CPU ≥ 85%). For MySQLQueriesStalledOnDisk add the disk and commit bands (also needs PSI io full > 10). Victims of CPU overload show mostly 'waiting for CPU': do not tune them, find the culprit in the row above. Missing disk/commit bands = not measured (see Accounting availability).\nAlert: MySQLQueriesStarvedForCPU (critical) fires at 30.\nAlert: MySQLQueriesStalledOnDisk (critical) fires at 30."
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Commit wait share (%)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance) (rate(obs_agent_mysql_query_redo_wait_seconds_total{instance=~\"$instance\"}[5m])) / sum by (instance) (rate(obs_agent_mysql_query_wall_seconds_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "Formula: redo-log wait seconds per second ÷ statement wall seconds per second × 100, over 5m.\nReading: above the dashed line statements spend more than a fifth of their time waiting for the redo log fsync: check the log device (Disk average wait, Disk utilisation), batch small transactions, or innodb_flush_log_at_trx_commit.\nAlert: MySQLCommitsStalledOnRedo (warning) fires at 20."
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Query disk writes by command",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance, command) (rate(obs_agent_mysql_query_disk_write_bytes_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} {{command}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance) (rate(obs_agent_mysql_query_disk_write_bytes_total{instance=~\"$instance\",command=~\"query|stmt_execute\"}[5m]))",
+          "legendFormat": "{{instance}} query + stmt_execute (alerted)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10485760
+              }
+            ]
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "description": "Formula: bytes per second written to disk by mysqld threads while running statements, by command, over 5m; plus query + stmt_execute summed, which is what the alert compares.\nReading: SELECTs writing to disk are on-disk temporary tables or sorts: the 'query + stmt_execute' line above the dashed 10 MiB/s line fires the alert. Add an index for the ORDER BY / GROUP BY or raise tmp_table_size / sort_buffer_size.\nAlert: MySQLQueriesSpillingToDisk (info) fires at 1.048576e+07."
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Queries per second by command",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance, command) (rate(obs_agent_mysql_queries_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{command}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "description": "Formula: rate of commands handled by dispatch_command, by command class.\nReading: a step change in rate explains a step change in CPU or wait; a falling rate with rising wait shares means statements are slowing down."
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Node",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
       "type": "timeseries",
       "title": "CPU",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 1
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -150,20 +932,39 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          },
           "unit": "percent"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: /proc/stat deltas over the 5 s collection interval: usage = user + system, iowait and steal as a share of all CPU time.\nReading: the dashed 85% line is the node-saturation condition of MySQLQueriesStarvedForCPU and MySQLDigestCPUHog. iowait is idle time while a task waits for I/O, not lost work: read PSI io instead. High steal = the hypervisor is taking the CPU."
     },
     {
-      "id": 3,
+      "id": 19,
       "type": "timeseries",
       "title": "Load (1m) and blocked tasks",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 1
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -194,17 +995,18 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: load1 from /proc/loadavg; D-state = procs_blocked from /proc/stat.\nReading: load above the CPU count with low CPU usage means tasks wait on I/O (D-state), not on CPU."
     },
     {
-      "id": 4,
+      "id": 20,
       "type": "timeseries",
       "title": "Memory available",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 9
+        "y": 72
       },
       "datasource": {
         "type": "prometheus",
@@ -226,17 +1028,18 @@
           "unit": "percent"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: MemAvailable ÷ MemTotal × 100 (/proc/meminfo).\nReading: falling toward 0 means page-cache pressure and then swapping or OOM; a shrinking page cache also turns cached reads into disk reads."
     },
     {
-      "id": 5,
+      "id": 21,
       "type": "timeseries",
       "title": "Context switches",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 9
+        "y": 72
       },
       "datasource": {
         "type": "prometheus",
@@ -258,17 +1061,18 @@
           "unit": "ops"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: context switches per second from /proc/stat.\nReading: a sudden rise without more work usually means lock contention or too many threads competing for the CPUs."
     },
     {
-      "id": 6,
+      "id": 22,
       "type": "row",
       "title": "Disk & network",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 80
       },
       "datasource": {
         "type": "",
@@ -280,14 +1084,14 @@
       }
     },
     {
-      "id": 7,
+      "id": 23,
       "type": "timeseries",
       "title": "Disk utilisation",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 81
       },
       "datasource": {
         "type": "prometheus",
@@ -309,17 +1113,18 @@
           "unit": "percent"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: share of time the device had at least one request in flight (iostat %util), per device.\nReading: near 100% a single-queue device is saturated; NVMe and RAID can serve more at 100%, so check Disk average wait too."
     },
     {
-      "id": 8,
+      "id": 24,
       "type": "timeseries",
       "title": "Disk average wait",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 81
       },
       "datasource": {
         "type": "prometheus",
@@ -341,17 +1146,18 @@
           "unit": "ms"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: time spent on completed requests ÷ completed requests, per device and collection interval (iostat await).\nReading: rising wait at the same throughput = the device became slower (or a deep queue); for the redo log device this drives commit wait."
     },
     {
-      "id": 9,
+      "id": 25,
       "type": "timeseries",
       "title": "Disk throughput",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 89
       },
       "datasource": {
         "type": "prometheus",
@@ -382,17 +1188,120 @@
           "unit": "Bps"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: bytes read and written per second, per device (all devices, including dm and md).\nReading: compare with Physical-disk throughput, which counts each byte once; stacked devices (dm over sda) count the same I/O twice here."
     },
     {
-      "id": 10,
+      "id": 26,
+      "type": "timeseries",
+      "title": "Physical-disk throughput",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} read"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_node_disk_write_bytes_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} write"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "description": "Formula: rate of bytes read and written by the node's physical disks (whole devices without slaves; no loop, zram, dm or md).\nReading: the denominator of '% of node disk reads'; MySQLDigestDiskReadHog needs reads above 5 MiB/s."
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "PSI io full / some (%)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 97
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_pressure_io_full_avg10{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} io full"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_pressure_io_some_avg10{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} io some"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "Formula: /proc/pressure/io avg10: full = share of time no task could progress because of I/O, some = at least one task waited.\nReading: io full is lost work, unlike iowait; the dashed 10% line is the io-full condition of MySQLQueriesStalledOnDisk. Absent when the kernel has no PSI."
+    },
+    {
+      "id": 28,
       "type": "timeseries",
       "title": "Network throughput",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 97
       },
       "datasource": {
         "type": "prometheus",
@@ -423,17 +1332,18 @@
           "unit": "Bps"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: bytes received and sent per second, per interface (/proc/net/dev).\nReading: a flat line at the link speed means the network is saturated; large tx from mysqld = large result sets."
     },
     {
-      "id": 11,
+      "id": 29,
       "type": "row",
       "title": "Process families",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 105
       },
       "datasource": {
         "type": "",
@@ -445,14 +1355,14 @@
       }
     },
     {
-      "id": 12,
+      "id": 30,
       "type": "timeseries",
       "title": "Top families by CPU",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 106
       },
       "datasource": {
         "type": "prometheus",
@@ -474,17 +1384,18 @@
           "unit": "percent"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: CPU of all processes of a family (systemd unit or cgroup) ÷ CPUs usable by the agent × 100; top 10.\nReading: the family at the top is what burns the node's CPU; if it is not mysqld, MySQL is not the cause (overload_cause verdict not_mysql)."
     },
     {
-      "id": 13,
+      "id": 31,
       "type": "timeseries",
       "title": "Top families by RSS",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 106
       },
       "datasource": {
         "type": "prometheus",
@@ -506,17 +1417,18 @@
           "unit": "bytes"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: summed resident memory of a family's processes; top 10.\nReading: steady growth is a leak or a growing cache; compare with Memory available."
     },
     {
-      "id": 14,
+      "id": 32,
       "type": "timeseries",
       "title": "Family TCP bytes by direction",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 114
       },
       "datasource": {
         "type": "prometheus",
@@ -538,17 +1450,18 @@
           "unit": "Bps"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: rate of TCP bytes (sent + received) per family, inbound (it serves) and outbound (it calls).\nReading: which service carries the traffic; inbound to mysqld is its clients."
     },
     {
-      "id": 15,
+      "id": 33,
       "type": "timeseries",
       "title": "Top inbound clients",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 114
       },
       "datasource": {
         "type": "prometheus",
@@ -570,17 +1483,18 @@
           "unit": "Bps"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: rate of TCP bytes per client IP and local listening port; top 10 (overflow folds into peer_ip other).\nReading: the client sending or fetching the most data; for :3306 this is the application host behind a heavy query."
     },
     {
-      "id": 16,
+      "id": 34,
       "type": "timeseries",
       "title": "Top outbound peers",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 51
+        "y": 122
       },
       "datasource": {
         "type": "prometheus",
@@ -602,17 +1516,18 @@
           "unit": "Bps"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: rate of TCP bytes per remote IP and service port a family connects to; top 10.\nReading: the dependencies a service talks to most; a new top peer after a deploy is worth checking."
     },
     {
-      "id": 17,
+      "id": 35,
       "type": "row",
-      "title": "MySQL",
+      "title": "Agent health",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 130
       },
       "datasource": {
         "type": "",
@@ -624,162 +1539,14 @@
       }
     },
     {
-      "id": 18,
+      "id": 36,
       "type": "timeseries",
-      "title": "Queries per second by command",
+      "title": "Coverage",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 60
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${ds_prometheus}"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds_prometheus}"
-          },
-          "expr": "sum by (instance, command) (rate(obs_agent_mysql_queries_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}} {{command}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 19,
-      "type": "timeseries",
-      "title": "Query CPU and run-queue wait by command (cores)",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 60
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${ds_prometheus}"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds_prometheus}"
-          },
-          "expr": "sum by (instance, command) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}} {{command}} on-CPU"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds_prometheus}"
-          },
-          "expr": "sum by (instance, command) (rate(obs_agent_mysql_query_runq_wait_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}} {{command}} waiting for CPU"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 20,
-      "type": "timeseries",
-      "title": "MySQL query CPU vs mysqld CPU (cores)",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 68
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${ds_prometheus}"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds_prometheus}"
-          },
-          "expr": "sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}} query CPU (attributed to digests)"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds_prometheus}"
-          },
-          "expr": "sum by (instance) (obs_agent_family_cpu_percent{instance=~\"$instance\",family=~\"$mysql_family\"}) / 100 * on (instance) obs_agent_cpu_count{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} mysqld family CPU"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "description": "Query CPU is measured inside dispatch_command and is what digests can explain. The gap up to the mysqld family's CPU is spent outside it (reading the next packet, network, InnoDB background threads) and cannot be attributed to a query. Pick the mysqld family with the mysqld family variable if the default regex misses it."
-    },
-    {
-      "id": 21,
-      "type": "table",
-      "title": "Top digests by CPU (cores, last 5m)",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 68
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${ds_prometheus}"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds_prometheus}"
-          },
-          "expr": "topk(10, rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\"}[5m]) * on (instance, digest_id) group_left (digest_text) obs_agent_mysql_digest_info{instance=~\"$instance\"})",
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 22,
-      "type": "timeseries",
-      "title": "Digest coverage and dropped events",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 76
+        "y": 131
       },
       "datasource": {
         "type": "prometheus",
@@ -793,7 +1560,7 @@
             "uid": "${ds_prometheus}"
           },
           "expr": "obs_agent_mysql_digest_coverage_ratio{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} coverage"
+          "legendFormat": "{{instance}} digest series ÷ query CPU"
         },
         {
           "refId": "B",
@@ -801,45 +1568,138 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "rate(obs_agent_mysql_events_dropped_total{instance=~\"$instance\"}[$__rate_interval])",
-          "legendFormat": "{{instance}} dropped/s"
+          "expr": "obs_agent_mysql_query_cpu_coverage_ratio{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} query CPU ÷ mysqld CPU"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "percentunit"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: digest coverage = window CPU of the exported digest series ÷ all query CPU; query CPU coverage = CPU inside statements ÷ mysqld CPU.\nReading: low digest coverage = the Prometheus digest panels miss much of the load (use the Analysis dashboard); low query CPU coverage = mysqld's CPU goes outside statements."
     },
     {
-      "id": 23,
-      "type": "row",
-      "title": "Agent",
+      "id": 37,
+      "type": "timeseries",
+      "title": "Dropped, overflow and hash mismatches",
       "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 84
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 131
       },
       "datasource": {
-        "type": "",
-        "uid": ""
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
       },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_mysql_events_dropped_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} events dropped"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_mysql_agg_overflow_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} aggregation overflow"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_mysql_hash_mismatch_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} hash mismatch"
+        }
+      ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "ops"
+        },
         "overrides": []
-      }
+      },
+      "description": "Formula: per-second rates of the three MySQL accounting counters.\nReading: all should be 0. Dropped events undercount digest totals; overflow keeps totals exact at a higher cost; a hash mismatch falls back to exact processing.\nAlert ObsAgentMySQLAccountingDegraded (info) fires when any of them stays above 0 for 10m."
     },
     {
-      "id": 24,
+      "id": 38,
+      "type": "timeseries",
+      "title": "Accounting availability",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 139
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_mysql_io_wait_available{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} disk wait measured"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_mysql_redo_wait_available{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} commit wait measured"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "description": "Formula: 1 when the agent can measure per-statement disk wait (task delay accounting) or commit wait (redo-log hooks), 0 when not.\nReading: below the dashed line the disk or commit band of 'Where query time goes' is missing and its time is counted as 'other'; mysql_report.accounting says why. The alert covers disk wait (for 30m).\nAlert: ObsAgentMySQLIOWaitUnavailable (info) fires at 0.5."
+    },
+    {
+      "id": 39,
       "type": "timeseries",
       "title": "ClickHouse rows sent / dropped",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 85
+        "x": 12,
+        "y": 139
       },
       "datasource": {
         "type": "prometheus",
@@ -870,17 +1730,18 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: rows per second inserted into ClickHouse, and dropped by table and reason.\nReading: rejected = schema or auth mismatch; buffer_full = ClickHouse down longer than the buffer holds; drain_cap = keys folded into overflow (totals stay exact)."
     },
     {
-      "id": 25,
+      "id": 40,
       "type": "timeseries",
       "title": "ClickHouse buffer and staleness",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 85
+        "x": 0,
+        "y": 147
       },
       "datasource": {
         "type": "prometheus",
@@ -911,17 +1772,18 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: bytes waiting in the agent's send buffer; seconds since the last successful insert.\nReading: staleness should stay below two flush intervals; a growing buffer means ClickHouse is not accepting inserts."
     },
     {
-      "id": 26,
+      "id": 41,
       "type": "timeseries",
       "title": "Diagnose snapshots",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 93
+        "x": 12,
+        "y": 147
       },
       "datasource": {
         "type": "prometheus",
@@ -943,17 +1805,18 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: diagnose snapshots captured over the dashboard's range, by reason kind (module, io_verdict, both).\nReading: each one is a full /api/diagnose report stored in ClickHouse; read them in the Analysis dashboard's Snapshots table."
     },
     {
-      "id": 27,
+      "id": 42,
       "type": "timeseries",
       "title": "eBPF events by module",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 93
+        "x": 0,
+        "y": 155
       },
       "datasource": {
         "type": "prometheus",
@@ -975,7 +1838,8 @@
           "unit": "ops"
         },
         "overrides": []
-      }
+      },
+      "description": "Formula: events per second emitted by each eBPF module's ring buffer.\nReading: non-zero only while a module is active or emitting outliers; a module that never shows up was never triggered."
     }
   ]
 }

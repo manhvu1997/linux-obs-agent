@@ -3,9 +3,13 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/chsink"
 )
@@ -139,7 +143,7 @@ var sqlWords = map[string]bool{
 	"by": true, "order": true, "desc": true, "asc": true, "limit": true, "having": true,
 	"interval": true, "day": true, "hour": true, "final": true, "using": true, "between": true,
 	"sum": true, "avg": true, "max": true, "min": true, "count": true, "greatest": true,
-	"length": true, "any": true,
+	"length": true, "any": true, "if": true,
 }
 
 // parseSchema maps table -> column set from the CREATE TABLE statements.
@@ -302,14 +306,14 @@ func TestIntervalPanelsBucketByFlushInterval(t *testing.T) {
 
 func TestTopDigestsHasPeakCores(t *testing.T) {
 	for _, p := range dashboards()["obs-agent-analysis.json"].Panels {
-		if p.Title == "Top digests by CPU" {
+		if p.Title == "Top digests" {
 			if !strings.Contains(p.Targets[0].RawSQL, "AS peakCores") {
-				t.Fatal("Top digests by CPU has no peakCores column")
+				t.Fatal("Top digests has no peakCores column")
 			}
 			return
 		}
 	}
-	t.Fatal("Top digests by CPU panel not found")
+	t.Fatal("Top digests panel not found")
 }
 
 func TestOverviewHasMySQLCPUCoverage(t *testing.T) {
@@ -342,4 +346,247 @@ func TestOverviewHasMySQLCPUCoverage(t *testing.T) {
 		}
 	}
 	t.Error("overview has no mysql_family variable")
+}
+
+// Every panel states what it computes and how to read it (spec §7.4).
+func TestPanelsDescribeFormulaAndReading(t *testing.T) {
+	for name, d := range dashboards() {
+		for _, p := range d.Panels {
+			if p.Type == "row" || p.Type == "text" || p.Type == "alertlist" {
+				continue
+			}
+			if !strings.Contains(p.Description, "Formula:") || !strings.Contains(p.Description, "Reading:") {
+				t.Errorf("%s: panel %q lacks a Formula:/Reading: description", name, p.Title)
+			}
+		}
+	}
+}
+
+type ruleFile struct {
+	Groups []struct {
+		Rules []struct {
+			Alert       string            `yaml:"alert"`
+			Expr        string            `yaml:"expr"`
+			Labels      map[string]string `yaml:"labels"`
+			Annotations map[string]string `yaml:"annotations"`
+		} `yaml:"rules"`
+	} `yaml:"groups"`
+}
+
+func readRuleFile(t *testing.T) ruleFile {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "prometheus", "obs-agent-alerts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rf ruleFile
+	if err := yaml.Unmarshal(b, &rf); err != nil {
+		t.Fatal(err)
+	}
+	return rf
+}
+
+// A panel behind an alert draws the alert's threshold as a dashed line, names
+// the alert and its severity, and both agree with the rule file.
+func TestAlertPanelsMatchRules(t *testing.T) {
+	rf := readRuleFile(t)
+	rules := map[string]struct{ expr, severity string }{}
+	for _, g := range rf.Groups {
+		for _, r := range g.Rules {
+			rules[r.Alert] = struct{ expr, severity string }{r.Expr, r.Labels["severity"]}
+		}
+	}
+	for _, ar := range alertRules {
+		r, ok := rules[ar.Name]
+		if !ok {
+			t.Errorf("alertRules names %s, which is not in the rule file", ar.Name)
+			continue
+		}
+		if r.severity != ar.Severity {
+			t.Errorf("%s: severity %q in gen, %q in rules", ar.Name, ar.Severity, r.severity)
+		}
+		if !strings.Contains(r.expr, ar.Literal) {
+			t.Errorf("%s: threshold literal %q not in the rule expression", ar.Name, ar.Literal)
+		}
+	}
+	used := map[string]bool{}
+	for _, p := range dashboards()["obs-agent-overview.json"].Panels {
+		for _, ar := range alertRules {
+			if !strings.Contains(p.Description, "Alert: "+ar.Name+" (") {
+				continue
+			}
+			used[ar.Name] = true
+			if got := thresholdOf(p); got != ar.Threshold {
+				t.Errorf("panel %q: threshold line %v, alert %s fires at %v", p.Title, got, ar.Name, ar.Threshold)
+			}
+		}
+	}
+	for _, ar := range alertRules {
+		if ar.Panel && !used[ar.Name] {
+			t.Errorf("no Overview panel draws alert %s", ar.Name)
+		}
+	}
+}
+
+// thresholdOf returns the red step of a panel's dashed threshold, or -1.
+func thresholdOf(p Panel) float64 {
+	d, _ := p.FieldConfig["defaults"].(map[string]any)
+	th, _ := d["thresholds"].(map[string]any)
+	steps, _ := th["steps"].([]any)
+	if len(steps) < 2 {
+		return -1
+	}
+	v, _ := steps[1].(map[string]any)["value"].(float64)
+	return v
+}
+
+func TestOverviewTopRows(t *testing.T) {
+	ps := dashboards()["obs-agent-overview.json"].Panels
+	if ps[0].Type != "alertlist" || ps[0].Title != "Firing obs-agent alerts" {
+		t.Fatalf("first panel = %s %q, want the firing-alerts list", ps[0].Type, ps[0].Title)
+	}
+	titles := map[string]bool{}
+	for _, p := range ps {
+		titles[p.Title] = true
+	}
+	for _, want := range []string{"What is overloading this server?", "MySQL — who uses the server", "MySQL — who is waiting", "Agent health",
+		"Top CPU digest — % of node CPU used", "Top disk-read digest — % of node disk reads", "Where query time goes (%)"} {
+		if !titles[want] {
+			t.Errorf("Overview lacks %q", want)
+		}
+	}
+}
+
+func TestAnalysisTopDigestsColumns(t *testing.T) {
+	for _, p := range dashboards()["obs-agent-analysis.json"].Panels {
+		if p.Title != "Top digests" {
+			continue
+		}
+		for _, col := range []string{"cpuCores", "peakCores", "pctNodeCpu", "readMBs", "pctDiskRead", "pagesPerCall", "writeMBs",
+			"cpuWaitPct", "diskWaitPct", "commitWaitPct", "latencyMsAvg", "latencyMsMax", "cpuRole", "ioRole", "victimOf"} {
+			if !strings.Contains(p.Targets[0].RawSQL, "AS "+col) {
+				t.Errorf("Top digests lacks column %s", col)
+			}
+		}
+		return
+	}
+	t.Fatal("Analysis has no 'Top digests' panel")
+}
+
+// The alert runbooks send the operator to named Overview panels and to
+// columns of the Analysis 'Top digests' table: every one of them must exist,
+// matched by title prefix (a title may carry a unit suffix such as " (%)").
+func TestRunbookPanelsExist(t *testing.T) {
+	want := map[string]bool{}
+	for _, s := range []string{"Where query time goes", "MySQL — who uses the server", "% of node CPU used by top digests",
+		"% of node disk reads by top digests", "Commit wait share", "Query disk writes by command", "Disk average wait", "Disk utilisation"} {
+		want[s] = true
+	}
+	// Plus every panel a runbook names as "Overview → '<title>'".
+	ref := regexp.MustCompile(`Overview → '([^']+)'`)
+	for _, g := range readRuleFile(t).Groups {
+		for _, r := range g.Rules {
+			for _, m := range ref.FindAllStringSubmatch(r.Annotations["description"], -1) {
+				want[m[1]] = true
+			}
+		}
+	}
+	ov := dashboards()["obs-agent-overview.json"].Panels
+	for w := range want {
+		found := false
+		for _, p := range ov {
+			if strings.HasPrefix(p.Title, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("a runbook names Overview panel %q, which does not exist", w)
+		}
+	}
+	for _, p := range dashboards()["obs-agent-analysis.json"].Panels {
+		if p.Title == "Top digests" {
+			for _, col := range []string{"cpuCores", "pctNodeCpu"} {
+				if !strings.Contains(p.Targets[0].RawSQL, "AS "+col) {
+					t.Errorf("a runbook names Analysis 'Top digests' column %s, which does not exist", col)
+				}
+			}
+			return
+		}
+	}
+	t.Error("a runbook names the Analysis 'Top digests' table, which does not exist")
+}
+
+var grafanaVarRe = regexp.MustCompile(`"\$\{?[a-z_]+\}?"`)
+
+// promQL returns every Prometheus expression of the Overview with Grafana's
+// macros replaced by values Prometheus accepts.
+func promQL() map[string]string {
+	r := strings.NewReplacer("$__rate_interval", "5m", "$__interval", "1m", "$__range", "1h")
+	out := map[string]string{}
+	for _, p := range dashboards()["obs-agent-overview.json"].Panels {
+		for _, tg := range p.Targets {
+			if tg.Expr == "" {
+				continue
+			}
+			out[p.Title+" "+tg.RefID] = grafanaVarRe.ReplaceAllString(r.Replace(tg.Expr), `".*"`)
+		}
+	}
+	return out
+}
+
+// Every Overview expression must parse. Prometheus has no offline parser in
+// promtool's query command, so each expression is wrapped as a recording rule
+// and checked with promtool check rules (skipped when promtool is absent; run
+// the tests under devbox, which provides it).
+func TestPromQLParses(t *testing.T) {
+	bin, err := exec.LookPath("promtool")
+	if err != nil {
+		t.Skip("promtool not on PATH; run: devbox run -- go test ./deploy/grafana/gen/")
+	}
+	exprs := promQL()
+	if len(exprs) < 20 {
+		t.Fatalf("found only %d expressions", len(exprs))
+	}
+	type rec struct {
+		Record string `yaml:"record"`
+		Expr   string `yaml:"expr"`
+	}
+	type group struct {
+		Name  string `yaml:"name"`
+		Rules []rec  `yaml:"rules"`
+	}
+	for name, e := range exprs {
+		if strings.Contains(e, "$") {
+			t.Errorf("%s: unreplaced Grafana variable in %s", name, e)
+			continue
+		}
+		b, err := yaml.Marshal(map[string][]group{"groups": {{Name: "g", Rules: []rec{{Record: "x", Expr: e}}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := filepath.Join(t.TempDir(), "r.yaml")
+		if err := os.WriteFile(f, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command(bin, "check", "rules", f).CombinedOutput(); err != nil {
+			t.Errorf("%s does not parse:\n%s\n%s", name, e, out)
+		}
+	}
+}
+
+// The promtool check above must actually reject the parse trap it guards.
+func TestPromQLCheckRejectsGroupLeftParenTrap(t *testing.T) {
+	bin, err := exec.LookPath("promtool")
+	if err != nil {
+		t.Skip("promtool not on PATH")
+	}
+	f := filepath.Join(t.TempDir(), "r.yaml")
+	bad := "groups:\n  - name: g\n    rules:\n      - record: x\n        expr: a / on (instance) group_left (b / 100 * c)\n"
+	if err := os.WriteFile(f, []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command(bin, "check", "rules", f).Run(); err == nil {
+		t.Fatal("promtool accepted group_left followed by a parenthesised expression")
+	}
 }

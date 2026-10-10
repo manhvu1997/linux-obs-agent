@@ -2,8 +2,8 @@
 
 | File | Data source | Purpose |
 |---|---|---|
-| `obs-agent-overview.json` | Prometheus | Live node, families, MySQL by command, top digests, ClickHouse sink health |
-| `obs-agent-analysis.json` | ClickHouse | Every digest, slow queries, families, inbound/outbound peers, diagnose snapshots |
+| `obs-agent-overview.json` | Prometheus | Firing alerts, what is overloading the server, MySQL who uses / who waits (with the alert thresholds drawn), node, disk, families, agent health |
+| `obs-agent-analysis.json` | ClickHouse | Every digest with node-relative shares (from `host_stats`), culprit/victim roles, slow queries, families, inbound/outbound peers, diagnose snapshots |
 
 Both are generated: edit `deploy/grafana/gen/main.go`, then run `go run ./deploy/grafana/gen`.
 
@@ -36,8 +36,12 @@ the link uses `obs_agent_clickhouse_host_info{host}` to translate, so it only wo
 - Rows are one per agent `clickhouse.flush_interval`; time series bucket by at least that much and show
   rates (cores, calls/s, bytes/s), so they do not change with zoom. If your agents use a flush interval
   other than 60 s, set the hidden constant `flush_s` (Dashboard settings → Variables) to it.
-- "Top digests by CPU": `cpuCores` is averaged over the whole range and hides short bursts; sort by
-  `peakCores` to find them.
+- "Top digests": `cpuCores` is averaged over the whole range and hides short bursts; sort by
+  `peakCores` to find them. `pctNodeCpu` / `pctDiskRead` divide by the node totals in `host_stats`
+  (NULL = not measured). `victimOf` uses the hidden constant `slow_ms`, which must equal the agents'
+  `mysql.slow_query_threshold_ms` (default 100).
+- Every panel's description (the (i) icon) states its formula and how to read it; panels behind an
+  alert draw the alert's threshold as a dashed red line and name the alert and its severity.
 - `window_end` is stamped with the agent host's clock. If ClickHouse panels look shifted against the
   Prometheus ones, check NTP on that host (`timedatectl`, `chronyc tracking`).
 
