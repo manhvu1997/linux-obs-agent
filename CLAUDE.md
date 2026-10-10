@@ -1703,6 +1703,8 @@ curl -s localhost:9200/api/diagnose | jq '.process_report.top_families_cpu[] | {
 
 `process.report_top_n`, `report_top_cpu`, `report_top_mem`, `report_top_families_cpu`, `report_top_families_mem`, `process.family_by`, `process.max_connections_per_process`, `process.max_peers_per_process`; `mysql.emit_all_queries`, `digest_window`, `top_digests`, `sticky_digests_max`, `sticky_digest_ttl`, `cpu_culprit_percent_of_node_cpu_used`, `cpu_culprit_min_node_cpu_used_percent`, `victim_wait_percent`, `overload_node_cpu_percent`, `overload_node_load`, `sample_queries`, `fold_system_schemas`; and the `netflow:` section. See `deploy/config.yaml.example`. Environment overrides: `NETFLOW_ENABLED`, `NETFLOW_INCLUDE_LOOPBACK`, `MYSQL_EMIT_ALL_QUERIES`, `MYSQL_DIGEST_WINDOW`, `MYSQL_SAMPLE_QUERIES`, `MYSQL_FOLD_SYSTEM_SCHEMAS`.
 
+Removed `mysql:` keys still load but are ignored, with one startup warning each: `culprit_cpu_share_percent` (now `cpu_culprit_percent_of_node_cpu_used`), `culprit_min_cpu_percent` (now `cpu_culprit_min_node_cpu_used_percent`), `victim_runq_ratio` (now `victim_wait_percent`), `overload_min_node_cpu_percent`, `top_n`, `stale_seconds` (no replacement).
+
 ### Prometheus
 
 Never labelled by PID, client port or raw SQL. Caps: 50 families, 100 outbound peers, 100 inbound peers, 200 outbound service ports (node-wide), 50 sticky digests; overflow → `"other"`. A label value that is not valid UTF-8 after sanitising is logged and its series skipped, never a failed scrape.

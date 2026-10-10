@@ -639,6 +639,7 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
+	warnRemovedKeys(path, data)
 	applyMongoEnvOverrides(cfg)
 	applyMySQLEnvOverrides(cfg)
 	applyNetflowEnvOverrides(cfg)
