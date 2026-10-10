@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/chsink"
+	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 )
 
 func TestGeneratedFilesUpToDate(t *testing.T) {
@@ -778,4 +779,109 @@ func TestNodeDiskReadDenominatorGuarded(t *testing.T) {
 	if n < 3 {
 		t.Fatalf("found only %d digest ÷ node disk read expressions", n)
 	}
+}
+
+// A Nullable wait or node-CPU column is NULL for intervals that did not
+// measure it, and sum() skips those rows. Dividing such a sum by a total over
+// every row (sum(wall_ns), or a CPU capacity over every host_stats row)
+// counts the unmeasured intervals as 0 and understates the share. The
+// denominator must count only the rows where the numerator was measured.
+var (
+	nullableWaitDivRe = regexp.MustCompile(`\bsum\((?:\w+\.)?(io_wait_ns|redo_wait_ns)\)\s*/\s*`)
+	capacitySumRe     = regexp.MustCompile(`\b(sum|sumIf)\(cpu_count\b`)
+)
+
+func nullableDenominatorViolations(sql string) []string {
+	var v []string
+	for _, loc := range nullableWaitDivRe.FindAllStringSubmatchIndex(sql, -1) {
+		col := sql[loc[2]:loc[3]]
+		want := regexp.MustCompile(`^nullIf\(sumIf\((?:\w+\.)?wall_ns, (?:\w+\.)?` + col + ` IS NOT NULL\), 0\)`)
+		if !want.MatchString(sql[loc[1]:]) {
+			v = append(v, "sum("+col+") divided by a wall total that includes unmeasured rows: "+sql[loc[0]:min(len(sql), loc[1]+40)])
+		}
+	}
+	for _, loc := range capacitySumRe.FindAllStringSubmatchIndex(sql, -1) {
+		rest := sql[loc[0]:min(len(sql), loc[1]+100)]
+		if sql[loc[2]:loc[3]] != "sumIf" || !strings.Contains(rest, ", node_cpu_used_ns IS NOT NULL)") {
+			v = append(v, "CPU capacity counts host_stats rows without a node CPU delta: "+rest)
+		}
+	}
+	return v
+}
+
+// clickhouseSQL returns every ClickHouse query of the Analysis dashboard and
+// of deploy/clickhouse/queries.sql, labelled for error messages.
+func clickhouseSQL(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, p := range dashboards()["obs-agent-analysis.json"].Panels {
+		for _, tg := range p.Targets {
+			out["panel "+p.Title+" "+tg.RefID] = tg.RawSQL
+		}
+	}
+	b, err := os.ReadFile(filepath.Join("..", "..", "clickhouse", "queries.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, q := range strings.Split(string(b), ";") {
+		out["queries.sql #"+strconv.Itoa(i+1)] = q
+	}
+	return out
+}
+
+func TestNullableSharesDivideByMeasuredRows(t *testing.T) {
+	waits, caps := 0, 0
+	for name, sql := range clickhouseSQL(t) {
+		waits += len(nullableWaitDivRe.FindAllString(sql, -1))
+		caps += len(capacitySumRe.FindAllString(sql, -1))
+		for _, msg := range nullableDenominatorViolations(sql) {
+			t.Errorf("%s: %s", name, msg)
+		}
+	}
+	// Top digests (2) + drill-down (2) + queries.sql (2); nodeCPUCapacityS + node panel.
+	if waits < 6 || caps < 2 {
+		t.Fatalf("found only %d wait shares and %d capacity sums: the check would pass vacuously", waits, caps)
+	}
+}
+
+func TestNullableDenominatorCheckerRejectsOldSQL(t *testing.T) {
+	for _, q := range []string{
+		"100 * sum(s.io_wait_ns) / greatest(sum(s.wall_ns), 1) AS diskWaitPct",
+		"100 * sum(redo_wait_ns) / nullIf(sum(wall_ns), 0) AS commitWaitPct",
+		"100 * sum(io_wait_ns) / nullIf(sumIf(wall_ns, redo_wait_ns IS NOT NULL), 0)", // wrong column
+		"(SELECT sum(cpu_count * dateDiff('second', window_start, window_end)) FROM obs.host_stats)",
+		"sumIf(cpu_count * dateDiff('second', window_start, window_end), disk_read_bytes IS NOT NULL)",
+	} {
+		if len(nullableDenominatorViolations(q)) == 0 {
+			t.Errorf("checker accepted %q", q)
+		}
+	}
+	for _, q := range []string{
+		"100 * sum(s.io_wait_ns) / nullIf(sumIf(s.wall_ns, s.io_wait_ns IS NOT NULL), 0) AS diskWaitPct",
+		"sumIf(cpu_count * dateDiff('second', window_start, window_end), node_cpu_used_ns IS NOT NULL)",
+	} {
+		if v := nullableDenominatorViolations(q); len(v) != 0 {
+			t.Errorf("checker rejected %q: %v", q, v)
+		}
+	}
+}
+
+// The folded <minor> row and the drain-cap overflow row are aggregates of many
+// statements: neither can be a culprit.
+func TestTopDigestsRolesSkipFoldedRows(t *testing.T) {
+	for _, p := range dashboards()["obs-agent-analysis.json"].Panels {
+		if p.Title != "Top digests" {
+			continue
+		}
+		excl := "s.digest_id NOT IN ('" + chsink.MinorDigestID + "', '" + querystats.OtherDigestID + "')"
+		for _, line := range strings.Split(p.Targets[0].RawSQL, "\n") {
+			for _, role := range []string{"AS cpuRole", "AS ioRole"} {
+				if strings.Contains(line, role) && !strings.Contains(line, excl) {
+					t.Errorf("%s does not exclude the folded rows (%s): %s", role, excl, line)
+				}
+			}
+		}
+		return
+	}
+	t.Fatal("Analysis has no 'Top digests' panel")
 }

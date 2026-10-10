@@ -44,13 +44,16 @@ LEFT JOIN (SELECT digest_id, digest_text FROM obs.mysql_digest_text FINAL) AS t 
 WHERE s.host = 'db-01' AND s.window_end > now() - INTERVAL 6 HOUR
 GROUP BY s.digest_id ORDER BY pct_disk_read DESC LIMIT 30;
 
--- Where a digest's time goes (% of wall). A wait is NULL when not measured;
--- unmeasured_*_rows say how many intervals lacked it (its time is then in other_pct).
+-- Where a digest's time goes (% of wall). A wait is NULL when not measured:
+-- disk_wait_pct / commit_wait_pct divide by the wall time of the intervals that
+-- measured that wait only (unmeasured intervals would otherwise count as 0);
+-- unmeasured_*_rows say how many intervals lacked it. other_pct is approximate
+-- when some intervals lacked a wait (its percentages have different denominators).
 SELECT host,
        round(100 * sum(cpu_ns) / greatest(sum(wall_ns), 1), 1) AS cpu_pct,
        round(100 * sum(runq_ns) / greatest(sum(wall_ns), 1), 1) AS cpu_wait_pct,
-       round(100 * sum(io_wait_ns) / greatest(sum(wall_ns), 1), 1) AS disk_wait_pct,
-       round(100 * sum(redo_wait_ns) / greatest(sum(wall_ns), 1), 1) AS commit_wait_pct,
+       round(100 * sum(io_wait_ns) / nullIf(sumIf(wall_ns, io_wait_ns IS NOT NULL), 0), 1) AS disk_wait_pct,
+       round(100 * sum(redo_wait_ns) / nullIf(sumIf(wall_ns, redo_wait_ns IS NOT NULL), 0), 1) AS commit_wait_pct,
        round(100 - cpu_pct - cpu_wait_pct - ifNull(disk_wait_pct, 0) - ifNull(commit_wait_pct, 0), 1) AS other_pct,
        countIf(io_wait_ns IS NULL) AS unmeasured_io_rows, countIf(redo_wait_ns IS NULL) AS unmeasured_redo_rows
 FROM obs.mysql_digest_stats

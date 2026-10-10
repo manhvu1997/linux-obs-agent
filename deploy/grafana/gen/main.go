@@ -9,6 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/manhvu1997/linux-obs-agent/internal/chsink"
+	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 )
 
 type DS struct {
@@ -593,7 +596,9 @@ func analysis() Dashboard {
 	hostSum := func(col string) string {
 		return `(SELECT sum(` + col + `) FROM obs.host_stats WHERE $__timeFilter(window_end) AND ` + hostF + `)`
 	}
-	nodeCPUCapacityS := `(SELECT sum(cpu_count * dateDiff('second', window_start, window_end)) FROM obs.host_stats WHERE $__timeFilter(window_end) AND ` + hostF + `)`
+	// CPU capacity of the intervals that measured node CPU: an interval whose
+	// node_cpu_used_ns is NULL must not add capacity (it would read low).
+	nodeCPUCapacityS := `(SELECT sumIf(cpu_count * dateDiff('second', window_start, window_end), node_cpu_used_ns IS NOT NULL) FROM obs.host_stats WHERE $__timeFilter(window_end) AND ` + hostF + `)`
 	rangeS := `greatest(dateDiff('second', $__fromTime, $__toTime), 1)`
 
 	b := &builder{}
@@ -607,12 +612,12 @@ func analysis() Dashboard {
   sum(s.disk_read_bytes) / greatest(sum(s.calls), 1) / 16384 AS pagesPerCall,
   sum(s.disk_write_bytes) / `+rangeS+` / 1048576 AS writeMBs,
   100 * sum(s.runq_ns) / greatest(sum(s.wall_ns), 1) AS cpuWaitPct,
-  100 * sum(s.io_wait_ns) / greatest(sum(s.wall_ns), 1) AS diskWaitPct,
-  100 * sum(s.redo_wait_ns) / greatest(sum(s.wall_ns), 1) AS commitWaitPct,
+  100 * sum(s.io_wait_ns) / nullIf(sumIf(s.wall_ns, s.io_wait_ns IS NOT NULL), 0) AS diskWaitPct,
+  100 * sum(s.redo_wait_ns) / nullIf(sumIf(s.wall_ns, s.redo_wait_ns IS NOT NULL), 0) AS commitWaitPct,
   sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS latencyMsAvg,
   max(s.wall_max_ns) / 1e6 AS latencyMsMax,
-  if(pctNodeCpu >= 20 AND 100 * `+hostSum("node_cpu_used_ns")+` / nullIf(`+nodeCPUCapacityS+` * 1e9, 0) >= 50, 'culprit', '') AS cpuRole,
-  if(pctDiskRead >= 20 AND `+hostSum("disk_read_bytes")+` / `+rangeS+` / 1048576 >= 5, 'culprit', '') AS ioRole,
+  if(s.digest_id NOT IN ('`+chsink.MinorDigestID+`', '`+querystats.OtherDigestID+`') AND pctNodeCpu >= 20 AND 100 * `+hostSum("node_cpu_used_ns")+` / nullIf(`+nodeCPUCapacityS+` * 1e9, 0) >= 50, 'culprit', '') AS cpuRole,
+  if(s.digest_id NOT IN ('`+chsink.MinorDigestID+`', '`+querystats.OtherDigestID+`') AND pctDiskRead >= 20 AND `+hostSum("disk_read_bytes")+` / `+rangeS+` / 1048576 >= 5, 'culprit', '') AS ioRole,
   multiIf(latencyMsAvg < ${slow_ms} OR cpuWaitPct + ifNull(diskWaitPct, 0) + ifNull(commitWaitPct, 0) < 50, '',
           cpuWaitPct >= ifNull(diskWaitPct, 0) AND cpuWaitPct >= ifNull(commitWaitPct, 0), 'cpu',
           ifNull(diskWaitPct, 0) >= ifNull(commitWaitPct, 0), 'disk', 'commit') AS victimOf
@@ -629,9 +634,9 @@ GROUP BY s.digest_id ORDER BY cpuCores DESC LIMIT 50`)
 		"per digest over the selected range and hosts: cpuCores = cpu_ns ÷ range seconds (average cores busy); peakCores = the highest cpu_ns ÷ window of one "+
 			"flush interval on one host; pctNodeCpu = cpu_ns ÷ host_stats node_cpu_used_ns × 100; readMBs / writeMBs = disk bytes ÷ range seconds; "+
 			"pctDiskRead = disk_read_bytes ÷ host_stats disk_read_bytes × 100; pagesPerCall = disk_read_bytes per call ÷ 16384; "+
-			"cpuWaitPct / diskWaitPct / commitWaitPct = runq_ns / io_wait_ns / redo_wait_ns ÷ wall_ns × 100; latencyMsAvg = wall_ns per call, latencyMsMax = wall_max_ns. "+
-			"cpuRole = culprit when pctNodeCpu ≥ 20 and the node CPU was ≥ 50% used; ioRole = culprit when pctDiskRead ≥ 20 and the node read ≥ 5 MiB/s; "+
-			"victimOf = cpu / disk / commit (the largest wait) when latencyMsAvg ≥ slow_ms and the three waits are ≥ 50% of wall.",
+			"cpuWaitPct = runq_ns ÷ wall_ns × 100; diskWaitPct / commitWaitPct = io_wait_ns / redo_wait_ns ÷ wall_ns of the intervals that measured that wait × 100; latencyMsAvg = wall_ns per call, latencyMsMax = wall_max_ns. "+
+			"cpuRole = culprit when pctNodeCpu ≥ 20 and the node CPU was ≥ 50% used (over the intervals with a node CPU delta); ioRole = culprit when pctDiskRead ≥ 20 and the node read ≥ 5 MiB/s; "+
+			"the folded <minor> and overflow other rows never get a role. victimOf = cpu / disk / commit (the largest wait) when latencyMsAvg ≥ slow_ms and the three waits are ≥ 50% of wall.",
 		"cpuCores is averaged over the whole range and dilutes a short burst: sort by peakCores to find bursts. A culprit consumes the resource; a victim only waited "+
 			"for it — fix culprits, not victims. pagesPerCall 1–4 = buffer-pool misses, hundreds = a scan. A NULL wait or % column means not measured "+
 			"(no delay accounting, no redo hooks, or no host_stats rows). slow_ms must equal mysql.slow_query_threshold_ms (dashboard settings → variables)."), 24)
@@ -655,14 +660,14 @@ ORDER BY time`
 		"per bucket: digest disk_read_bytes ÷ host_stats disk_read_bytes × 100, for the 10 digests with the most disk reads over the range.",
 		"above 20% (and node reads ≥ 5 MiB/s) a digest is a disk culprit; compare pagesPerCall in Top digests to tell misses from scans."), 12)
 	nodeTS := chTS("Node CPU used and disk reads", "percent", `SELECT `+flushBucket+` AS time,
-  100 * sum(node_cpu_used_ns) / nullIf(sum(cpu_count * dateDiff('second', window_start, window_end)) * 1e9, 0) AS cpuUsedPct,
+  100 * sum(node_cpu_used_ns) / nullIf(sumIf(cpu_count * dateDiff('second', window_start, window_end), node_cpu_used_ns IS NOT NULL) * 1e9, 0) AS cpuUsedPct,
   sum(disk_read_bytes) / `+flushBucketS+` / 1048576 AS diskReadMBs
 FROM obs.host_stats
 WHERE $__timeFilter(window_end) AND `+hostF+`
 GROUP BY time ORDER BY time`)
 	nodeTS.FieldConfig = withColumnUnits(nodeTS.FieldConfig, map[string]string{"diskReadMBs": "MiBs"})
 	b.add(described(nodeTS,
-		"per bucket over the selected hosts: cpuUsedPct = node_cpu_used_ns ÷ (cpu_count × window seconds × 1e9) × 100; diskReadMBs = physical-disk read bytes ÷ bucket seconds ÷ 1048576.",
+		"per bucket over the selected hosts: cpuUsedPct = node_cpu_used_ns ÷ (cpu_count × window seconds × 1e9) × 100 over the intervals with a node CPU delta; diskReadMBs = physical-disk read bytes ÷ bucket seconds ÷ 1048576.",
 		"the context for the shares beside it: a 40% share of an idle node is not an overload. Roles in Top digests use 50% CPU and 5 MiB/s."), 12)
 	b.add(described(chTS("CPU of the top 10 digests (cores)", "short", `SELECT `+flushBucket+` AS time, digest_id AS digest,
   sum(cpu_ns) / 1e9 / `+flushBucketS+` AS cores
@@ -698,12 +703,12 @@ GROUP BY time ORDER BY time`),
 	b.add(described(chTS("Where the digest's time goes (%)", "percent", `SELECT `+flushBucket+` AS time,
   100 * sum(cpu_ns) / greatest(sum(wall_ns), 1) AS cpuPct,
   100 * sum(runq_ns) / greatest(sum(wall_ns), 1) AS cpuWaitPct,
-  100 * sum(io_wait_ns) / greatest(sum(wall_ns), 1) AS diskWaitPct,
-  100 * sum(redo_wait_ns) / greatest(sum(wall_ns), 1) AS commitWaitPct
+  100 * sum(io_wait_ns) / nullIf(sumIf(wall_ns, io_wait_ns IS NOT NULL), 0) AS diskWaitPct,
+  100 * sum(redo_wait_ns) / nullIf(sumIf(wall_ns, redo_wait_ns IS NOT NULL), 0) AS commitWaitPct
 FROM obs.mysql_digest_stats
 WHERE $__timeFilter(window_end) AND `+hostF+` AND `+digF+`
 GROUP BY time ORDER BY time`),
-		"per bucket for the selected digest: cpu_ns, runq_ns, io_wait_ns and redo_wait_ns ÷ wall_ns × 100.",
+		"per bucket for the selected digest: cpu_ns and runq_ns ÷ wall_ns × 100; io_wait_ns and redo_wait_ns ÷ wall_ns of the intervals that measured that wait × 100.",
 		"cpuPct high = the statement itself is expensive; cpuWaitPct high = a victim of CPU overload; diskWaitPct = buffer-pool misses or scans; "+
 			"commitWaitPct = redo-log fsync. The rest of 100% is locks, network or unmeasured; a missing line means not measured."), 12)
 	b.add(described(chTable("Per host", `SELECT host, sum(calls) AS callCount, sum(cpu_ns) / 1e9 AS cpuSec,
