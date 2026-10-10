@@ -987,6 +987,10 @@ type MySQLAnalysis struct {
 	// much of mysqld's CPU the digests explain (absent while a traced PID's
 	// first poll is in the window).
 	QueryCPUCoveragePercent *float64 `json:"query_cpu_coverage_percent,omitempty"`
+	// QueryDiskReadCoveragePercent = Σ digest disk reads ÷ physical-disk reads
+	// × 100: how much of the node's disk reads the statements explain (InnoDB
+	// read-ahead and background reads are not per statement).
+	QueryDiskReadCoveragePercent *float64 `json:"query_disk_read_coverage_percent,omitempty"`
 
 	// OverloadCause answers "is one query pattern overloading this node?".
 	// Built per GET /api/diagnose from the node metrics and process families
@@ -1000,9 +1004,15 @@ type MySQLAnalysis struct {
 	// in the window, not only those listed in top_digests. "cpu" is present
 	// (0 included) when accounting.cpu_wait is "ok", absent when unavailable.
 	Victims map[string]int `json:"victims,omitempty"`
-	// Accounting reports which time sources are available: key "cpu_wait" →
-	// "ok" | "run_delay_unavailable" (no run-queue time; cpu_wait and
-	// victim_of are then omitted).
+	// Accounting reports which per-statement signals every poll in the window
+	// measured ("unknown" for the last three before the first host sample):
+	//   "cpu_wait"    → "ok" | "run_delay_unavailable" (no run-queue time;
+	//                   cpu_wait and victim_of are then omitted)
+	//   "disk_bytes"  → "ok" | "io_accounting_unavailable" (no task I/O accounting)
+	//   "disk_wait"   → "ok" | "blkio_delay_unavailable" (kernel lacks
+	//                   task_struct.delays) | "delayacct_disabled"
+	//                   (sysctl kernel.task_delayacct=0)
+	//   "commit_wait" → "ok" | "log_write_up_to_unavailable" (redo probes not attached)
 	Accounting map[string]string `json:"accounting,omitempty"`
 }
 
@@ -1099,6 +1109,10 @@ type MySQLNodeWindow struct {
 	NumCPU         int     `json:"num_cpu"`
 	CPUUsedCores   float64 `json:"cpu_used_cores"`   // node CPU used ÷ window
 	CPUUsedPercent float64 `json:"cpu_used_percent"` // node CPU used ÷ capacity × 100
+	// Physical-disk throughput over the window (absent when a poll in it had
+	// no valid /proc/diskstats delta).
+	DiskReadMBPerSec  *float64 `json:"disk_read_mb_per_sec,omitempty"`
+	DiskWriteMBPerSec *float64 `json:"disk_write_mb_per_sec,omitempty"`
 }
 
 // ─── Process families ─────────────────────────────────────────────────────────

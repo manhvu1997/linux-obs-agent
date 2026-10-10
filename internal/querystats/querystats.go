@@ -132,12 +132,18 @@ type Snapshot struct {
 	// QueryCPUCoveragePercent: Σ digest CPU ÷ traced mysqld CPU × 100; nil
 	// when a poll in the window was partial or mysqld CPU is 0.
 	QueryCPUCoveragePercent *float64
-	TopByWait               []model.QueryDigestStats
+	// QueryDiskReadCoveragePercent: Σ digest disk reads ÷ physical-disk
+	// reads × 100; nil when a poll in the window had no node disk delta or
+	// no per-statement disk bytes, or the node read nothing.
+	QueryDiskReadCoveragePercent *float64
+	TopByWait                    []model.QueryDigestStats
 	// Victims counts digests per victim_of kind over ALL digests in the
 	// window: victims burn little CPU, so most never reach TopByCPU.
 	// VictimCPU is present (0 included) when run-queue accounting is ok.
 	Victims map[string]int
-	// Accounting: AccountingKeyCPUWait → AccountingOK | AccountingNoRunDelay.
+	// Accounting: AccountingKeyCPUWait → AccountingOK | AccountingNoRunDelay;
+	// AccountingKeyDiskBytes / DiskWait / CommitWait → AccountingOK, the
+	// newest reason a poll in the window gave, or "unknown" without host samples.
 	Accounting map[string]string
 }
 
@@ -355,9 +361,10 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 	if a.waited >= noRunDelayMinEvents && a.runqSum == 0 {
 		acct = AccountingNoRunDelay
 	}
-	var cpuAll uint64
+	var cpuAll, diskAll uint64
 	for _, x := range merged {
 		cpuAll += x.cpu
+		diskAll += x.diskRead
 	}
 
 	hw := a.hostTotals(bs)
@@ -421,6 +428,11 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		v := 100 * float64(cpuAll) / float64(hw.mysqld)
 		coverage = &v
 	}
+	var diskCoverage *float64
+	if rd, _, ok := hw.nodeDisk(); ok && rd > 0 && hw.accounting(hw.queryDiskBad, hw.queryDiskReason) == AccountingOK {
+		v := 100 * float64(diskAll) / float64(rd)
+		diskCoverage = &v
+	}
 
 	return Snapshot{
 		WindowSeconds:   int(a.cfg.Window / time.Second),
@@ -439,7 +451,13 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		QueryCPUCoveragePercent: coverage,
 		TopByWait:               byWait,
 		Victims:                 victims,
-		Accounting:              map[string]string{AccountingKeyCPUWait: acct},
+		Accounting: map[string]string{
+			AccountingKeyCPUWait:    acct,
+			AccountingKeyDiskBytes:  hw.accounting(hw.queryDiskBad, hw.queryDiskReason),
+			AccountingKeyDiskWait:   hw.accounting(hw.ioWaitBad, hw.ioWaitReason),
+			AccountingKeyCommitWait: hw.accounting(hw.redoBad, hw.redoWaitReason),
+		},
+		QueryDiskReadCoveragePercent: diskCoverage,
 	}
 }
 

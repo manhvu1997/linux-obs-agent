@@ -362,6 +362,10 @@ mysql:
   # mysql (exporter and monitoring queries) into one aggregate digest
   # "<system schemas: ...>" without sample_query. false = one digest each.
   fold_system_schemas: true     # MYSQL_FOLD_SYSTEM_SCHEMAS
+  # Per-statement block-I/O wait (time_breakdown_percent.disk_wait) needs kernel delay
+  # accounting. Kernels >= 5.14 ship with it off (sysctl kernel.task_delayacct=0); true lets
+  # the agent switch it on at start (kernel-wide, typically < 1 % CPU).
+  enable_delayacct: false       # MYSQL_ENABLE_DELAYACCT
   digest_window: 60s            # MYSQL_DIGEST_WINDOW
   top_digests: 20
   sticky_digests_max: 50        # digests exported to Prometheus

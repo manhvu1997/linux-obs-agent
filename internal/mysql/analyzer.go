@@ -27,8 +27,17 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/sqlhash"
+	"github.com/manhvu1997/linux-obs-agent/internal/procinfo"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 	"github.com/manhvu1997/linux-obs-agent/internal/sqldigest"
+)
+
+// Why a per-statement signal is unavailable (accounting map values).
+const (
+	reasonNoIOAccounting = "io_accounting_unavailable"
+	reasonNoBlkioDelay   = "blkio_delay_unavailable"
+	reasonDelayAcctOff   = "delayacct_disabled"
+	reasonNoRedoProbe    = "log_write_up_to_unavailable"
 )
 
 // Analyzer owns the mysql_query eBPF loader and produces MySQLAnalysis snapshots.
@@ -36,6 +45,14 @@ type Analyzer struct {
 	cfg    *config.MySQLConfig
 	coll   *collector.Collector
 	loader *mysqlq.Loader
+
+	// acct / delayAcct report which per-statement signals the kernel can
+	// measure; fields so tests can replace them.
+	acct      func() mysqlq.Accounting
+	delayAcct func() (bool, error)
+	// lastIOWaitReason is the previous poll's disk_wait reason, for one log
+	// line per change (poll goroutine only).
+	lastIOWaitReason string
 
 	agg     *querystats.Aggregator
 	host    *hostSampler // poll goroutine only
@@ -60,11 +77,14 @@ type Analyzer struct {
 // is not used (MySQL analysis is always published when data is available).
 func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 	thresholdNs := cfg.SlowQueryThresholdMs * uint64(time.Millisecond)
+	loader := mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, cfg.EmitAllQueries)
 	return &Analyzer{
-		cfg:    cfg,
-		coll:   coll,
-		loader: mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, cfg.EmitAllQueries),
-		host:   newHostSampler(),
+		cfg:       cfg,
+		coll:      coll,
+		loader:    loader,
+		acct:      loader.Accounting,
+		delayAcct: procinfo.DelayAcctEnabled,
+		host:      newHostSampler(),
 		agg: querystats.New(querystats.Config{
 			Window:                       cfg.DigestWindow,
 			TopN:                         cfg.TopDigests,
@@ -99,6 +119,15 @@ func (a *Analyzer) Start(ctx context.Context) error {
 	}
 	defer a.loader.Stop()
 	a.text = newTextCache(32768, textCacheHooks{forget: a.loader.ForgetText, markUnsafe: a.loader.MarkUnsafe})
+	if a.cfg.EnableDelayAcct {
+		if on, err := procinfo.DelayAcctEnabled(); err == nil && !on {
+			if err := procinfo.EnableDelayAcct(); err != nil {
+				slog.Warn("mysql: could not enable delay accounting (needs CAP_SYS_ADMIN); disk_wait unavailable", "err", err)
+			} else {
+				slog.Info("mysql: enabled kernel delay accounting (kernel.task_delayacct=1) for per-statement disk wait")
+			}
+		}
+	}
 	a.host.prime()
 	a.started.Store(true)
 	defer a.started.Store(false)
@@ -348,7 +377,9 @@ func (a *Analyzer) poll() {
 // the report. It does not touch the loader, so it is testable.
 func (a *Analyzer) tick(now time.Time, entries []mysqlq.AggEntry, preparedTracking bool) {
 	a.applyAgg(entries, now, preparedTracking)
-	a.agg.AddHost(a.host.sample(a.agg.WindowPIDs(now)), now)
+	hd := a.host.sample(a.agg.WindowPIDs(now))
+	a.setReasons(&hd)
+	a.agg.AddHost(hd, now)
 	snap := a.agg.Snapshot(now)
 	a.digests.Store(&snap)
 
@@ -366,18 +397,51 @@ func (a *Analyzer) tick(now time.Time, entries []mysqlq.AggEntry, preparedTracki
 		MysqldPath:        a.cfg.MysqldPath,
 		RecentSlowQueries: recent,
 
-		WindowSeconds:           snap.WindowSeconds,
-		Node:                    snap.Node,
-		QueryCPUCoveragePercent: snap.QueryCPUCoveragePercent,
-		DroppedEvents:           a.Dropped(),
-		Thresholds:              &snap.Thresholds,
-		TopDigests:              snap.TopByCPU,
-		TopDigestsByWait:        snap.TopByWait,
-		TopDigestsByBytesOut:    snap.TopByBytesOut,
-		Victims:                 snap.Victims,
-		Accounting:              snap.Accounting,
+		WindowSeconds:                snap.WindowSeconds,
+		Node:                         snap.Node,
+		QueryCPUCoveragePercent:      snap.QueryCPUCoveragePercent,
+		QueryDiskReadCoveragePercent: snap.QueryDiskReadCoveragePercent,
+		DroppedEvents:                a.Dropped(),
+		Thresholds:                   &snap.Thresholds,
+		TopDigests:                   snap.TopByCPU,
+		TopDigestsByWait:             snap.TopByWait,
+		TopDigestsByBytesOut:         snap.TopByBytesOut,
+		Victims:                      snap.Victims,
+		Accounting:                   snap.Accounting,
 	})
 	slog.Debug("mysql: analysis updated", "recent_slow", len(recent), "digests", len(snap.TopByCPU))
+}
+
+// setReasons fills why each per-statement signal is unavailable this poll
+// ("" = available). Delay accounting is re-read every poll: it can be
+// switched at runtime.
+func (a *Analyzer) setReasons(h *querystats.HostDelta) {
+	acct := a.acct()
+	if !acct.DiskBytes {
+		h.QueryDiskReason = reasonNoIOAccounting
+	}
+	switch on, err := a.delayAcct(); {
+	case !acct.BlkioDelay:
+		h.IOWaitReason = reasonNoBlkioDelay
+	case err != nil || !on:
+		h.IOWaitReason = reasonDelayAcctOff
+	}
+	if !acct.Redo {
+		h.RedoWaitReason = reasonNoRedoProbe
+	}
+	a.logDelayAcct(h.IOWaitReason)
+}
+
+// logDelayAcct logs once per change of the disk_wait availability.
+func (a *Analyzer) logDelayAcct(reason string) {
+	if reason == a.lastIOWaitReason {
+		return
+	}
+	a.lastIOWaitReason = reason
+	if reason == reasonDelayAcctOff {
+		slog.Warn("mysql: per-statement disk wait unavailable: kernel delay accounting is off " +
+			"(sysctl kernel.task_delayacct=1, or set mysql.enable_delayacct: true)")
+	}
 }
 
 // drainSlowEvents consumes the ringbuf slow-event channel, appends to the

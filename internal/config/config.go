@@ -440,6 +440,10 @@ type MySQLConfig struct {
 	// monitoring queries) into one aggregate digest, and drops its sample.
 	// Default true. Env MYSQL_FOLD_SYSTEM_SCHEMAS. false = one digest each.
 	FoldSystemSchemas bool `yaml:"fold_system_schemas"`
+	// EnableDelayAcct: write 1 to /proc/sys/kernel/task_delayacct at start
+	// when it reads 0 (kernel ≥ 5.14 defaults to 0; needed for per-statement
+	// disk_wait). Env MYSQL_ENABLE_DELAYACCT.
+	EnableDelayAcct bool `yaml:"enable_delayacct"`
 	// DigestWindow: rolling window for top_digests. Env MYSQL_DIGEST_WINDOW.
 	DigestWindow time.Duration `yaml:"digest_window"`
 	// TopDigests: digests in mysql_report.top_digests (ranked by total CPU).
@@ -706,6 +710,9 @@ func applyMySQLEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("MYSQL_FOLD_SYSTEM_SCHEMAS"); v != "" {
 		cfg.MySQL.FoldSystemSchemas = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("MYSQL_ENABLE_DELAYACCT"); v != "" {
+		cfg.MySQL.EnableDelayAcct = v == "true" || v == "1" || v == "yes"
 	}
 	if v := os.Getenv("MYSQL_DIGEST_WINDOW"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {

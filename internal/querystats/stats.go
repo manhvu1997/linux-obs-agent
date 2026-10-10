@@ -11,6 +11,14 @@ const (
 	VictimCPU = "cpu"
 	// AccountingKeyCPUWait is the accounting entry for run-queue time.
 	AccountingKeyCPUWait = "cpu_wait"
+	// AccountingKeyDiskBytes / AccountingKeyDiskWait / AccountingKeyCommitWait
+	// are the accounting entries for per-statement disk bytes, block-I/O wait
+	// and commit wait.
+	AccountingKeyDiskBytes  = "disk_bytes"
+	AccountingKeyDiskWait   = "disk_wait"
+	AccountingKeyCommitWait = "commit_wait"
+	// accountingUnknown: no host sample in the window says whether a signal is available.
+	accountingUnknown = "unknown"
 )
 
 // nodeDenom is the node's CPU over the same polls as the digests.

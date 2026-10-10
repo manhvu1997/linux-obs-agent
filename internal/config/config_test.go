@@ -75,6 +75,18 @@ func TestMySQLSampleQueries(t *testing.T) {
 	}
 }
 
+func TestMySQLEnableDelayAcct(t *testing.T) {
+	if Defaults().MySQL.EnableDelayAcct {
+		t.Fatal("mysql.enable_delayacct must default to false")
+	}
+	t.Setenv("MYSQL_ENABLE_DELAYACCT", "true")
+	c := Defaults()
+	applyMySQLEnvOverrides(c)
+	if !c.MySQL.EnableDelayAcct {
+		t.Fatal("MYSQL_ENABLE_DELAYACCT=true not applied")
+	}
+}
+
 func TestMySQLFoldSystemSchemas(t *testing.T) {
 	if !Defaults().MySQL.FoldSystemSchemas {
 		t.Fatal("mysql.fold_system_schemas must default to true")
