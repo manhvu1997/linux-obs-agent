@@ -48,18 +48,22 @@ type Event struct {
 
 // Config tunes the aggregator. Zero values take the documented defaults.
 type Config struct {
-	Window                 time.Duration // 60s
-	BucketWidth            time.Duration // 5s
-	MaxDigests             int           // 5000 per bucket and in lifetime table
-	TopN                   int           // 20
-	TopNBytes              int           // 10
-	CulpritCPUSharePercent float64       // 20
-	CulpritMinCPUPercent   float64       // 5: culprit also needs ≥ this % of one core over Window
-	VictimRunqRatio        float64       // 5
-	SlowWallNs             uint64        // victim needs wall_avg >= this
-	StickyMax              int           // 50
-	StickyTTL              time.Duration // 1h
-	NumCPU                 int           // runtime.NumCPU(): scale of CPUPercentOfNode
+	Window                       time.Duration // 60s
+	BucketWidth                  time.Duration // 5s
+	MaxDigests                   int           // 5000 per bucket and in lifetime table
+	TopN                         int           // 20
+	TopNBytes                    int           // 10
+	CulpritCPUSharePercent       float64       // 20
+	CulpritMinCPUPercent         float64       // 5: culprit also needs ≥ this % of one core over Window
+	VictimRunqRatio              float64       // 5
+	SlowWallNs                   uint64        // victim needs wall_avg >= this
+	StickyMax                    int           // 50
+	StickyTTL                    time.Duration // 1h
+	NumCPU                       int           // runtime.NumCPU(): scale of CPUPercentOfNode
+	CPUCulpritPercentOfNodeUsed  float64       // 20: cpu_role culprit needs ≥ this % of the node's CPU used
+	CPUCulpritMinNodeUsedPercent float64       // 50: … and the node ≥ this % busy over the window
+	VictimWaitPercent            float64       // 50: victim_of needs waits ≥ this % of wall
+	TopNWait                     int           // 10
 }
 
 func (c Config) withDefaults() Config {
@@ -96,6 +100,18 @@ func (c Config) withDefaults() Config {
 	if c.NumCPU <= 0 {
 		c.NumCPU = runtime.NumCPU()
 	}
+	if c.CPUCulpritPercentOfNodeUsed <= 0 {
+		c.CPUCulpritPercentOfNodeUsed = 20
+	}
+	if c.CPUCulpritMinNodeUsedPercent <= 0 {
+		c.CPUCulpritMinNodeUsedPercent = 50
+	}
+	if c.VictimWaitPercent <= 0 {
+		c.VictimWaitPercent = 50
+	}
+	if c.TopNWait <= 0 {
+		c.TopNWait = 10
+	}
 	return c
 }
 
@@ -131,6 +147,9 @@ type Snapshot struct {
 	// QueryCPUCoveragePercent: Σ digest CPU ÷ traced mysqld CPU × 100; nil
 	// when a poll in the window was partial or mysqld CPU is 0.
 	QueryCPUCoveragePercent *float64
+	TopByWait               []model.QueryDigestStats
+	Victims                 map[string]int
+	Accounting              map[string]string
 }
 
 type key struct {
@@ -344,15 +363,31 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		cpuByPID[k.pid] += x.cpu
 		cpuAll += x.cpu
 	}
+
+	hw := a.hostTotals(bs)
+	node := hw.node(a.cfg.Window)
+
+	// Build node denominator for new role calculations
+	var nd *nodeDenom
+	if used, ok := hw.nodeUsedNs(); ok && used > 0 && node != nil {
+		nd = &nodeDenom{usedNs: used, usedPercent: node.CPUUsedPercent}
+	}
+
 	stats := make([]model.QueryDigestStats, 0, len(merged))
-	victims := 0
+	victimsOld := 0
+	newVictims := make(map[string]int)
 	for k, x := range merged {
 		s := a.toStats(k, x, cpuByPID[k.pid], acct)
+		a.addNewStats(&s, k, x, acct, nd)
 		if s.Role == RoleVictim {
-			victims++
+			victimsOld++
+		}
+		if s.VictimOf != "" {
+			newVictims[s.VictimOf]++
 		}
 		stats = append(stats, s)
 	}
+	byWait := topBy(waiting(stats), a.cfg.TopNWait, func(s model.QueryDigestStats) float64 { return float64(s.RunqNs) })
 	byCPU := topBy(stats, a.cfg.TopN, func(s model.QueryDigestStats) float64 { return s.CPUMsTotal })
 	bytesOut := func(s model.QueryDigestStats) float64 { return float64(s.BytesOutTotal) }
 	byOut := topBy(stats, a.cfg.TopNBytes, bytesOut)
@@ -383,8 +418,6 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		cmds[k] = v
 	}
 
-	hw := a.hostTotals(bs)
-	node := hw.node(a.cfg.Window)
 	var coverage *float64
 	if hw.samples > 0 && !hw.mysqldPartial && hw.mysqld > 0 {
 		v := 100 * float64(cpuAll) / float64(hw.mysqld)
@@ -396,17 +429,24 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		CPUAccounting:   acct,
 		QueryCPUMsTotal: float64(cpuAll) / 1e6,
 		Thresholds: model.QueryRoleThresholds{
-			CulpritCPUSharePercent: a.cfg.CulpritCPUSharePercent,
-			CulpritMinCPUPercent:   a.cfg.CulpritMinCPUPercent,
-			VictimRunqRatio:        a.cfg.VictimRunqRatio,
+			CulpritCPUSharePercent:          a.cfg.CulpritCPUSharePercent,
+			CulpritMinCPUPercent:            a.cfg.CulpritMinCPUPercent,
+			VictimRunqRatio:                 a.cfg.VictimRunqRatio,
+			CPUCulpritPercentOfNodeCPUUsed:  a.cfg.CPUCulpritPercentOfNodeUsed,
+			CPUCulpritMinNodeCPUUsedPercent: a.cfg.CPUCulpritMinNodeUsedPercent,
+			VictimWaitPercent:               a.cfg.VictimWaitPercent,
+			VictimMinLatencyMs:              float64(a.cfg.SlowWallNs) / 1e6,
 		},
-		VictimDigests:           victims,
+		VictimDigests:           victimsOld,
 		TopByCPU:                byCPU,
 		TopByBytesOut:           byOut,
 		Exported:                exported,
 		Commands:                cmds,
 		Node:                    node,
 		QueryCPUCoveragePercent: coverage,
+		TopByWait:               byWait,
+		Victims:                 newVictims,
+		Accounting:              map[string]string{AccountingKeyCPUWait: acct},
 	}
 }
 
@@ -428,11 +468,11 @@ func (a *Aggregator) markSticky(id string, stats []model.QueryDigestStats, now t
 		}
 		l.text = s.DigestText
 		l.c.Calls += s.Calls
-		l.c.CPUNs += uint64(s.CPUMsTotal*1e6 + 0.5)
-		l.c.WallNs += uint64(s.WallMsAvg*float64(s.Calls)*1e6 + 0.5)
-		l.c.RunqNs += uint64(s.RunqWaitMsAvg*float64(s.Calls)*1e6 + 0.5)
+		l.c.CPUNs += s.CPUNs
+		l.c.WallNs += s.WallNs
+		l.c.RunqNs += s.RunqNs
 		l.c.BytesIn += s.BytesInTotal
-		l.c.BytesOut += s.BytesOutTotal
+		l.c.BytesOut += s.BytesOut
 	}
 	a.life[id] = l
 }

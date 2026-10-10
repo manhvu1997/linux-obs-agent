@@ -1011,6 +1011,11 @@ type MySQLAnalysis struct {
 	// Built per GET /api/diagnose from the node metrics and process families
 	// of that call; never set on the analyzer's cached snapshot.
 	OverloadCause *QueryOverload `json:"overload_cause,omitempty"`
+
+	// New role-based fields:
+	TopDigestsByWait []QueryDigestStats `json:"top_digests_by_wait,omitempty"`
+	Victims          map[string]int     `json:"victims,omitempty"`
+	Accounting       map[string]string  `json:"accounting,omitempty"`
 }
 
 // ─── DB Inspector (sidecar) ───────────────────────────────────────────────────
@@ -1074,13 +1079,49 @@ type QueryDigestStats struct {
 	// node's CPU capacity (100 = every core busy for the whole window).
 	CPUPercentOfNode float64 `json:"cpu_percent_of_node"`
 	Role             string  `json:"role"`
+	// CallsPerSec = calls ÷ window.
+	CallsPerSec float64 `json:"calls_per_sec"`
+	// CPUCores = on-CPU time ÷ window: 1.3 = this digest kept 1.3 cores busy.
+	CPUCores float64 `json:"cpu_cores"`
+	// PercentOfNodeCPUUsed = on-CPU time ÷ the node's CPU used over the same
+	// polls × 100: "did 27 % of all CPU work on this server". Absent without
+	// complete node samples.
+	PercentOfNodeCPUUsed *float64       `json:"percent_of_node_cpu_used,omitempty"`
+	LatencyMsAvg         float64        `json:"latency_ms_avg"`
+	LatencyMsMax         float64        `json:"latency_ms_max"`
+	TimeBreakdown        *TimeBreakdown `json:"time_breakdown_percent,omitempty"`
+	BytesOutPerCall      float64        `json:"bytes_out_per_call"`
+	// CPURole "culprit": ≥ cpu_culprit_percent_of_node_cpu_used of the node's
+	// CPU work while the node used ≥ cpu_culprit_min_node_cpu_used_percent.
+	CPURole string `json:"cpu_role,omitempty"`
+	// VictimOf "cpu": waited for a CPU ≥ victim_wait_percent of its time and
+	// is slow (latency_ms_avg ≥ the slow-query threshold).
+	VictimOf string `json:"victim_of,omitempty"`
+	// Raw window sums for rankings and the sticky export; not serialised.
+	CPUNs    uint64 `json:"-"`
+	RunqNs   uint64 `json:"-"`
+	WallNs   uint64 `json:"-"`
+	BytesOut uint64 `json:"-"`
+}
+
+// TimeBreakdown splits a digest's wall time in percent (sums to 100):
+// on-CPU, waiting for a CPU (run queue) and everything else. CPUWait is
+// absent when the kernel does not report run-queue time.
+type TimeBreakdown struct {
+	CPU     float64  `json:"cpu"`
+	CPUWait *float64 `json:"cpu_wait,omitempty"`
+	Other   float64  `json:"other"`
 }
 
 // QueryRoleThresholds echoes the culprit/victim cut-offs into the report.
 type QueryRoleThresholds struct {
-	CulpritCPUSharePercent float64 `json:"culprit_cpu_share_percent"`
-	CulpritMinCPUPercent   float64 `json:"culprit_min_cpu_percent"`
-	VictimRunqRatio        float64 `json:"victim_runq_ratio"`
+	CulpritCPUSharePercent          float64 `json:"culprit_cpu_share_percent"`
+	CulpritMinCPUPercent            float64 `json:"culprit_min_cpu_percent"`
+	VictimRunqRatio                 float64 `json:"victim_runq_ratio"`
+	CPUCulpritPercentOfNodeCPUUsed  float64 `json:"cpu_culprit_percent_of_node_cpu_used"`
+	CPUCulpritMinNodeCPUUsedPercent float64 `json:"cpu_culprit_min_node_cpu_used_percent"`
+	VictimWaitPercent               float64 `json:"victim_wait_percent"`
+	VictimMinLatencyMs              float64 `json:"victim_min_latency_ms"`
 }
 
 // MySQLNodeWindow is the node's CPU over the digest window, built from the
