@@ -407,8 +407,10 @@ type NetflowConfig struct {
 //
 // Feature flag: set MYSQL_TRACING_ENABLED=true or mysql.enabled: true.
 type MySQLConfig struct {
-	// PrometheusDigests: full (sticky set, 4 counters + info), minimal
-	// (top PrometheusMinimalTopN by CPU, cpu+calls, plus "other") or off.
+	// PrometheusDigests: minimal (default: top PrometheusMinimalTopN by
+	// CPU ∪ top PrometheusMinimalTopN by disk read, cpu/calls/disk_read +
+	// info, plus "other"), full (sticky set, cpu/calls/bytes_out/runq/
+	// disk_read/io_wait + info) or off.
 	// Env MYSQL_PROMETHEUS_DIGESTS. ClickHouse holds the full detail.
 	PrometheusDigests     string `yaml:"prometheus_digests"`
 	PrometheusMinimalTopN int    `yaml:"prometheus_minimal_top_n"`
@@ -599,7 +601,7 @@ func Defaults() *Config {
 			MaxRecentQueries:     100,
 		},
 		MySQL: MySQLConfig{
-			PrometheusDigests:     DigestsFull,
+			PrometheusDigests:     DigestsMinimal,
 			PrometheusMinimalTopN: 20,
 			Enabled:               false, // off by default; zero overhead when disabled
 			MysqldPath:            "/usr/sbin/mysqld",

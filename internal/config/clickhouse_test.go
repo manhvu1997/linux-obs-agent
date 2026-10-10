@@ -26,7 +26,7 @@ func TestClickHouseDefaults(t *testing.T) {
 		!c.Snapshots.Enabled || c.Snapshots.CheckInterval != 30*time.Second || c.Snapshots.MinInterval != 5*time.Minute {
 		t.Fatalf("defaults = %+v", c)
 	}
-	if d.MySQL.PrometheusDigests != DigestsFull || d.MySQL.PrometheusMinimalTopN != 20 {
+	if d.MySQL.PrometheusDigests != DigestsMinimal || d.MySQL.PrometheusMinimalTopN != 20 {
 		t.Fatalf("mysql prometheus defaults = %q %d", d.MySQL.PrometheusDigests, d.MySQL.PrometheusMinimalTopN)
 	}
 }
@@ -37,7 +37,7 @@ func TestClickHouseEnvOverrides(t *testing.T) {
 	t.Setenv("CLICKHOUSE_DATABASE", "metrics")
 	t.Setenv("CLICKHOUSE_USERNAME", "agent")
 	t.Setenv("CLICKHOUSE_PASSWORD", "pw")
-	t.Setenv("MYSQL_PROMETHEUS_DIGESTS", "minimal")
+	t.Setenv("MYSQL_PROMETHEUS_DIGESTS", "full")
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func TestClickHouseEnvOverrides(t *testing.T) {
 	if !c.Enabled || c.URL != "https://ch.example:8443" || c.Database != "metrics" || c.Username != "agent" || c.Password != "pw" {
 		t.Fatalf("clickhouse = %+v", c)
 	}
-	if cfg.MySQL.PrometheusDigests != DigestsMinimal {
+	if cfg.MySQL.PrometheusDigests != DigestsFull {
 		t.Fatalf("prometheus_digests = %q", cfg.MySQL.PrometheusDigests)
 	}
 }

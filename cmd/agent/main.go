@@ -231,6 +231,7 @@ func main() {
 			return netAcc.Counters(), true
 		}
 		promExp.RegisterCollectors(promcollect.NewFamilyCollector(insp.AllFamilies, netCounters, cfg.Netflow.MaxFamilies))
+		promExp.RegisterCollectors(promcollect.NewNodeCollector(collector.ReadNodeDiskBytes, coll.Latest))
 		if cfg.MySQL.Enabled {
 			promExp.RegisterCollectors(promcollect.NewMySQLCollector(mysqlAnalyzer.DigestSnapshot, promcollect.MySQLHealth{
 				Dropped:        mysqlAnalyzer.Dropped,
