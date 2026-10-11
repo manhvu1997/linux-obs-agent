@@ -1,0 +1,8 @@
+# postgres 16.15 (postgresql-16 16.15-1.pgdg24.04+2 amd64)
+version PostgreSQL 16.15 (Ubuntu 16.15-1.pgdg24.04+2) on x86_64-pc-linux-gnu, compiled by
+ParallelQueryMain
+PortalRun
+XLogFlush
+pgstat_report_activity
+SyncRepWaitForLSN
+pgstat_report_query_id

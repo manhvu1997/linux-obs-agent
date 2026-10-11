@@ -1,0 +1,8 @@
+# postgres 17.11 (postgresql-17 17.11-1.pgdg24.04+2 amd64)
+version PostgreSQL 17.11 (Ubuntu 17.11-1.pgdg24.04+2) on x86_64-pc-linux-gnu, compiled by
+ParallelQueryMain
+PortalRun
+XLogFlush
+pgstat_report_activity
+SyncRepWaitForLSN
+pgstat_report_query_id

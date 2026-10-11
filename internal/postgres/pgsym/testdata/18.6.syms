@@ -1,0 +1,8 @@
+# postgres 18.6 (postgresql-18 18.6-3.pgdg24.04+1 amd64)
+version PostgreSQL 18.6 (Ubuntu 18.6-3.pgdg24.04+1) on x86_64-pc-linux-gnu, compiled by
+ParallelQueryMain
+PortalRun
+XLogFlush
+pgstat_report_activity
+SyncRepWaitForLSN
+pgstat_report_query_id
