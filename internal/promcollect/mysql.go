@@ -139,7 +139,7 @@ func (c *MySQLCollector) Collect(ch chan<- prometheus.Metric) {
 	if s.QueryCPUCoveragePercent != nil {
 		emit(ch, myQueryCoverageDesc, prometheus.GaugeValue, *s.QueryCPUCoveragePercent/100)
 	}
-	exported := emitDigests(ch, myDigests, s, c.mode, c.minimalTopN, ioWaitOK, false)
+	exported := emitDigests(ch, myDigests, s, c.mode, c.minimalTopN, ioWaitOK, false, true)
 	emit(ch, myCoverageDesc, prometheus.GaugeValue, coverage(c.mode, exported, s.QueryCPUMsTotal))
 	h := c.health
 	emit(ch, myDroppedDesc, prometheus.CounterValue, h.read(h.Dropped))
@@ -158,7 +158,7 @@ type digestDescs struct {
 // returns the exported digests. lv are leading label values (PostgreSQL:
 // cluster); digest_id (and digest_text for info) follow them.
 func emitDigests(ch chan<- prometheus.Metric, d digestDescs, s *querystats.Snapshot, mode string, minimalTopN int,
-	ioWaitOK, walWaitOK bool, lv ...string) []querystats.ExportedDigest {
+	ioWaitOK, walWaitOK, diskOK bool, lv ...string) []querystats.ExportedDigest {
 	sec := func(ns uint64) float64 { return float64(ns) / 1e9 }
 	l := func(id string, more ...string) []string {
 		return append(append(append([]string{}, lv...), id), more...)
@@ -167,12 +167,14 @@ func emitDigests(ch chan<- prometheus.Metric, d digestDescs, s *querystats.Snaps
 	case config.DigestsOff:
 		return nil
 	case config.DigestsMinimal:
-		exported := unionTop(s.Exported, minimalTopN)
+		exported := unionTop(s.Exported, minimalTopN, diskOK)
 		var cpu, calls, disk, allCPU, allCalls, allDisk uint64
 		for _, x := range exported {
 			emit(ch, d.cpu, prometheus.CounterValue, sec(x.Counters.CPUNs), l(x.ID)...)
 			emit(ch, d.calls, prometheus.CounterValue, float64(x.Counters.Calls), l(x.ID)...)
-			emit(ch, d.disk, prometheus.CounterValue, float64(x.Counters.DiskReadBytes), l(x.ID)...)
+			if diskOK {
+				emit(ch, d.disk, prometheus.CounterValue, float64(x.Counters.DiskReadBytes), l(x.ID)...)
+			}
 			emit(ch, d.info, prometheus.GaugeValue, 1, l(x.ID, SanitizeLabel(x.Text, digestTextMaxBytes))...)
 			cpu += x.Counters.CPUNs
 			calls += x.Counters.Calls
@@ -187,7 +189,9 @@ func emitDigests(ch chan<- prometheus.Metric, d digestDescs, s *querystats.Snaps
 		// joins the exported set: a counter reset that rate() tolerates.
 		emit(ch, d.cpu, prometheus.CounterValue, sec(subFloor(allCPU, cpu)), l("other")...)
 		emit(ch, d.calls, prometheus.CounterValue, float64(subFloor(allCalls, calls)), l("other")...)
-		emit(ch, d.disk, prometheus.CounterValue, float64(subFloor(allDisk, disk)), l("other")...)
+		if diskOK {
+			emit(ch, d.disk, prometheus.CounterValue, float64(subFloor(allDisk, disk)), l("other")...)
+		}
 		return exported
 	}
 	for _, x := range s.Exported { // config.DigestsFull
@@ -197,7 +201,9 @@ func emitDigests(ch chan<- prometheus.Metric, d digestDescs, s *querystats.Snaps
 			emit(ch, d.out, prometheus.CounterValue, float64(x.Counters.BytesOut), l(x.ID)...)
 		}
 		emit(ch, d.runq, prometheus.CounterValue, sec(x.Counters.RunqNs), l(x.ID)...)
-		emit(ch, d.disk, prometheus.CounterValue, float64(x.Counters.DiskReadBytes), l(x.ID)...)
+		if diskOK {
+			emit(ch, d.disk, prometheus.CounterValue, float64(x.Counters.DiskReadBytes), l(x.ID)...)
+		}
 		if ioWaitOK {
 			emit(ch, d.ioWait, prometheus.CounterValue, sec(x.Counters.IOWaitNs), l(x.ID)...)
 		}
@@ -212,9 +218,12 @@ func emitDigests(ch chan<- prometheus.Metric, d digestDescs, s *querystats.Snaps
 // unionTop: the top n by lifetime CPU plus the top n by lifetime disk read,
 // sorted by ID. A ranking only admits digests with a non-zero value, so on a
 // server with no disk reads minimal stays the top n by CPU.
-func unionTop(in []querystats.ExportedDigest, n int) []querystats.ExportedDigest {
+func unionTop(in []querystats.ExportedDigest, n int, diskRank bool) []querystats.ExportedDigest {
 	byCPU := topBy(in, n, func(d querystats.ExportedDigest) uint64 { return d.Counters.CPUNs })
-	byDisk := topBy(in, n, func(d querystats.ExportedDigest) uint64 { return d.Counters.DiskReadBytes })
+	var byDisk []querystats.ExportedDigest
+	if diskRank {
+		byDisk = topBy(in, n, func(d querystats.ExportedDigest) uint64 { return d.Counters.DiskReadBytes })
+	}
 	seen := map[string]bool{}
 	var out []querystats.ExportedDigest
 	for _, d := range append(byCPU, byDisk...) {

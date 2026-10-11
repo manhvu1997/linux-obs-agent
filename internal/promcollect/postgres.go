@@ -108,7 +108,7 @@ func (c *PostgresCollector) Collect(ch chan<- prometheus.Metric) {
 				emit(ch, pgSyncRepDesc, prometheus.CounterValue, sec(q.ReplicaWaitNs), cl, cmd)
 			}
 		}
-		exported := emitDigests(ch, pgDigests, s, c.mode, c.minimalTopN, ioOK, walOK, cl)
+		exported := emitDigests(ch, pgDigests, s, c.mode, c.minimalTopN, ioOK, walOK, diskOK, cl)
 		emit(ch, pgDigestCovDesc, prometheus.GaugeValue, coverage(c.mode, exported, s.QueryCPUMsTotal), cl)
 		if s.QueryCPUCoveragePercent != nil {
 			emit(ch, pgCoverageDesc, prometheus.GaugeValue, *s.QueryCPUCoveragePercent/100, cl)

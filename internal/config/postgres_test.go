@@ -48,9 +48,10 @@ func TestPostgresValidation(t *testing.T) {
 		func(p *PostgresConfig) { p.MaxStatementsPerSec = 0 },
 		func(p *PostgresConfig) { p.SyncRepWait = "maybe" },
 		func(p *PostgresConfig) { p.BackgroundDominantPercent = 0 },
-		func(p *PostgresConfig) { p.SQL.DSN = "x"; p.SQL.PollInterval = 10 * time.Second },
-		func(p *PostgresConfig) { p.SQL.DSN = "x"; p.SQL.StatementTimeout = 2 * time.Minute },
-		func(p *PostgresConfig) { p.SQL.DSN = "x"; p.SQL.PasswordFile = "/nonexistent/pw" },
+		func(p *PostgresConfig) { p.SQL.DSN = "port={port}"; p.SQL.PollInterval = 10 * time.Second },
+		func(p *PostgresConfig) { p.SQL.DSN = "port={port}"; p.SQL.StatementTimeout = 2 * time.Minute },
+		func(p *PostgresConfig) { p.SQL.DSN = "port={port}"; p.SQL.PasswordFile = "/nonexistent/pw" },
+		func(p *PostgresConfig) { p.SQL.DSN = "host=/var/run/postgresql dbname=postgres" }, // no {port}
 	}
 	for i, f := range bad {
 		c := Defaults()
@@ -76,5 +77,15 @@ func TestPostgresPasswordFile(t *testing.T) {
 	c.Postgres.Enabled, c.Postgres.SQL.DSN, c.Postgres.SQL.PasswordFile = true, "port={port}", pw
 	if err := c.validate(); err != nil || c.Postgres.SQL.Password != "hunter2" {
 		t.Fatalf("err %v password %q", err, c.Postgres.SQL.Password)
+	}
+}
+
+func TestPostgresSQLStringRedactsDSNPassword(t *testing.T) {
+	for _, dsn := range []string{"postgres://obs:hunter2@localhost:{port}/postgres", "host=h port={port} user=obs password=hunter2 dbname=x",
+		"host=h port={port} password='hun ter2' user=obs"} {
+		out := PostgresSQLConfig{DSN: dsn}.String()
+		if strings.Contains(out, "hunter2") || strings.Contains(out, "hun ter2") || !strings.Contains(out, "REDACTED") {
+			t.Errorf("dsn %q leaked: %s", dsn, out)
+		}
 	}
 }

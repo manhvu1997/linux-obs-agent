@@ -83,3 +83,21 @@ func TestPostgresCollectorAsyncDiskAbsent(t *testing.T) {
 		t.Fatalf("absent series emitted:\n%s", out)
 	}
 }
+
+// Under PG 18 async I/O (accounting.disk_bytes != ok) the digest disk-read
+// series would carry 0 / partial values: they are not emitted, in any mode.
+func TestPostgresDigestDiskReadGatedOnDiskBytes(t *testing.T) {
+	for _, mode := range []string{config.DigestsMinimal, config.DigestsFull} {
+		for _, tc := range []struct {
+			disk string
+			want bool
+		}{{"ok", true}, {"io_method_async", false}} {
+			c := NewPostgresCollector(func() []postgres.ClusterView { return []postgres.ClusterView{pgView(tc.disk)} },
+				PostgresHealth{Active: func() bool { return true }}, mode, 20, true)
+			got := strings.Contains(collect(t, c), "obs_agent_postgres_digest_disk_read_bytes_total")
+			if got != tc.want {
+				t.Errorf("mode %s disk_bytes=%s: digest disk series present=%v, want %v", mode, tc.disk, got, tc.want)
+			}
+		}
+	}
+}

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -76,13 +77,25 @@ type PostgresSQLConfig struct {
 // Enabled reports whether the enrichment is configured.
 func (s PostgresSQLConfig) Enabled() bool { return s.DSN != "" }
 
+var (
+	dsnURLPassword = regexp.MustCompile(`(://[^:/@\s]*:)[^@\s]*@`)
+	dsnKeyPassword = regexp.MustCompile(`(?i)(\bpassword\s*=\s*)('(?:[^'\\]|\\.)*'|\S+)`)
+)
+
+// redactDSN hides a password embedded in a connection string (URL userinfo or
+// a password= key).
+func redactDSN(dsn string) string {
+	dsn = dsnURLPassword.ReplaceAllString(dsn, "${1}REDACTED@")
+	return dsnKeyPassword.ReplaceAllString(dsn, "${1}REDACTED")
+}
+
 // String redacts the password so the config can be logged.
 func (s PostgresSQLConfig) String() string {
 	if s.Password != "" {
 		s.Password = "REDACTED"
 	}
 	return fmt.Sprintf("{dsn:%q password_file:%q password:%s poll_interval:%s statement_timeout:%s}",
-		s.DSN, s.PasswordFile, s.Password, s.PollInterval, s.StatementTimeout)
+		redactDSN(s.DSN), s.PasswordFile, s.Password, s.PollInterval, s.StatementTimeout)
 }
 
 func defaultPostgres() PostgresConfig {
@@ -181,6 +194,10 @@ func (p *PostgresConfig) finish() error {
 	}
 	if !p.SQL.Enabled() {
 		return nil
+	}
+	if !strings.Contains(p.SQL.DSN, "{port}") {
+		// The enricher is keyed by port: every cluster needs its own connection.
+		return fmt.Errorf("postgres.sql.dsn must contain {port} (replaced by each cluster's port)")
 	}
 	if p.SQL.PollInterval < 30*time.Second {
 		return fmt.Errorf("postgres.sql.poll_interval must be >= 30s")
