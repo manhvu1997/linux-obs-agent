@@ -10,6 +10,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/sqlhash"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
+	"github.com/manhvu1997/linux-obs-agent/internal/textcache"
 )
 
 // allAvailable makes every per-statement signal available, independent of
@@ -25,7 +26,7 @@ func TestTickBuildsReport(t *testing.T) {
 	cfg := config.Defaults().MySQL
 	a := NewAnalyzer(&cfg, nil)
 	allAvailable(a)
-	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
+	a.text = textcache.New(16, textcache.Hooks{Forget: func(uint32, uint64) {}, MarkUnsafe: func(uint32, uint64) {}})
 	f := &fakeHost{
 		node:    []collector.NodeCPUTimes{nodeTimes(0, 0), nodeTimes(36e9, 40e9)}, // 90 % of 8 CPUs over 5 s
 		nodeErr: []bool{false, false},
@@ -71,7 +72,7 @@ func TestTickWithoutDataPublishesNothing(t *testing.T) {
 	cfg := config.Defaults().MySQL
 	a := NewAnalyzer(&cfg, nil)
 	allAvailable(a)
-	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
+	a.text = textcache.New(16, textcache.Hooks{Forget: func(uint32, uint64) {}, MarkUnsafe: func(uint32, uint64) {}})
 	f := &fakeHost{node: []collector.NodeCPUTimes{nodeTimes(0, 0), nodeTimes(1, 2)}, nodeErr: []bool{false, false}}
 	a.host = f.sampler()
 	a.host.prime()

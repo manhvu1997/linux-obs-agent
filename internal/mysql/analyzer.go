@@ -30,6 +30,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/procinfo"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 	"github.com/manhvu1997/linux-obs-agent/internal/sqldigest"
+	"github.com/manhvu1997/linux-obs-agent/internal/textcache"
 )
 
 // Why a per-statement signal is unavailable (accounting map values).
@@ -56,8 +57,8 @@ type Analyzer struct {
 	lastIOWaitReason string
 
 	agg     *querystats.Aggregator
-	host    *hostSampler // poll goroutine only
-	text    *textCache   // set in Start, before started is published
+	host    *hostSampler     // poll goroutine only
+	text    *textcache.Cache // set in Start, before started is published
 	digests atomic.Pointer[querystats.Snapshot]
 	started atomic.Bool
 
@@ -121,7 +122,7 @@ func (a *Analyzer) Start(ctx context.Context) error {
 		return err
 	}
 	defer a.loader.Stop()
-	a.text = newTextCache(32768, textCacheHooks{forget: a.loader.ForgetText, markUnsafe: a.loader.MarkUnsafe})
+	a.text = textcache.New(32768, textcache.Hooks{Forget: a.loader.ForgetText, MarkUnsafe: a.loader.MarkUnsafe})
 	if a.cfg.EnableDelayAcct {
 		if on, err := procinfo.DelayAcctEnabled(); err == nil && !on {
 			if err := procinfo.EnableDelayAcct(); err != nil {
@@ -226,7 +227,7 @@ func (a *Analyzer) slowDigestID(text string) string {
 // folding and the sample-query privacy rule. It must stay a pure function of
 // its arguments and the config: the text cache calls it (via applyAgg's
 // callbacks) while holding its lock.
-func (a *Analyzer) classify(command uint32, query string, queryLen uint32, preparedTracking bool) textEntry {
+func (a *Analyzer) classify(command uint32, query string, queryLen uint32, preparedTracking bool) textcache.Entry {
 	class, d, sample, trunc := cmdmap.Classify(command, query, queryLen, preparedTracking)
 	if folded, ok := a.foldSystem(d); ok {
 		d, sample, trunc = folded, "", false
@@ -234,7 +235,7 @@ func (a *Analyzer) classify(command uint32, query string, queryLen uint32, prepa
 	if !a.cfg.SampleQueries {
 		sample = ""
 	}
-	return textEntry{class: class, digest: d, sample: sample, truncated: trunc}
+	return textcache.Entry{Class: class, Digest: d, Sample: sample, Truncated: trunc}
 }
 
 // toEvent classifies one command. With mysql.sample_queries off the raw
@@ -244,7 +245,7 @@ func (a *Analyzer) classify(command uint32, query string, queryLen uint32, prepa
 func (a *Analyzer) toEvent(ev mysqlq.CmdEvent, now time.Time, preparedTracking bool) querystats.Event {
 	e := a.classify(ev.Command, ev.Query, ev.QueryLen, preparedTracking)
 	return querystats.Event{
-		PID: ev.PID, Command: e.class, Digest: e.digest, SampleQuery: e.sample, Truncated: e.truncated,
+		PID: ev.PID, Command: e.Class, Digest: e.Digest, SampleQuery: e.Sample, Truncated: e.Truncated,
 		WallNs: ev.WallNs, CPUNs: ev.CPUNs, RunqNs: ev.RunqNs,
 		BytesOut: ev.BytesOut, DiskReadBytes: ev.DiskReadBytes, DiskWriteBytes: ev.DiskWriteBytes,
 		IOWaitNs: ev.IOWaitNs, RedoWaitNs: ev.RedoWaitNs, At: now,
@@ -275,15 +276,15 @@ func unavailableDigest(text string) sqldigest.Digest {
 // ps_text LRU reuse race), and the hash is switched to exact processing.
 func (a *Analyzer) learnText(ev mysqlq.TextEvent, preparedTracking, literalSkip bool) {
 	e := a.classify(ev.Command, ev.Query, ev.QueryLen, preparedTracking)
-	k := textKey{ev.Command, ev.Hash}
+	k := textcache.Key{Command: ev.Command, Hash: ev.Hash}
 	if ev.Verify {
-		if a.text.verify(k, e) {
+		if a.text.Verify(k, e) {
 			slog.Warn("mysql: kernel text hash disagrees with the digest; statement switched to exact per-event processing",
-				"command", ev.Command, "hash", ev.Hash, "digest", e.digest.Text)
+				"command", ev.Command, "hash", ev.Hash, "digest", e.Digest.Text)
 		}
 		return
 	}
-	if a.text.learn(k, e) {
+	if a.text.Learn(k, e) {
 		return // already flagged; counting the drift check too would double count
 	}
 	want := sqlhash.ExactHash
@@ -293,7 +294,7 @@ func (a *Analyzer) learnText(ev mysqlq.TextEvent, preparedTracking, literalSkip 
 	if got := want([]byte(ev.Query)); got != ev.Hash {
 		slog.Warn("mysql: kernel text hash differs from the Go reference; statement switched to exact per-event processing",
 			"command", ev.Command, "kernel_hash", ev.Hash, "go_hash", got, "literal_skip", literalSkip)
-		a.text.flagMismatch(k)
+		a.text.FlagMismatch(k)
 	}
 }
 
@@ -301,14 +302,14 @@ func (a *Analyzer) learnText(ev mysqlq.TextEvent, preparedTracking, literalSkip 
 func (a *Analyzer) applyAgg(entries []mysqlq.AggEntry, now time.Time, preparedTracking bool) {
 	// Both callbacks are pure (classify by command only): endTick invokes
 	// unavailable with the cache lock held.
-	byCommand := func(cmd uint32) textEntry { return a.classify(cmd, "", 0, preparedTracking) }
-	unavailable := func(cmd uint32) textEntry {
+	byCommand := func(cmd uint32) textcache.Entry { return a.classify(cmd, "", 0, preparedTracking) }
+	unavailable := func(cmd uint32) textcache.Entry {
 		e := byCommand(cmd)
 		switch cmd {
 		case cmdmap.ComQuery:
-			e.digest, e.sample = textUnavailable, ""
+			e.Digest, e.Sample = textUnavailable, ""
 		case cmdmap.ComStmtPrepare:
-			e.digest, e.sample = prepareTextUnavailable, ""
+			e.Digest, e.Sample = prepareTextUnavailable, ""
 		}
 		// COM_STMT_EXECUTE keeps cmdmap's execute placeholder ("prepared
 		// before agent start" while prepared-text tracking is on).
@@ -316,7 +317,7 @@ func (a *Analyzer) applyAgg(entries []mysqlq.AggEntry, now time.Time, preparedTr
 	}
 	deltas := make([]querystats.Delta, 0, len(entries))
 	for _, en := range entries {
-		d, ok := a.text.resolve(textKey{en.Command, en.Hash}, aggSums{
+		d, ok := a.text.Resolve(textcache.Key{Command: en.Command, Hash: en.Hash}, textcache.Sums{
 			PID: en.PID, Calls: en.Calls, WallNs: en.WallNs, WallMaxNs: en.WallMaxNs, CPUNs: en.CPUNs,
 			RunqNs: en.RunqNs, BytesOut: en.BytesOut,
 			DiskReadBytes: en.DiskReadBytes, DiskWriteBytes: en.DiskWriteBytes, IOWaitNs: en.IOWaitNs, RedoWaitNs: en.RedoWaitNs,
@@ -325,7 +326,7 @@ func (a *Analyzer) applyAgg(entries []mysqlq.AggEntry, now time.Time, preparedTr
 			deltas = append(deltas, d)
 		}
 	}
-	deltas = append(deltas, a.text.endTick(unavailable)...)
+	deltas = append(deltas, a.text.EndTick(unavailable)...)
 	a.agg.AddDeltas(deltas, now)
 }
 
@@ -359,7 +360,7 @@ func (a *Analyzer) HashMismatches() uint64 {
 	if !a.started.Load() || a.text == nil {
 		return 0
 	}
-	return a.text.mismatches()
+	return a.text.Mismatches()
 }
 
 // ─── Internal ─────────────────────────────────────────────────────────────────

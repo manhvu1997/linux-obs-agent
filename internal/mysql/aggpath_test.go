@@ -8,6 +8,7 @@ import (
 
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	mysqlq "github.com/manhvu1997/linux-obs-agent/internal/ebpf/mysql_query"
+	"github.com/manhvu1997/linux-obs-agent/internal/textcache"
 )
 
 func testAnalyzer() *Analyzer {
@@ -17,7 +18,7 @@ func testAnalyzer() *Analyzer {
 // A drained entry whose text was learned becomes one digest with its sums.
 func TestAggEntriesBecomeDigests(t *testing.T) {
 	a := testAnalyzer()
-	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
+	a.text = textcache.New(16, textcache.Hooks{Forget: func(uint32, uint64) {}, MarkUnsafe: func(uint32, uint64) {}})
 	a.learnText(mysqlq.TextEvent{Command: 3, Hash: 99, Query: "SELECT * FROM t WHERE id = 5", QueryLen: 28}, true, false)
 	now := time.Unix(1_800_000_000, 0)
 	a.applyAgg([]mysqlq.AggEntry{{PID: 1, Command: 3, Hash: 99, Calls: 40, CPUNs: 40e6, WallNs: 80e6, WallMaxNs: 3e6}}, now, true)
@@ -30,7 +31,7 @@ func TestAggEntriesBecomeDigests(t *testing.T) {
 // Disk bytes and waits of an aggregated entry reach the command counters.
 func TestAggEntryCarriesDiskAndWaits(t *testing.T) {
 	a := testAnalyzer()
-	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
+	a.text = textcache.New(16, textcache.Hooks{Forget: func(uint32, uint64) {}, MarkUnsafe: func(uint32, uint64) {}})
 	a.learnText(mysqlq.TextEvent{Command: 3, Hash: 99, Query: "SELECT * FROM t WHERE id = 5", QueryLen: 28}, true, false)
 	now := time.Unix(1_800_000_000, 0)
 	a.applyAgg([]mysqlq.AggEntry{{PID: 1, Command: 3, Hash: 99, Calls: 4, CPUNs: 4e6, WallNs: 20e6, WallMaxNs: 6e6,
@@ -68,20 +69,20 @@ func TestFallbackEventsBecomeDeltas(t *testing.T) {
 // Prepare texts classify as "prepare: …", execute texts as the query digest.
 func TestLearnTextClassifiesByCommand(t *testing.T) {
 	a := testAnalyzer()
-	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
+	a.text = textcache.New(16, textcache.Hooks{Forget: func(uint32, uint64) {}, MarkUnsafe: func(uint32, uint64) {}})
 	a.learnText(mysqlq.TextEvent{Command: 22, Hash: 5, Query: "SELECT ?", QueryLen: 8}, true, false)
 	a.learnText(mysqlq.TextEvent{Command: 23, Hash: 5, Query: "SELECT ?", QueryLen: 8}, true, false)
-	p, _ := a.text.resolve(textKey{22, 5}, aggSums{Calls: 1}, nil)
-	e, _ := a.text.resolve(textKey{23, 5}, aggSums{Calls: 1}, nil)
+	p, _ := a.text.Resolve(textcache.Key{Command: 22, Hash: 5}, textcache.Sums{Calls: 1}, nil)
+	e, _ := a.text.Resolve(textcache.Key{Command: 23, Hash: 5}, textcache.Sums{Calls: 1}, nil)
 	if p.Command != "stmt_prepare" || p.Digest.Text != "prepare: select ?" || e.Command != "stmt_execute" || e.Digest.Text != "select ?" {
 		t.Fatalf("prepare %+v / execute %+v", p, e)
 	}
 }
 
-type unsafeLog []textKey
+type unsafeLog []textcache.Key
 
-func (u *unsafeLog) hooks() textCacheHooks {
-	return textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(c uint32, h uint64) { *u = append(*u, textKey{c, h}) }}
+func (u *unsafeLog) hooks() textcache.Hooks {
+	return textcache.Hooks{Forget: func(uint32, uint64) {}, MarkUnsafe: func(c uint32, h uint64) { *u = append(*u, textcache.Key{Command: c, Hash: h}) }}
 }
 
 // Every first-sight text is checked against the Go reference of the kernel
@@ -107,17 +108,17 @@ func TestLearnTextKernelHashDriftCheck(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			a := testAnalyzer()
 			var u unsafeLog
-			a.text = newTextCache(16, u.hooks())
+			a.text = textcache.New(16, u.hooks())
 			a.learnText(mysqlq.TextEvent{Command: c.cmd, Hash: c.hash, Query: q, QueryLen: uint32(len(q)), Verify: c.verify}, true, c.literalSkip)
-			if got := len(u) == 1 && u[0] == (textKey{c.cmd, c.hash}); got != c.wantUnsafe || (!c.wantUnsafe && len(u) != 0) {
+			if got := len(u) == 1 && u[0] == (textcache.Key{Command: c.cmd, Hash: c.hash}); got != c.wantUnsafe || (!c.wantUnsafe && len(u) != 0) {
 				t.Fatalf("unsafe = %v, want unsafe %v", u, c.wantUnsafe)
 			}
-			if want := map[bool]uint64{true: 1, false: 0}[c.wantUnsafe]; a.text.mismatches() != want {
-				t.Fatalf("mismatches = %d, want %d", a.text.mismatches(), want)
+			if want := map[bool]uint64{true: 1, false: 0}[c.wantUnsafe]; a.text.Mismatches() != want {
+				t.Fatalf("mismatches = %d, want %d", a.text.Mismatches(), want)
 			}
 			// The text is still learned: entries already aggregated under the
 			// hash resolve to it.
-			if _, ok := a.text.resolve(textKey{c.cmd, c.hash}, aggSums{Calls: 1}, nil); !ok {
+			if _, ok := a.text.Resolve(textcache.Key{Command: c.cmd, Hash: c.hash}, textcache.Sums{Calls: 1}, nil); !ok {
 				t.Fatal("text not learned")
 			}
 		})
@@ -129,13 +130,13 @@ func TestLearnTextKernelHashDriftCheck(t *testing.T) {
 func TestLearnTextChangedDigestCountsOnce(t *testing.T) {
 	a := testAnalyzer()
 	var u unsafeLog
-	a.text = newTextCache(16, u.hooks())
+	a.text = textcache.New(16, u.hooks())
 	const qa, qb = "SELECT a FROM t", "SELECT b FROM t"
 	h := sqlhash.KernelHash([]byte(qa))
 	a.learnText(mysqlq.TextEvent{Command: 3, Hash: h, Query: qa, QueryLen: uint32(len(qa))}, true, true)
 	a.learnText(mysqlq.TextEvent{Command: 3, Hash: h, Query: qb, QueryLen: uint32(len(qb))}, true, true)
-	if a.text.mismatches() != 1 || len(u) != 1 {
-		t.Fatalf("mismatches = %d, unsafe = %v; want 1 each", a.text.mismatches(), u)
+	if a.text.Mismatches() != 1 || len(u) != 1 {
+		t.Fatalf("mismatches = %d, unsafe = %v; want 1 each", a.text.Mismatches(), u)
 	}
 }
 
@@ -143,7 +144,7 @@ func TestLearnTextChangedDigestCountsOnce(t *testing.T) {
 // digest ids); a lost COM_STMT_EXECUTE text shows the execute placeholder.
 func TestLostTextPlaceholdersPerCommand(t *testing.T) {
 	a := testAnalyzer()
-	a.text = newTextCache(16, textCacheHooks{forget: func(uint32, uint64) {}, markUnsafe: func(uint32, uint64) {}})
+	a.text = textcache.New(16, textcache.Hooks{Forget: func(uint32, uint64) {}, MarkUnsafe: func(uint32, uint64) {}})
 	now := time.Unix(1_800_000_000, 0)
 	lost := []mysqlq.AggEntry{
 		{PID: 1, Command: 3, Hash: 101, Calls: 1, CPUNs: 3e6, WallNs: 3e6, WallMaxNs: 3e6},
