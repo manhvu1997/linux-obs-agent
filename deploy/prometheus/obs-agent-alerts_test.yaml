@@ -415,3 +415,296 @@ tests:
             exp_annotations:
               summary: "obs-agent on db1:9200 is dropping family_stats rows (rejected)"
               description: "rejected = schema/auth mismatch (apply deploy/clickhouse/schema.sql, check grants); buffer_full = ClickHouse down longer than the buffer holds."
+
+  # --- PostgreSQL -----------------------------------------------------------
+  # Every PostgreSQL alert has a firing and a non-firing case (1m steps).
+
+  # Client statements wait 40% of their time for a CPU on a 95% busy node.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_runq_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+20x20"
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+      - series: "obs_agent_cpu_usage_percent{instance=\"pg1:9200\"}"
+        values: "95x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresQueriesStarvedForCPU
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "critical" }
+            exp_annotations:
+              summary: "PostgreSQL queries of postgresql@16-main.service on pg1:9200 spend more than 30% of their time waiting for a CPU"
+              description: "1. Open obs-agent PostgreSQL Overview → 'Where query time goes' (waiting for CPU above the 30% line). 2. Read postgres_report.overload_cause: query_cpu_overload names the digest; background_overload names a backend type (autovacuum, checkpointer…). 3. Slow queries whose breakdown is mostly 'waiting for CPU' are victims — do not tune them. 4. Fix the culprit (EXPLAIN (ANALYZE, BUFFERS), index, rate-limit its caller) or add CPU; not_postgres means another family is burning the CPU."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # Same share, node 60% busy: no page.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_runq_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+20x20"
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+      - series: "obs_agent_cpu_usage_percent{instance=\"pg1:9200\"}"
+        values: "60x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresQueriesStarvedForCPU
+        exp_alerts: []
+
+  # Disk 20% + WAL 20% of wall time, PSI io.full 15%.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_io_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+10x20"
+      - series: "obs_agent_postgres_query_wal_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+10x20"
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+      - series: "obs_agent_pressure_io_full_avg10{instance=\"pg1:9200\"}"
+        values: "15x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresQueriesStalledOnDisk
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "critical" }
+            exp_annotations:
+              summary: "PostgreSQL queries of postgresql@16-main.service on pg1:9200 spend more than 30% of their time waiting for disk or WAL flush"
+              description: "1. Open obs-agent PostgreSQL Overview → 'Where query time goes' (disk + WAL above the 30% line) and check io_diagnosis.verdict. 2. Read postgres_report.overload_cause (or its secondary): query_disk_overload names the digest reading the disk; background_overload names autovacuum / checkpointer / io_worker. 3. disk_read_pages_per_call 1–4 = cache misses (more RAM / shared_buffers); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Mostly WAL wait = slow WAL fsync: see PostgresCommitsStalledOnWAL. Needs PSI (never fires without /proc/pressure)."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # Without PSI the alert never fires.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_io_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+10x20"
+      - series: "obs_agent_postgres_query_wal_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+10x20"
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresQueriesStalledOnDisk
+        exp_alerts: []
+
+  # WAL wait alone (io wait not measured) still counts: 40% WAL.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_wal_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+20x20"
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+      - series: "obs_agent_pressure_io_full_avg10{instance=\"pg1:9200\"}"
+        values: "15x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresQueriesStalledOnDisk
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "critical" }
+            exp_annotations:
+              summary: "PostgreSQL queries of postgresql@16-main.service on pg1:9200 spend more than 30% of their time waiting for disk or WAL flush"
+              description: "1. Open obs-agent PostgreSQL Overview → 'Where query time goes' (disk + WAL above the 30% line) and check io_diagnosis.verdict. 2. Read postgres_report.overload_cause (or its secondary): query_disk_overload names the digest reading the disk; background_overload names autovacuum / checkpointer / io_worker. 3. disk_read_pages_per_call 1–4 = cache misses (more RAM / shared_buffers); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Mostly WAL wait = slow WAL fsync: see PostgresCommitsStalledOnWAL. Needs PSI (never fires without /proc/pressure)."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # Digest d1 keeps 2 cores busy on a node using 7.2 cores (28%).
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_digest_cpu_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",digest_id=\"d1\"}"
+        values: "0+120x20"
+      - series: "obs_agent_cpu_usage_percent{instance=\"pg1:9200\"}"
+        values: "90x20"
+      - series: "obs_agent_cpu_count{instance=\"pg1:9200\"}"
+        values: "8x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresDigestCPUHog
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "warning", digest_id: "d1" }
+            exp_annotations:
+              summary: "PostgreSQL digest d1 (postgresql@16-main.service) does more than 20% of all CPU work on pg1:9200"
+              description: "1. Open obs-agent PostgreSQL Overview → '% of node CPU used by top digests' (above the 20% line). 2. Get its text: obs_agent_postgres_digest_info{digest_id=\"d1\"} or postgres_report.clusters[].top_digests. 3. EXPLAIN (ANALYZE, BUFFERS) it; reduce calls at the caller or the CPU per call (index, cache). 4. Track it in the PostgreSQL Analysis dashboard."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # Digest d1 keeps 1 core busy (14%): no alert.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_digest_cpu_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",digest_id=\"d1\"}"
+        values: "0+60x20"
+      - series: "obs_agent_cpu_usage_percent{instance=\"pg1:9200\"}"
+        values: "90x20"
+      - series: "obs_agent_cpu_count{instance=\"pg1:9200\"}"
+        values: "8x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresDigestCPUHog
+        exp_alerts: []
+
+  # Digest d2 reads 4 of the disk's 10 MiB/s.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_digest_disk_read_bytes_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",digest_id=\"d2\"}"
+        values: "0+251658240x20"
+      - series: "obs_agent_node_disk_read_bytes_total{instance=\"pg1:9200\"}"
+        values: "0+629145600x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresDigestDiskReadHog
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "warning", digest_id: "d2" }
+            exp_annotations:
+              summary: "PostgreSQL digest d2 (postgresql@16-main.service) reads more than 20% of the disk on pg1:9200"
+              description: "1. Open obs-agent PostgreSQL Overview → '% of node disk reads by top digests'. 2. disk_read_pages_per_call in postgres_report: 1–4 = cache misses (more RAM / shared_buffers), hundreds = a scan (EXPLAIN, index, LIMIT). 3. On PostgreSQL 18+ with io_method=worker the per-digest reads are not measured in the kernel (series absent): use postgres_report disk estimates (needs postgres.sql) and the io_worker backend type."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # Same share but the disk reads only 4.5 MiB/s in total... d2 is 89% of a quiet disk: no alert.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_digest_disk_read_bytes_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",digest_id=\"d2\"}"
+        values: "0+251658240x20"
+      - series: "obs_agent_node_disk_read_bytes_total{instance=\"pg1:9200\"}"
+        values: "0+283115520x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresDigestDiskReadHog
+        exp_alerts: []
+
+  # WAL wait 30% of wall.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_wal_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+15x20"
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresCommitsStalledOnWAL
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "warning" }
+            exp_annotations:
+              summary: "PostgreSQL statements of postgresql@16-main.service on pg1:9200 spend more than 20% of their time waiting for the WAL flush"
+              description: "1. Open obs-agent PostgreSQL Overview → 'WAL wait share'. 2. Find the digests with the largest time_breakdown_percent.wal_wait (usually COMMIT or write statements). 3. Check the WAL device latency (io_diagnosis, disk avg wait) and fsync settings; consider commit_delay / group commit or synchronous_commit=off where data loss of the last transactions is acceptable."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # WAL wait 10% of wall: no alert.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_wal_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+5x20"
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresCommitsStalledOnWAL
+        exp_alerts: []
+
+  # Sync-rep wait 30% of wall.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_syncrep_wait_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+15x20"
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresSyncReplicationSlow
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "warning" }
+            exp_annotations:
+              summary: "PostgreSQL statements of postgresql@16-main.service on pg1:9200 spend more than 20% of their time waiting for synchronous standbys"
+              description: "1. The primary waits in SyncRepWaitForLSN: a synchronous standby is slow or far away. 2. Check pg_stat_replication (write_lag, flush_lag, replay_lag) and the standby's disk and network. 3. Consider synchronous_commit=remote_write, more standbys in an ANY quorum, or moving the standby closer."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # No sync-rep series (not attached): no alert.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_query_wall_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",command=\"client\"}"
+        values: "0+50x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresSyncReplicationSlow
+        exp_alerts: []
+
+  # Autovacuum uses 3 of the cluster's 4 cores on a 90% busy node.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_backend_cpu_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",backend_type=\"autovacuum\"}"
+        values: "0+180x30"
+      - series: "obs_agent_postgres_backend_cpu_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",backend_type=\"client\"}"
+        values: "0+60x30"
+      - series: "obs_agent_cpu_usage_percent{instance=\"pg1:9200\"}"
+        values: "90x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PostgresBackgroundCPUHigh
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "warning", backend_type: "autovacuum" }
+            exp_annotations:
+              summary: "PostgreSQL autovacuum backends use at least half of postgresql@16-main.service's CPU on pg1:9200"
+              description: "1. Open obs-agent PostgreSQL Overview → 'CPU by backend type'. 2. autovacuum: check bloat (pg_stat_user_tables.n_dead_tup) and autovacuum_vacuum_cost_limit / autovacuum_max_workers; the 'autovacuum' digests name the tables. 3. checkpointer: raise max_wal_size / checkpoint_timeout. 4. io_worker: queries are reading; see the top digests by disk read. 5. walsender: check replication consumers."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # Same split on a 50% busy node: no alert.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_backend_cpu_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",backend_type=\"autovacuum\"}"
+        values: "0+180x30"
+      - series: "obs_agent_postgres_backend_cpu_seconds_total{instance=\"pg1:9200\",cluster=\"postgresql@16-main.service\",backend_type=\"client\"}"
+        values: "0+60x30"
+      - series: "obs_agent_cpu_usage_percent{instance=\"pg1:9200\"}"
+        values: "50x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PostgresBackgroundCPUHigh
+        exp_alerts: []
+
+  # Probes shed by the circuit breaker.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_tracing_active{instance=\"pg1:9200\"}"
+        values: "1x5 0x10"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ObsAgentPostgresTracingShed
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", severity: "warning" }
+            exp_annotations:
+              summary: "obs-agent PostgreSQL statement tracing is not active on pg1:9200"
+              description: "1. Read postgres_report.accounting.state: 'shed' = the statement rate exceeded postgres.max_statements_per_sec for two polls and the probes were detached to protect the database (they re-attach after postgres.shed_cooldown); 'unavailable: …' = the tracer could not load (kernel < 5.5 / no BTF — Ubuntu 20.04 needs linux-generic-hwe-20.04). 2. If shedding repeats, raise postgres.max_statements_per_sec only if the measured per-statement cost (CLAUDE.md §14) is acceptable."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # Tracing active: no alert.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_tracing_active{instance=\"pg1:9200\"}"
+        values: "1x15"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ObsAgentPostgresTracingShed
+        exp_alerts: []
+
+  # Dropped intervals keep rising.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_events_dropped_total{instance=\"pg1:9200\"}"
+        values: "0+5x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ObsAgentPostgresAccountingDegraded
+        exp_alerts:
+          - exp_labels: { instance: "pg1:9200", severity: "info" }
+            exp_annotations:
+              summary: "obs-agent PostgreSQL accounting is degraded on pg1:9200"
+              description: "1. events_dropped: intervals lost (consumer behind) — digest totals undercount. 2. agg_overflow: the kernel map was full (totals stay exact). 3. hash_mismatch: a kernel text hash disagreed with its digest (switched to exact processing). 4. credit_dropped: an in-flight credit was never matched. Check agent CPU (systemd CPUQuota) and the number of distinct statements."
+              diagnose: "http://pg1:9200/api/diagnose"
+
+  # Counters flat: no alert.
+  - interval: 1m
+    input_series:
+      - series: "obs_agent_postgres_events_dropped_total{instance=\"pg1:9200\"}"
+        values: "3x30"
+      - series: "obs_agent_postgres_hash_mismatch_total{instance=\"pg1:9200\"}"
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ObsAgentPostgresAccountingDegraded
+        exp_alerts: []

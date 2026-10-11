@@ -125,6 +125,125 @@ groups:
           description: "1. events_dropped > 0: digest totals undercount — check agent CPU throttling. 2. agg_overflow > 0: more distinct statements per poll than the kernel map holds; totals stay exact but cost more. 3. hash_mismatch > 0: a kernel/Go text-hash disagreement; affected statements fall back to exact processing — report it with the agent log."
           diagnose: "http://{{ $labels.instance }}/api/diagnose"
 
+  # PostgreSQL attribution (CLAUDE.md §23). Same policy as MySQL: page on
+  # symptoms, ticket on causes; series are per (instance, cluster).
+  - name: obs-agent-postgres
+    rules:
+      - alert: PostgresQueriesStarvedForCPU
+        expr: |
+          sum by (instance, cluster) (rate(obs_agent_postgres_query_runq_wait_seconds_total{command="client"}[5m]))
+            / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{command="client"}[5m])) > 0.3
+          and on (instance) avg_over_time(obs_agent_cpu_usage_percent[5m]) >= 85
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL queries of {{ $labels.cluster }} on {{ $labels.instance }} spend more than 30% of their time waiting for a CPU"
+          description: "1. Open obs-agent PostgreSQL Overview → 'Where query time goes' (waiting for CPU above the 30% line). 2. Read postgres_report.overload_cause: query_cpu_overload names the digest; background_overload names a backend type (autovacuum, checkpointer…). 3. Slow queries whose breakdown is mostly 'waiting for CPU' are victims — do not tune them. 4. Fix the culprit (EXPLAIN (ANALYZE, BUFFERS), index, rate-limit its caller) or add CPU; not_postgres means another family is burning the CPU."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: PostgresQueriesStalledOnDisk
+        expr: |
+          (
+            (sum by (instance, cluster) (rate(obs_agent_postgres_query_io_wait_seconds_total{command="client"}[5m])) or 0 * sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{command="client"}[5m])))
+            + (sum by (instance, cluster) (rate(obs_agent_postgres_query_wal_wait_seconds_total{command="client"}[5m])) or 0 * sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{command="client"}[5m])))
+          ) / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{command="client"}[5m])) > 0.3
+          and on (instance) obs_agent_pressure_io_full_avg10 > 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL queries of {{ $labels.cluster }} on {{ $labels.instance }} spend more than 30% of their time waiting for disk or WAL flush"
+          description: "1. Open obs-agent PostgreSQL Overview → 'Where query time goes' (disk + WAL above the 30% line) and check io_diagnosis.verdict. 2. Read postgres_report.overload_cause (or its secondary): query_disk_overload names the digest reading the disk; background_overload names autovacuum / checkpointer / io_worker. 3. disk_read_pages_per_call 1–4 = cache misses (more RAM / shared_buffers); hundreds = a scan (EXPLAIN, index, LIMIT). 4. Mostly WAL wait = slow WAL fsync: see PostgresCommitsStalledOnWAL. Needs PSI (never fires without /proc/pressure)."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: PostgresDigestCPUHog
+        expr: |
+          sum by (instance, cluster, digest_id) (rate(obs_agent_postgres_digest_cpu_seconds_total{digest_id!="other"}[5m]))
+            / on (instance) group_left () (avg_over_time(obs_agent_cpu_usage_percent[5m]) / 100 * obs_agent_cpu_count) > 0.2
+          and on (instance) avg_over_time(obs_agent_cpu_usage_percent[5m]) >= 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL digest {{ $labels.digest_id }} ({{ $labels.cluster }}) does more than 20% of all CPU work on {{ $labels.instance }}"
+          description: "1. Open obs-agent PostgreSQL Overview → '% of node CPU used by top digests' (above the 20% line). 2. Get its text: obs_agent_postgres_digest_info{digest_id=\"{{ $labels.digest_id }}\"} or postgres_report.clusters[].top_digests. 3. EXPLAIN (ANALYZE, BUFFERS) it; reduce calls at the caller or the CPU per call (index, cache). 4. Track it in the PostgreSQL Analysis dashboard."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: PostgresDigestDiskReadHog
+        expr: |
+          sum by (instance, cluster, digest_id) (rate(obs_agent_postgres_digest_disk_read_bytes_total{digest_id!="other"}[5m]))
+            / on (instance) group_left rate(obs_agent_node_disk_read_bytes_total[5m]) > 0.2
+          and on (instance) rate(obs_agent_node_disk_read_bytes_total[5m]) > 5 * 1048576
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL digest {{ $labels.digest_id }} ({{ $labels.cluster }}) reads more than 20% of the disk on {{ $labels.instance }}"
+          description: "1. Open obs-agent PostgreSQL Overview → '% of node disk reads by top digests'. 2. disk_read_pages_per_call in postgres_report: 1–4 = cache misses (more RAM / shared_buffers), hundreds = a scan (EXPLAIN, index, LIMIT). 3. On PostgreSQL 18+ with io_method=worker the per-digest reads are not measured in the kernel (series absent): use postgres_report disk estimates (needs postgres.sql) and the io_worker backend type."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: PostgresCommitsStalledOnWAL
+        expr: |
+          sum by (instance, cluster) (rate(obs_agent_postgres_query_wal_wait_seconds_total{command="client"}[5m]))
+            / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{command="client"}[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL statements of {{ $labels.cluster }} on {{ $labels.instance }} spend more than 20% of their time waiting for the WAL flush"
+          description: "1. Open obs-agent PostgreSQL Overview → 'WAL wait share'. 2. Find the digests with the largest time_breakdown_percent.wal_wait (usually COMMIT or write statements). 3. Check the WAL device latency (io_diagnosis, disk avg wait) and fsync settings; consider commit_delay / group commit or synchronous_commit=off where data loss of the last transactions is acceptable."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: PostgresSyncReplicationSlow
+        expr: |
+          sum by (instance, cluster) (rate(obs_agent_postgres_query_syncrep_wait_seconds_total{command="client"}[5m]))
+            / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{command="client"}[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL statements of {{ $labels.cluster }} on {{ $labels.instance }} spend more than 20% of their time waiting for synchronous standbys"
+          description: "1. The primary waits in SyncRepWaitForLSN: a synchronous standby is slow or far away. 2. Check pg_stat_replication (write_lag, flush_lag, replay_lag) and the standby's disk and network. 3. Consider synchronous_commit=remote_write, more standbys in an ANY quorum, or moving the standby closer."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: PostgresBackgroundCPUHigh
+        expr: |
+          sum by (instance, cluster, backend_type) (rate(obs_agent_postgres_backend_cpu_seconds_total{backend_type!~"client|parallel_worker|postmaster"}[5m]))
+            / on (instance, cluster) group_left sum by (instance, cluster) (rate(obs_agent_postgres_backend_cpu_seconds_total[5m])) >= 0.5
+          and on (instance) avg_over_time(obs_agent_cpu_usage_percent[5m]) >= 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL {{ $labels.backend_type }} backends use at least half of {{ $labels.cluster }}'s CPU on {{ $labels.instance }}"
+          description: "1. Open obs-agent PostgreSQL Overview → 'CPU by backend type'. 2. autovacuum: check bloat (pg_stat_user_tables.n_dead_tup) and autovacuum_vacuum_cost_limit / autovacuum_max_workers; the 'autovacuum' digests name the tables. 3. checkpointer: raise max_wal_size / checkpoint_timeout. 4. io_worker: queries are reading; see the top digests by disk read. 5. walsender: check replication consumers."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: ObsAgentPostgresTracingShed
+        expr: obs_agent_postgres_tracing_active == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "obs-agent PostgreSQL statement tracing is not active on {{ $labels.instance }}"
+          description: "1. Read postgres_report.accounting.state: 'shed' = the statement rate exceeded postgres.max_statements_per_sec for two polls and the probes were detached to protect the database (they re-attach after postgres.shed_cooldown); 'unavailable: …' = the tracer could not load (kernel < 5.5 / no BTF — Ubuntu 20.04 needs linux-generic-hwe-20.04). 2. If shedding repeats, raise postgres.max_statements_per_sec only if the measured per-statement cost (CLAUDE.md §14) is acceptable."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
+      - alert: ObsAgentPostgresAccountingDegraded
+        expr: |
+          increase(obs_agent_postgres_events_dropped_total[10m]) > 0
+          or increase(obs_agent_postgres_agg_overflow_total[10m]) > 0
+          or increase(obs_agent_postgres_hash_mismatch_total[10m]) > 0
+          or increase(obs_agent_postgres_credit_dropped_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "obs-agent PostgreSQL accounting is degraded on {{ $labels.instance }}"
+          description: "1. events_dropped: intervals lost (consumer behind) — digest totals undercount. 2. agg_overflow: the kernel map was full (totals stay exact). 3. hash_mismatch: a kernel text hash disagreed with its digest (switched to exact processing). 4. credit_dropped: an in-flight credit was never matched. Check agent CPU (systemd CPUQuota) and the number of distinct statements."
+          diagnose: "http://{{ $labels.instance }}/api/diagnose"
+
   - name: obs-agent-process
     rules:
       - alert: ProcessFamilyCPUHigh
