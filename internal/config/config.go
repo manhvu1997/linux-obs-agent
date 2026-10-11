@@ -29,6 +29,7 @@ type Config struct {
 	Writeback  WritebackConfig  `yaml:"writeback"`
 	Mongo      MongoConfig      `yaml:"mongo"`
 	MySQL      MySQLConfig      `yaml:"mysql"`
+	Postgres   PostgresConfig   `yaml:"postgres"`
 	Netflow    NetflowConfig    `yaml:"netflow"`
 }
 
@@ -636,6 +637,7 @@ func Defaults() *Config {
 			MaxOutboundPeers:      100,
 			MaxInboundPeers:       100,
 		},
+		Postgres:   defaultPostgres(),
 		ClickHouse: defaultClickHouse(),
 	}
 }
@@ -646,6 +648,7 @@ func Load(path string) (*Config, error) {
 	if path == "" {
 		applyMongoEnvOverrides(cfg)
 		applyMySQLEnvOverrides(cfg)
+		applyPostgresEnvOverrides(cfg)
 		applyNetflowEnvOverrides(cfg)
 		applyClickHouseEnvOverrides(cfg)
 		if err := cfg.validateExport(); err != nil {
@@ -664,6 +667,7 @@ func Load(path string) (*Config, error) {
 	warnRemovedKeys(path, data)
 	applyMongoEnvOverrides(cfg)
 	applyMySQLEnvOverrides(cfg)
+	applyPostgresEnvOverrides(cfg)
 	applyNetflowEnvOverrides(cfg)
 	applyRunQueueEnvOverrides(cfg)
 	applyOffCPUEnvOverrides(cfg)

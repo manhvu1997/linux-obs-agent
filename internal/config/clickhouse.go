@@ -192,5 +192,8 @@ func (c *Config) validateExport() error {
 	if c.MySQL.PrometheusMinimalTopN < 1 {
 		return fmt.Errorf("mysql.prometheus_minimal_top_n must be >= 1")
 	}
+	if err := c.Postgres.finish(); err != nil {
+		return err
+	}
 	return c.ClickHouse.finish()
 }

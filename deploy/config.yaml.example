@@ -411,6 +411,52 @@ mysql:
   prometheus_digests: minimal
   prometheus_minimal_top_n: 20
 
+# ── PostgreSQL query attribution (CLAUDE.md §23) ────────────────────────────
+# Which query digest, background backend type (autovacuum, checkpointer, I/O
+# workers…) or process family overloads the CPU or disk of a PostgreSQL 16–19
+# host. Clusters are discovered from running postmasters; uprobes attach to
+# each postgres binary once. Linux x86_64, kernel >= 5.5 with BTF (Ubuntu 20.04:
+# install linux-generic-hwe-20.04). Off by default. Env POSTGRES_TRACING_ENABLED.
+postgres:
+  enabled: false
+  binary_paths: []                 # allow-list; empty = every running postmaster. Env POSTGRES_BINARY_PATHS
+  discover_interval: 30s
+  slow_query_threshold_ms: 100     # Env POSTGRES_SLOW_QUERY_THRESHOLD_MS
+  poll_interval: 5s
+  digest_window: 60s
+  top_digests: 20
+  max_recent_queries: 100
+  fold_system_catalogs: true       # pg_catalog / information_schema / pg_* reads → "<system catalogs>"
+  sample_queries: true             # first raw text per digest (literals!); false never stores it
+  enable_delayacct: false          # set kernel.task_delayacct=1 at start (per-statement disk wait). Env POSTGRES_ENABLE_DELAYACCT
+  syncrep_wait: auto               # auto (needs sql) | true | false: SyncRepWaitForLSN probes
+  # Circuit breaker: above this traced statement rate for two polls, every
+  # probe detaches for shed_cooldown (accounting.state = shed, alert
+  # ObsAgentPostgresTracingShed). Env POSTGRES_MAX_STATEMENTS_PER_SEC.
+  max_statements_per_sec: 30000
+  shed_cooldown: 10m
+  background_dominant_percent: 50  # background_overload: one non-query backend type >= this % of the cluster
+  prometheus_digests: minimal      # full | minimal | off, as mysql. Env POSTGRES_PROMETHEUS_DIGESTS
+  prometheus_minimal_top_n: 20
+  sticky_digests_max: 50
+  sticky_digest_ttl: 1h
+  cpu_culprit_percent_of_node_cpu_used: 20
+  cpu_culprit_min_node_cpu_used_percent: 50
+  victim_wait_percent: 50
+  io_culprit_percent_of_disk_read: 20
+  io_culprit_min_node_disk_read_mb_per_sec: 5
+  overload_node_cpu_percent: 85
+  overload_node_load: 1.5
+  # Optional pg_stat_statements enrichment (absent dsn = off): exact queryid,
+  # buffer hit %, temp spill, and the per-digest disk estimate on PG 18+ async
+  # I/O. One filtered query per cluster per poll_interval. The role needs
+  # pg_monitor; CREATE EXTENSION pg_stat_statements in the DSN's database.
+  sql:
+    dsn: ""                        # e.g. "host=/var/run/postgresql port={port} dbname=postgres user=obs_agent". Env POSTGRES_SQL_DSN
+    password_file: ""              # wins over env POSTGRES_SQL_PASSWORD
+    poll_interval: 60s
+    statement_timeout: 2s
+
 # Always-on per-process TCP flow accounting (eBPF). Feeds
 # process_report.*.network and obs_agent_family_net_* metrics.
 netflow:

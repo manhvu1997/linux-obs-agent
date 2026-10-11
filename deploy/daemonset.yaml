@@ -143,6 +143,16 @@ spec:
             - name: CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef: { name: obs-agent-clickhouse, key: password, optional: true }
+            # PostgreSQL query attribution (CLAUDE.md §23). Optional enrichment:
+            # set POSTGRES_SQL_DSN and the Secret (role with pg_monitor).
+            - name: POSTGRES_TRACING_ENABLED
+              value: "false"
+            - name: POSTGRES_SQL_DSN
+              valueFrom:
+                secretKeyRef: { name: obs-agent-postgres, key: dsn, optional: true }
+            - name: POSTGRES_SQL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: obs-agent-postgres, key: password, optional: true }
 
           volumeMounts:
             - name: config
