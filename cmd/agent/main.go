@@ -43,6 +43,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
 	"github.com/manhvu1997/linux-obs-agent/internal/netflow"
 	"github.com/manhvu1997/linux-obs-agent/internal/netinv"
+	"github.com/manhvu1997/linux-obs-agent/internal/postgres"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/promcollect"
 	"github.com/manhvu1997/linux-obs-agent/internal/trigger"
@@ -83,6 +84,7 @@ func main() {
 		"ebpf_enabled", cfg.EBPF.Enabled,
 		"mongo_tracing_enabled", cfg.Mongo.Enabled,
 		"mysql_tracing_enabled", cfg.MySQL.Enabled,
+		"postgres_tracing_enabled", cfg.Postgres.Enabled,
 		"netflow_enabled", cfg.Netflow.Enabled,
 		"clickhouse_enabled", cfg.ClickHouse.Enabled,
 	)
@@ -98,6 +100,11 @@ func main() {
 
 	// ── Process inspector ───────────────────────────────────────────────────
 	insp := process.NewInspector(&cfg.Process)
+	var pgAnalyzer *postgres.Analyzer
+	if cfg.Postgres.Enabled {
+		pgAnalyzer = newPostgresAnalyzer(cfg)
+		insp.OnScan(pgAnalyzer.ObserveScan)
+	}
 	go insp.Run(ctx)
 
 	// ── Network flow accounting (always-on, eBPF netflow) ──────────────────
@@ -200,6 +207,17 @@ func main() {
 		}
 	}()
 
+	// ── PostgreSQL query attribution (uprobes on running postgres binaries) ─
+	// Results are available via GET /api/diagnose as postgres_report. Enable
+	// with POSTGRES_TRACING_ENABLED=true or postgres.enabled: true.
+	if pgAnalyzer != nil {
+		go func() {
+			if err := pgAnalyzer.Start(ctx); err != nil {
+				slog.Error("postgres analyzer error", "err", err)
+			}
+		}()
+	}
+
 	// ── Prometheus exporter ─────────────────────────────────────────────────
 	var promExp *exporter.PrometheusExporter
 	if cfg.Agent.MetricsAddr != "" {
@@ -223,6 +241,7 @@ func main() {
 		promExp.RegisterWritebackAnalyzer(writebackAnalyzer)
 		promExp.RegisterMongoAnalyzer(mongoAnalyzer)
 		promExp.RegisterMySQLAnalyzer(mysqlAnalyzer, &cfg.MySQL)
+		promExp.RegisterPostgresAnalyzer(pgAnalyzer, &cfg.Postgres)
 		promExp.RegisterProcessReportSources(&cfg.Process, netAcc, netSource, inboundAcct, inv)
 		netCounters := func() (netflow.Counters, bool) {
 			if netAcc == nil {

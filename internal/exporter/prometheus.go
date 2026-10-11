@@ -33,6 +33,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/netflow"
 	"github.com/manhvu1997/linux-obs-agent/internal/netinv"
 	"github.com/manhvu1997/linux-obs-agent/internal/overload"
+	"github.com/manhvu1997/linux-obs-agent/internal/postgres"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/procreport"
 	"github.com/manhvu1997/linux-obs-agent/internal/runq"
@@ -55,6 +56,8 @@ type PrometheusExporter struct {
 	mongoAnalyzer     *mongo.Analyzer
 	mysqlAnalyzer     *mysql.Analyzer
 	mysqlCfg          *config.MySQLConfig
+	postgresAnalyzer  *postgres.Analyzer
+	postgresCfg       *config.PostgresConfig
 
 	// process_report sources – set via RegisterProcessReportSources.
 	procCfg     *config.ProcessConfig
@@ -218,6 +221,17 @@ func (p *PrometheusExporter) RegisterMongoAnalyzer(a *mongo.Analyzer) {
 func (p *PrometheusExporter) RegisterMySQLAnalyzer(a *mysql.Analyzer, cfg *config.MySQLConfig) {
 	p.mysqlAnalyzer = a
 	p.mysqlCfg = cfg
+}
+
+// RegisterPostgresAnalyzer wires the PostgreSQL analyzer so /api/diagnose
+// includes postgres_report (with overload_cause assessed per call). A nil
+// analyzer (postgres.enabled false) is ignored.
+func (p *PrometheusExporter) RegisterPostgresAnalyzer(a *postgres.Analyzer, cfg *config.PostgresConfig) {
+	if a == nil {
+		return
+	}
+	p.postgresAnalyzer = a
+	p.postgresCfg = cfg
 }
 
 // RegisterProcessReportSources wires process_report. acc is nil when
@@ -423,6 +437,25 @@ func (p *PrometheusExporter) BuildDiagnoseReport(n, topPIDsN int) model.Diagnose
 		report.MySQLReport = p.withOverloadCause(p.mysqlAnalyzer.Latest(), report.Metrics, report.IODiagnosis)
 		if report.MySQLReport != nil {
 			report.IODiagnosis = overload.AnnotateIODiagnosis(report.IODiagnosis, report.MySQLReport.OverloadCause)
+		}
+	}
+
+	// PostgreSQL: the cached report plus overload_cause for this call's node
+	// metrics, I/O verdict and process families (on a copy).
+	if p.postgresAnalyzer != nil {
+		in := overload.Inputs{Metrics: report.Metrics}
+		if report.IODiagnosis != nil {
+			in.IOVerdict = report.IODiagnosis.Verdict
+		}
+		if p.insp != nil {
+			in.Families = p.insp.AllFamilies()
+			in.PIDFamilies = p.insp.PIDFamilies()
+		}
+		th := overload.Thresholds{NodeCPUPercent: p.postgresCfg.OverloadNodeCPUPercent, NodeLoad: p.postgresCfg.OverloadNodeLoad}
+		report.PostgresReport = p.postgresAnalyzer.WithOverload(in, th, time.Now())
+		if report.PostgresReport != nil {
+			report.IODiagnosis = overload.AnnotateIODiagnosisFor(report.IODiagnosis,
+				report.PostgresReport.OverloadCause, overload.PostgresEngine.Report)
 		}
 	}
 
