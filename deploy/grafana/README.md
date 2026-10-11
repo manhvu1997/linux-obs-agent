@@ -104,3 +104,16 @@ The Snapshots table lists them; fetch one report with:
 SELECT report FROM obs.diagnose_snapshots WHERE host = 'db-01' AND ts = '2026-10-08 03:12:30' FORMAT TSVRaw
 ```
 Pipe it to `jq` — it is exactly what `/api/diagnose` returned at that moment.
+
+## PostgreSQL dashboards
+
+`obs-agent-postgres-overview.json` (Prometheus) and `obs-agent-postgres-analysis.json`
+(ClickHouse) follow the same import steps. Both open with **How to use this dashboard**:
+five questions in order (is the server overloaded → is it PostgreSQL → queries or
+background work → which query → cause or victim), one row each. Every panel's ⓘ help
+has four plain-language parts — **What**, **Good / bad**, **If bad**, **Formula** — plus
+the alert it backs. Variables: `instance` and `cluster` (Overview); `host`, `cluster`,
+`digest` and the hidden constant `flush_s` (Analysis, must equal
+`clickhouse.flush_interval`). Panels are empty until `postgres.enabled` is on; the
+per-digest disk panels are empty on PostgreSQL 18+ with asynchronous I/O unless
+`postgres.sql` is configured (see the "Estimated disk reads per digest" table).

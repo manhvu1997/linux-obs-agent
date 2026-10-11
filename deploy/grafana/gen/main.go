@@ -809,6 +809,9 @@ func dashboards() map[string]Dashboard {
 	return map[string]Dashboard{
 		"obs-agent-overview.json": overview(),
 		"obs-agent-analysis.json": analysis(),
+
+		"obs-agent-postgres-overview.json": pgOverview(),
+		"obs-agent-postgres-analysis.json": pgAnalysis(),
 	}
 }
 

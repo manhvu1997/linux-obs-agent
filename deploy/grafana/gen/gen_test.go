@@ -101,6 +101,9 @@ func TestDatasourceVariable(t *testing.T) {
 	want := map[string]struct{ name, plugin string }{
 		"obs-agent-overview.json": {"ds_prometheus", "prometheus"},
 		"obs-agent-analysis.json": {"ds_clickhouse", "grafana-clickhouse-datasource"},
+
+		"obs-agent-postgres-overview.json": {"ds_prometheus", "prometheus"},
+		"obs-agent-postgres-analysis.json": {"ds_clickhouse", "grafana-clickhouse-datasource"},
 	}
 	for file, d := range dashboards() {
 		w := want[file]
@@ -221,7 +224,13 @@ func TestClickHouseSQLReferencesSchema(t *testing.T) {
 	if len(schema) < 5 {
 		t.Fatalf("schema parse found only %d tables", len(schema))
 	}
-	d := dashboards()["obs-agent-analysis.json"]
+	for _, name := range []string{"obs-agent-analysis.json", "obs-agent-postgres-analysis.json"} {
+		checkSQLAgainstSchema(t, dashboards()[name], schema)
+	}
+}
+
+func checkSQLAgainstSchema(t *testing.T, d Dashboard, schema map[string]map[string]bool) {
+	t.Helper()
 	for _, p := range d.Panels {
 		for _, tg := range p.Targets {
 			for _, msg := range sqlViolations(tg.RawSQL, schema) {
@@ -282,7 +291,13 @@ func TestJSONIsValidDashboard(t *testing.T) {
 // panel over window_end must bucket by at least the flush interval.
 func TestIntervalPanelsBucketByFlushInterval(t *testing.T) {
 	bareInterval := regexp.MustCompile(`/\s*\$__interval_s`)
-	d := dashboards()["obs-agent-analysis.json"]
+	for _, name := range []string{"obs-agent-analysis.json", "obs-agent-postgres-analysis.json"} {
+		checkFlushBuckets(t, dashboards()[name], bareInterval)
+	}
+}
+
+func checkFlushBuckets(t *testing.T, d Dashboard, bareInterval *regexp.Regexp) {
+	t.Helper()
 	for _, p := range d.Panels {
 		for _, tg := range p.Targets {
 			if !strings.Contains(tg.RawSQL, "window_end") {
@@ -354,6 +369,9 @@ func TestOverviewHasMySQLCPUCoverage(t *testing.T) {
 // Every panel states what it computes and how to read it (spec §7.4).
 func TestPanelsDescribeFormulaAndReading(t *testing.T) {
 	for name, d := range dashboards() {
+		if strings.Contains(name, "postgres") {
+			continue // TestPostgresPanelsExplainThemselves
+		}
 		for _, p := range d.Panels {
 			if p.Type == "row" || p.Type == "text" || p.Type == "alertlist" {
 				continue
@@ -367,6 +385,7 @@ func TestPanelsDescribeFormulaAndReading(t *testing.T) {
 
 type ruleFile struct {
 	Groups []struct {
+		Name  string `yaml:"name"`
 		Rules []struct {
 			Alert       string            `yaml:"alert"`
 			Expr        string            `yaml:"expr"`
@@ -399,6 +418,12 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 			rules[r.Alert] = struct{ expr, severity string }{r.Expr, r.Labels["severity"]}
 		}
 	}
+	checkAlertPanels(t, rules, alertRules, "obs-agent-overview.json")
+	checkAlertPanels(t, rules, pgAlertRules, "obs-agent-postgres-overview.json")
+}
+
+func checkAlertPanels(t *testing.T, rules map[string]struct{ expr, severity string }, alertRules []alertRule, dash string) {
+	t.Helper()
 	for _, ar := range alertRules {
 		r, ok := rules[ar.Name]
 		if !ok {
@@ -413,7 +438,7 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 		}
 	}
 	used := map[string]bool{}
-	for _, p := range dashboards()["obs-agent-overview.json"].Panels {
+	for _, p := range dashboards()[dash].Panels {
 		for _, ar := range alertRules {
 			if !strings.Contains(p.Description, "Alert: "+ar.Name+" (") {
 				continue
@@ -466,7 +491,7 @@ func TestAlertPanelsMatchRules(t *testing.T) {
 	}
 	for _, ar := range alertRules {
 		if ar.Panel && !used[ar.Name] {
-			t.Errorf("no Overview panel draws alert %s", ar.Name)
+			t.Errorf("no panel of %s draws alert %s", dash, ar.Name)
 		}
 	}
 }
@@ -600,11 +625,25 @@ func TestRunbookPanelsExist(t *testing.T) {
 	}
 	// Plus every panel a runbook names as "Overview → '<title>'".
 	ref := regexp.MustCompile(`Overview → '([^']+)'`)
+	pgWant := map[string]bool{}
 	for _, g := range readRuleFile(t).Groups {
 		for _, r := range g.Rules {
 			for _, m := range ref.FindAllStringSubmatch(r.Annotations["description"], -1) {
-				want[m[1]] = true
+				if g.Name == "obs-agent-postgres" {
+					pgWant[m[1]] = true
+				} else {
+					want[m[1]] = true
+				}
 			}
+		}
+	}
+	for w := range pgWant {
+		found := false
+		for _, p := range dashboards()["obs-agent-postgres-overview.json"].Panels {
+			found = found || strings.HasPrefix(p.Title, w)
+		}
+		if !found {
+			t.Errorf("a PostgreSQL runbook names Overview panel %q, which does not exist", w)
 		}
 	}
 	ov := dashboards()["obs-agent-overview.json"].Panels
@@ -640,7 +679,8 @@ var grafanaVarRe = regexp.MustCompile(`"\$\{?[a-z_]+\}?"`)
 func promQL() map[string]string {
 	r := strings.NewReplacer("$__rate_interval", "5m", "$__interval", "1m", "$__range", "1h")
 	out := map[string]string{}
-	for _, p := range dashboards()["obs-agent-overview.json"].Panels {
+	ps := append(dashboards()["obs-agent-overview.json"].Panels, dashboards()["obs-agent-postgres-overview.json"].Panels...)
+	for _, p := range ps {
 		for _, tg := range p.Targets {
 			if tg.Expr == "" {
 				continue
@@ -977,6 +1017,47 @@ func TestAlertDescriptionNamesSideAndLiteral(t *testing.T) {
 	} {
 		if d := withAlert(Panel{}, rule(c.name)).Description; !strings.Contains(d, c.want) {
 			t.Errorf("description %q, want it to contain %q", d, c.want)
+		}
+	}
+}
+
+// Every PostgreSQL panel explains itself to someone who is not a PostgreSQL
+// expert (spec §9.4): What / Good / bad / If bad / Formula, each non-empty,
+// at most 600 characters before the alert line; each dashboard opens with
+// "How to use this dashboard" and every row is followed by a text panel.
+func TestPostgresPanelsExplainThemselves(t *testing.T) {
+	parts := []string{"What: ", "Good / bad: ", "If bad: ", "Formula: "}
+	for _, name := range []string{"obs-agent-postgres-overview.json", "obs-agent-postgres-analysis.json"} {
+		ps := dashboards()[name].Panels
+		if len(ps) == 0 || ps[0].Type != "text" || ps[0].Title != "How to use this dashboard" {
+			t.Errorf("%s: first panel must be the 'How to use this dashboard' text", name)
+		}
+		for i, p := range ps {
+			switch p.Type {
+			case "row":
+				if i+1 >= len(ps) || ps[i+1].Type != "text" {
+					t.Errorf("%s: row %q is not followed by a text panel", name, p.Title)
+				}
+				continue
+			case "text", "alertlist":
+				continue
+			}
+			body, _, _ := strings.Cut(p.Description, "\nAlert: ")
+			if len(body) > 600 {
+				t.Errorf("%s: panel %q help is %d characters (max 600)", name, p.Title, len(body))
+			}
+			rest := body
+			for _, part := range parts {
+				i := strings.Index(rest, part)
+				if i < 0 {
+					t.Errorf("%s: panel %q lacks %q", name, p.Title, part)
+					break
+				}
+				rest = rest[i+len(part):]
+				if v, _, _ := strings.Cut(rest, "\n"); strings.TrimSpace(v) == "" {
+					t.Errorf("%s: panel %q has an empty %q", name, p.Title, part)
+				}
+			}
 		}
 	}
 }

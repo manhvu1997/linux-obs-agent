@@ -1,0 +1,591 @@
+{
+  "uid": "obs-agent-postgres-analysis",
+  "title": "obs-agent PostgreSQL Analysis",
+  "tags": [
+    "obs-agent",
+    "postgres",
+    "clickhouse"
+  ],
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "",
+  "templating": {
+    "list": [
+      {
+        "name": "ds_clickhouse",
+        "label": "ClickHouse",
+        "type": "datasource",
+        "query": "grafana-clickhouse-datasource",
+        "refresh": 1
+      },
+      {
+        "name": "host",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${ds_clickhouse}"
+        },
+        "query": "SELECT DISTINCT host FROM obs.pg_digest_stats WHERE $__timeFilter(window_end) ORDER BY host",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      },
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${ds_clickhouse}"
+        },
+        "query": "SELECT DISTINCT cluster FROM obs.pg_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) ORDER BY cluster",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      },
+      {
+        "name": "digest",
+        "label": "Digest id (drill-down)",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "value": ""
+        }
+      },
+      {
+        "name": "flush_s",
+        "label": "ClickHouse flush interval (s)",
+        "type": "constant",
+        "query": "60",
+        "hide": 2
+      }
+    ]
+  },
+  "links": [
+    {
+      "targetBlank": true,
+      "title": "PostgreSQL Overview (Prometheus)",
+      "type": "link",
+      "url": "/d/obs-agent-postgres-overview/obs-agent-postgresql-overview?$__url_time_range"
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to use this dashboard",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "**How to use this dashboard** — answer five questions in order; this dashboard keeps the history (ClickHouse) behind the Overview.\n\n1. **Is the server overloaded?** CPU, load, disk stall.\n2. **Is it PostgreSQL?** The cluster's CPU against other process families.\n3. **Queries or background work?** CPU by backend type: client queries, or autovacuum, checkpointer, I/O workers.\n4. **Which query?** The digests with the largest share of the node's CPU or disk reads.\n5. **Cause or victim?** Where query time goes: a query that mostly *waits* is a victim — fix the culprit, not the victim.\n\n**Words used here.** *Digest*: one query shape — the SQL with its values replaced by `?`, so `id = 1` and `id = 2` count together. *Run-queue wait*: time a query was ready to run but no CPU was free. *WAL*: PostgreSQL's write-ahead log; a commit waits for it to reach disk. *Backend type*: what a PostgreSQL process does (client connection, autovacuum, checkpointer, I/O worker…). The full evidence for one moment is in `/api/diagnose` → `postgres_report.overload_cause`.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 2,
+      "type": "row",
+      "title": "Which query? (history)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "text",
+      "title": "Question 4",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "The query shapes that used the most CPU over the chosen time range, with their waits. Fix culprits (large share), not victims (mostly waiting).",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Top digests",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 1,
+          "rawSql": "SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,\n  sum(s.cpu_ns) / 1e9 / greatest(dateDiff('second', $__fromTime, $__toTime), 1) AS cpuCores,\n  100 * sum(s.cpu_ns) / nullIf((SELECT sum(node_cpu_used_ns) FROM obs.host_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote})), 0) AS pctNodeCpu,\n  sum(s.disk_read_bytes) / greatest(dateDiff('second', $__fromTime, $__toTime), 1) / 1048576 AS readMBs,\n  100 * sum(s.runq_ns) / greatest(sum(s.wall_ns), 1) AS cpuWaitPct,\n  100 * sum(s.io_wait_ns) / nullIf(sumIf(s.wall_ns, s.io_wait_ns IS NOT NULL), 0) AS diskWaitPct,\n  100 * sum(s.wal_wait_ns) / nullIf(sumIf(s.wall_ns, s.wal_wait_ns IS NOT NULL), 0) AS walWaitPct,\n  100 * sum(s.shared_blks_hit) / nullIf(sum(s.shared_blks_hit) + sum(s.shared_blks_read), 0) AS hitPct,\n  sum(s.temp_blks_written) * 8192 / greatest(dateDiff('second', $__fromTime, $__toTime), 1) / 1048576 AS tempMBs,\n  max(s.disk_estimated) AS diskEstimated,\n  sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS latencyMsAvg,\n  max(s.wall_max_ns) / 1e6 AS latencyMsMax\nFROM obs.pg_digest_stats AS s\nLEFT JOIN (SELECT digest_id, digest_text FROM obs.pg_digest_text FINAL) AS t ON t.digest_id = s.digest_id\nWHERE $__timeFilter(s.window_end) AND s.host IN (${host:singlequote}) AND s.cluster IN (${cluster:singlequote})\nGROUP BY s.digest_id ORDER BY cpuCores DESC LIMIT 50",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cpuCores"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cpuWaitPct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "diskWaitPct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hitPct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "latencyMsAvg"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "latencyMsMax"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pctNodeCpu"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "readMBs"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "MiBs"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tempMBs"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "MiBs"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "walWaitPct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "What: the heaviest query shapes over the selected time range: cores, share of node CPU, disk, waits, cache hits, temp spill, latency.\nGood / bad: one digest with a large pctNodeCpu is a culprit; high cpuWaitPct / diskWaitPct / walWaitPct with low CPU marks a victim.\nIf bad: hitPct well below 99% = reads miss shared_buffers; tempMBs > 0 = sorts spill to disk (raise work_mem for that query).\nFormula: per digest: cpu_ns ÷ range s; ÷ host_stats node CPU × 100; waits ÷ wall of the intervals that measured them; hit = hit ÷ (hit + read)."
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "CPU of the top 10 digests (cores)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, digest_id AS digest, sum(cpu_ns) / 1e9 / greatest($__interval_s, ${flush_s}) AS cores\nFROM obs.pg_digest_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote})\n  AND digest_id IN (SELECT digest_id FROM obs.pg_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote}) GROUP BY digest_id ORDER BY sum(cpu_ns) DESC LIMIT 10)\nGROUP BY time, digest ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "What: CPU cores used over time by the ten heaviest query shapes.\nGood / bad: steady lines are normal; a line that jumps at the incident time is the suspect.\nIf bad: put that digest_id into the 'digest' variable to see its calls and latency.\nFormula: Σ cpu_ns per flush interval ÷ interval seconds."
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Queries or background work? (history)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "text",
+      "title": "Question 3",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "PostgreSQL's own processes over time: client backends run queries; autovacuum, checkpointer and I/O workers are background work with their own fixes.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "CPU by backend type (cores)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, backend_type, sum(cpu_ns) / 1e9 / greatest($__interval_s, ${flush_s}) AS cores\nFROM obs.pg_backend_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote})\nGROUP BY time, backend_type ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "What: CPU cores used by each kind of PostgreSQL process over time.\nGood / bad: client usually on top; autovacuum or checkpointer rising during the incident points at background work.\nIf bad: autovacuum: check bloat and cost limits; checkpointer: raise max_wal_size.\nFormula: Σ pg_backend_stats.cpu_ns per flush interval ÷ interval seconds."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Disk reads by backend type (MB/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, backend_type, sum(disk_read_bytes) / greatest($__interval_s, ${flush_s}) / 1048576 AS read\nFROM obs.pg_backend_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote})\nGROUP BY time, backend_type ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MiBs"
+        },
+        "overrides": []
+      },
+      "description": "What: storage reads of each kind of PostgreSQL process over time.\nGood / bad: on PostgreSQL 18+ io_worker carries the reads of queries; a rise matches query reads.\nIf bad: see 'Estimated disk reads per digest' below to split io_worker reads per query.\nFormula: Σ pg_backend_stats.disk_read_bytes per flush interval ÷ interval seconds (NULL when process.include_io is off)."
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Estimated disk reads per digest (PostgreSQL 18+)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 1,
+          "rawSql": "SELECT r.digest_id AS digest, r.cluster AS clusterName,\n  io.io_bytes * r.sr / nullIf(tot.total, 0) / greatest(dateDiff('second', $__fromTime, $__toTime), 1) / 1048576 AS estReadMBs\nFROM (SELECT host, cluster, digest_id, sum(shared_blks_read) AS sr FROM obs.pg_digest_stats\n      WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote}) AND disk_estimated = 1 GROUP BY host, cluster, digest_id) AS r\nINNER JOIN (SELECT host, cluster, sum(shared_blks_read) AS total FROM obs.pg_digest_stats\n            WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote}) AND disk_estimated = 1 GROUP BY host, cluster) AS tot ON tot.host = r.host AND tot.cluster = r.cluster\nINNER JOIN (SELECT host, cluster, sum(disk_read_bytes) AS io_bytes FROM obs.pg_backend_stats\n            WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote}) AND backend_type = 'io_worker' GROUP BY host, cluster) AS io ON io.host = r.host AND io.cluster = r.cluster\nORDER BY estReadMBs DESC LIMIT 20",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "description": "What: on PostgreSQL 18+ (reads done by I/O workers), each query's estimated share of the disk reads.\nGood / bad: empty on PostgreSQL 16/17 or without postgres.sql — then use readMBs in Top digests.\nIf bad: treat the top rows like disk culprits: check their plans and indexes.\nFormula: io_worker read bytes × digest shared_blks_read ÷ all shared_blks_read, ÷ range seconds."
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "Digest drill-down and slow statements",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "text",
+      "title": "Question 5",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "Type a digest id in the 'digest' variable to follow one query shape; the slow statements table shows single slow executions and whether they ran or waited.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Calls and latency of the selected digest",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, sum(calls) / greatest($__interval_s, ${flush_s}) AS callsPerSec,\n  sum(wall_ns) / greatest(sum(calls), 1) / 1e6 AS latencyMsAvg\nFROM obs.pg_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote}) AND digest_id = '${digest}'\nGROUP BY time ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "What: calls per second and average latency of the digest typed in the 'digest' variable.\nGood / bad: latency rising while calls stay flat means the query waits more (see the wait columns in Top digests).\nIf bad: if calls rose, find the application that sends it.\nFormula: Σ calls ÷ interval seconds; Σ wall_ns ÷ Σ calls."
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Slow statements",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 1,
+          "rawSql": "SELECT ts, host, cluster, pid, latency_ms, cpu_ms, digest_id, query\nFROM obs.pg_slow_queries WHERE $__timeFilter(ts) AND host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote})\nORDER BY latency_ms DESC LIMIT 200",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "description": "What: the slowest single client statements in the range (one row per slow execution).\nGood / bad: many rows of the same digest at the incident time point at it; a slow row with little cpu_ms waited.\nIf bad: compare cpu_ms with latency_ms: mostly CPU = the query itself is heavy; mostly waiting = a victim.\nFormula: pg_slow_queries rows with latency ≥ postgres.slow_query_threshold_ms; query is digest text unless raw samples are allowed."
+    }
+  ]
+}

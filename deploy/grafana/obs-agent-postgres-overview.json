@@ -1,0 +1,1307 @@
+{
+  "uid": "obs-agent-postgres-overview",
+  "title": "obs-agent PostgreSQL Overview",
+  "tags": [
+    "obs-agent",
+    "postgres"
+  ],
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "ds_prometheus",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds_prometheus}"
+        },
+        "query": "label_values(obs_agent_postgres_tracing_active, instance)",
+        "definition": "label_values(obs_agent_postgres_tracing_active, instance)",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      },
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds_prometheus}"
+        },
+        "query": "label_values(obs_agent_postgres_queries_total{instance=~\"$instance\"}, cluster)",
+        "definition": "label_values(obs_agent_postgres_queries_total{instance=~\"$instance\"}, cluster)",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "links": [
+    {
+      "targetBlank": true,
+      "title": "PostgreSQL Analysis (ClickHouse)",
+      "type": "link",
+      "url": "/d/obs-agent-postgres-analysis/obs-agent-postgresql-analysis?$__url_time_range"
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to use this dashboard",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "**How to use this dashboard** — answer five questions in order; each row answers one.\n\n1. **Is the server overloaded?** CPU, load, disk stall.\n2. **Is it PostgreSQL?** The cluster's CPU against other process families.\n3. **Queries or background work?** CPU by backend type: client queries, or autovacuum, checkpointer, I/O workers.\n4. **Which query?** The digests with the largest share of the node's CPU or disk reads.\n5. **Cause or victim?** Where query time goes: a query that mostly *waits* is a victim — fix the culprit, not the victim.\n\n**Words used here.** *Digest*: one query shape — the SQL with its values replaced by `?`, so `id = 1` and `id = 2` count together. *Run-queue wait*: time a query was ready to run but no CPU was free. *WAL*: PostgreSQL's write-ahead log; a commit waits for it to reach disk. *Backend type*: what a PostgreSQL process does (client connection, autovacuum, checkpointer, I/O worker…). The full evidence for one moment is in `/api/diagnose` → `postgres_report.overload_cause`.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 2,
+      "type": "alertlist",
+      "title": "Firing obs-agent alerts",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "alertInstanceLabelFilter": "{instance=~\"${instance:regex}\"}",
+        "groupMode": "default",
+        "maxItems": 20,
+        "sortOrder": 1,
+        "stateFilter": {
+          "firing": true,
+          "pending": true
+        },
+        "viewMode": "list"
+      }
+    },
+    {
+      "id": 3,
+      "type": "row",
+      "title": "1. Is the server overloaded?",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "text",
+      "title": "Question 1",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "Red here means the machine itself is out of CPU or stuck on disk. If everything is green, slow queries have another cause (locks, the network, the client).",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Node CPU used",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "What: how busy all CPUs of the server were, averaged over 5 minutes.\nGood / bad: below 70% is comfortable; above 85% queries start to wait for a CPU.\nIf bad: go to row 3 and 4 to see who uses the CPU.\nFormula: avg_over_time(obs_agent_cpu_usage_percent[5m])."
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Load per CPU",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_load1{instance=~\"$instance\"} / obs_agent_cpu_count{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 1.5
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "What: processes running or waiting to run, per CPU (1-minute load average).\nGood / bad: below 1 is fine; above 1.5 means work queues up for CPUs or disk.\nIf bad: if CPU is low but load is high, look at the disk stall panel.\nFormula: obs_agent_load1 ÷ obs_agent_cpu_count."
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Disk stall (PSI io full)",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_pressure_io_full_avg10{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "What: share of time in which nothing on the server could progress because of disk I/O.\nGood / bad: 0–2% is normal; above 10% the disk is stalling the machine.\nIf bad: open row 5 'Where query time goes' and the disk-read panels in row 4.\nFormula: obs_agent_pressure_io_full_avg10 (kernel PSI, avg10). Absent on kernels without /proc/pressure."
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Tracing active",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_postgres_tracing_active{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "What: whether the agent's statement probes are attached (1) or not (0).\nGood / bad: 1 is normal. 0 means the agent protected the database by detaching (statement rate too high) or could not load.\nIf bad: read postgres_report.accounting.state in /api/diagnose; the probes re-attach after postgres.shed_cooldown.\nFormula: obs_agent_postgres_tracing_active.\nAlert: ObsAgentPostgresTracingShed (warning) fires below 0.5 (== 0)."
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "2. Is it PostgreSQL?",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "text",
+      "title": "Question 2",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "Compare the PostgreSQL cluster with the other process families. If another family is on top, the database is a victim of a neighbour.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "PostgreSQL cluster CPU vs top process families (cores)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance, cluster) (rate(obs_agent_postgres_backend_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{cluster}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "topk(5, obs_agent_family_cpu_percent{instance=~\"$instance\"} / 100 * on (instance) group_left () obs_agent_cpu_count{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} family {{family}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "What: CPU cores used by each PostgreSQL cluster and by the five busiest process families.\nGood / bad: the cluster near the top while the node is busy means PostgreSQL is the main CPU user.\nIf bad: if another family is on top, look at process_report in /api/diagnose instead of the queries.\nFormula: cluster: Σ rate(obs_agent_postgres_backend_cpu_seconds_total); family: obs_agent_family_cpu_percent / 100 × cpu_count."
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "3. Queries or background work?",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "text",
+      "title": "Question 3",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "Client queries are what applications send. Background work (autovacuum, checkpoints, I/O workers) is PostgreSQL maintaining itself; it has different fixes.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "CPU by backend type (% of cluster)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance, cluster, backend_type) (rate(obs_agent_postgres_backend_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\"}[5m])) / on (instance, cluster) group_left () sum by (instance, cluster) (rate(obs_agent_postgres_backend_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\"}[5m]))",
+          "legendFormat": "{{instance}} {{cluster}} {{backend_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "What: each backend type's share of the cluster's CPU: client, autovacuum, checkpointer, io_worker, walsender…\nGood / bad: client usually dominates; a background type above the dashed 50% line on a busy node is the cause.\nIf bad: autovacuum: check table bloat and autovacuum cost limits; checkpointer: raise max_wal_size; io_worker: queries are reading (row 4).\nFormula: rate(backend_cpu_seconds_total) per type ÷ the cluster's total × 100, over 5m (the alert's window).\nAlert: PostgresBackgroundCPUHigh (warning) fires above 50 (>= 0.5)."
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Statement CPU coverage",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 40
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * obs_agent_postgres_query_cpu_coverage_ratio{instance=~\"$instance\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{instance}} {{cluster}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "What: how much of the cluster's CPU was spent inside statements the agent could see.\nGood / bad: high (70–100%) means queries explain the load; low means background work or connection handling.\nIf bad: if low, read the backend-type panel on the left.\nFormula: statement CPU ÷ cluster CPU × 100 (obs_agent_postgres_query_cpu_coverage_ratio)."
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Disk reads by backend type (MB/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 40
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance, cluster, backend_type) (rate(obs_agent_postgres_backend_disk_read_bytes_total{instance=~\"$instance\",cluster=~\"$cluster\"}[$__rate_interval])) / 1048576",
+          "legendFormat": "{{instance}} {{cluster}} {{backend_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "MiBs"
+        },
+        "overrides": []
+      },
+      "description": "What: storage reads by each backend type of the cluster.\nGood / bad: on PostgreSQL 18+ the io_worker line carries the reads of queries; autovacuum reading a lot means vacuuming big tables.\nIf bad: compare with row 4's disk-read shares; on PostgreSQL 18+ enable postgres.sql to split io_worker reads per query.\nFormula: rate(obs_agent_postgres_backend_disk_read_bytes_total) / 1048576 (needs process.include_io)."
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "4. Which query?",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "text",
+      "title": "Question 4",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "A line above the dashed line is one query shape doing a fifth of all the server's CPU work or disk reads: that is the culprit to fix.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "% of node CPU used by top digests",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 51
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * topk(10, sum by (instance, cluster, digest_id) (rate(obs_agent_postgres_digest_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"})) * on (instance, cluster, digest_id) group_left (digest_text) obs_agent_postgres_digest_info{instance=~\"$instance\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{instance}} {{digest_text}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "What: for the ten heaviest query shapes, their share of all CPU work on the server.\nGood / bad: no line above the dashed 20% line is normal; one above it is a CPU culprit (the alert also needs the node ≥ 85% busy).\nIf bad: run EXPLAIN (ANALYZE, BUFFERS) on it, add an index or cache, or slow its caller down.\nFormula: rate(digest_cpu_seconds_total) ÷ node CPU cores in use × 100, over 5m.\nAlert: PostgresDigestCPUHog (warning) fires above 20 (> 0.2)."
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "% of node disk reads by top digests",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 51
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * topk(10, sum by (instance, cluster, digest_id) (rate(obs_agent_postgres_digest_disk_read_bytes_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0)) * on (instance, cluster, digest_id) group_left (digest_text) obs_agent_postgres_digest_info{instance=~\"$instance\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{instance}} {{digest_text}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "What: for the ten heaviest query shapes, their share of the disk's reads.\nGood / bad: no line above 20% is normal; one above it reads a fifth of the disk (alert needs > 5 MiB/s). Empty on PostgreSQL 18+ async I/O.\nIf bad: 1–4 pages per call: add RAM / shared_buffers; hundreds: a scan — add an index or a LIMIT.\nFormula: rate(digest_disk_read_bytes_total) ÷ rate(node_disk_read_bytes_total) × 100, over 5m.\nAlert: PostgresDigestDiskReadHog (warning) fires above 20 (> 0.2)."
+    },
+    {
+      "id": 21,
+      "type": "table",
+      "title": "Top digests (last 5m)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (cluster, digest_id) (rate(obs_agent_postgres_digest_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m]))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (cluster, digest_id) (rate(obs_agent_postgres_digest_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m])) / scalar(sum((avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"})))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (cluster, digest_id) (rate(obs_agent_postgres_digest_calls_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m]))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (cluster, digest_id) (rate(obs_agent_postgres_digest_disk_read_bytes_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m])) / 1048576",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% node CPU"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "cores"
+          }
+        ]
+      },
+      "description": "What: the heaviest query shapes right now: CPU cores, share of node CPU, calls per second, disk reads.\nGood / bad: a few cores spread over many digests is normal; one digest with a large share is the culprit.\nIf bad: copy its digest_id into the Analysis dashboard for history, or read its text in postgres_report.\nFormula: per digest over 5m: rate(cpu seconds), ÷ node cores × 100, rate(calls), rate(disk read bytes) / 1048576.",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "cores",
+              "Value #B": "% node CPU",
+              "Value #C": "calls/s",
+              "Value #D": "disk MB/s"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "row",
+      "title": "5. Cause or victim?",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 67
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 23,
+      "type": "text",
+      "title": "Question 5",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "A slow query that mostly waits for a CPU, the disk or the WAL is a victim of something else. Fix the culprit from row 4 first.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Where query time goes",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 70
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance, cluster) (rate(obs_agent_postgres_query_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m])) / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m]))",
+          "legendFormat": "{{cluster}} on CPU"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance, cluster) (rate(obs_agent_postgres_query_runq_wait_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m])) / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m]))",
+          "legendFormat": "{{cluster}} waiting for CPU"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * (sum by (instance, cluster) (rate(obs_agent_postgres_query_io_wait_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m])) or 0 * sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m]))) / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m])) + 100 * sum by (instance, cluster) (rate(obs_agent_postgres_query_wal_wait_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m])) / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m]))",
+          "legendFormat": "{{cluster}} waiting for disk + WAL"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "What: of all time spent in client queries: running on a CPU, waiting for a CPU, and waiting for disk or the WAL.\nGood / bad: waiting lines under the dashed 30% line are fine; above it queries are victims of a busy CPU or a slow disk.\nIf bad: CPU wait high: fix the CPU culprit (row 4) or add CPU. Disk + WAL high: check the disk and PostgresCommitsStalledOnWAL.\nFormula: rate(part) ÷ rate(query_wall_seconds_total) × 100 for command=client, over 5m; an unmeasured wait counts as 0.\nAlert: PostgresQueriesStarvedForCPU (critical) fires above 30 (> 0.3).\nAlert: PostgresQueriesStalledOnDisk (critical) fires above 30 (> 0.3)."
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "WAL wait share",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 70
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance, cluster) (rate(obs_agent_postgres_query_wal_wait_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m])) / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m]))",
+          "legendFormat": "{{instance}} {{cluster}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "What: share of client-query time spent waiting for the write-ahead log to reach disk (mostly COMMIT).\nGood / bad: a few percent is normal; above the dashed 20% line commits are slow.\nIf bad: check the WAL disk's latency; consider group commit (commit_delay) or synchronous_commit=off where safe.\nFormula: rate(query_wal_wait_seconds_total) ÷ rate(query_wall_seconds_total) × 100, command=client, over 5m.\nAlert: PostgresCommitsStalledOnWAL (warning) fires above 20 (> 0.2)."
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Sync-replication wait share",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 78
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "100 * sum by (instance, cluster) (rate(obs_agent_postgres_query_syncrep_wait_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m])) / sum by (instance, cluster) (rate(obs_agent_postgres_query_wall_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",command=\"client\"}[5m]))",
+          "legendFormat": "{{instance}} {{cluster}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "description": "What: share of client-query time spent waiting for synchronous standbys to confirm.\nGood / bad: empty when synchronous replication is not used; above the dashed 20% line a standby is slow.\nIf bad: check pg_stat_replication lag, the standby's disk and network.\nFormula: rate(query_syncrep_wait_seconds_total) ÷ rate(query_wall_seconds_total) × 100, command=client, over 5m.\nAlert: PostgresSyncReplicationSlow (warning) fires above 20 (> 0.2)."
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Statements per second by command",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 78
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "sum by (instance, cluster, command) (rate(obs_agent_postgres_queries_total{instance=~\"$instance\",cluster=~\"$cluster\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{cluster}} {{command}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "description": "What: executed statements per second: client queries, fastpath calls, autovacuum and replication commands.\nGood / bad: compare with yesterday: a jump in client statements often explains a CPU rise.\nIf bad: find the caller of the digest that grew in row 4.\nFormula: rate(obs_agent_postgres_queries_total) by command."
+    },
+    {
+      "id": 28,
+      "type": "row",
+      "title": "Agent health",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 86
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 29,
+      "type": "text",
+      "title": "Agent health",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "Whether the numbers above are complete. Missing signals are shown as unavailable, never as zero.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Accounting availability",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_postgres_io_wait_available{instance=~\"$instance\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}} disk wait measured"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_postgres_wal_wait_available{instance=~\"$instance\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}} WAL wait measured"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "obs_agent_postgres_enrichment_up{instance=~\"$instance\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}} pg_stat_statements enrichment"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "What: which optional signals are measured (1) or not (0).\nGood / bad: disk wait 0 usually means kernel delay accounting is off; enrichment 0 means postgres.sql is not configured or failing.\nIf bad: enable delay accounting (postgres.enable_delayacct) or fix the DSN; see accounting in /api/diagnose.\nFormula: io_wait_available, wal_wait_available, enrichment_up gauges."
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Dropped, overflow, mismatches, unmatched credit",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prometheus}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_postgres_events_dropped_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} dropped/s"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_postgres_agg_overflow_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} overflow/s"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_postgres_hash_mismatch_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} mismatches/s"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_postgres_credit_dropped_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} unmatched credit/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "What: rates of the agent's own accounting problems.\nGood / bad: all flat at zero is healthy; dropped above zero means totals undercount.\nIf bad: check the agent's CPU limit and the number of distinct statements.\nFormula: rate() of the four obs_agent_postgres_*_total health counters."
+    }
+  ]
+}
