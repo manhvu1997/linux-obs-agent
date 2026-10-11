@@ -3,3 +3,6 @@ devbox.json
 devbox.lock
 obs-agent
 docs/superpowers/
+
+# local rollout helper
+deploy/update-agents.sh
