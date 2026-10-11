@@ -507,6 +507,8 @@ int uprobe_report_activity(struct pt_regs *ctx)
         return 0; /* not a traced cluster (yet) */
     __u8 kind;
     if (state == cfg->state_running && cmd) {
+        /* Every non-parallel RUNNING report is KIND_CLIENT: other postmaster
+         * children (autovacuum workers, walsenders, ...) are included. */
         kind = bpf_map_lookup_elem(&in_parallel, &tid) ? KIND_PARALLEL : KIND_CLIENT;
     } else if (state == cfg->state_fastpath) {
         kind = KIND_FASTPATH;
@@ -531,10 +533,17 @@ int uprobe_report_activity(struct pt_regs *ctx)
             long n = bpf_probe_read_user_str(buf->text, sizeof(buf->text), cmd);
             if (n > 1) {
                 __u32 len = (__u32)n - 1;
-                __u32 flags = n >= TEXT_MAX ? TEXT_TRUNCATED : 0;
+                __u32 flags = 0;
+                if (n >= TEXT_MAX) {
+                    /* the copy holds 511 bytes + NUL; truncated only if the source continues */
+                    __u8 next = 0;
+                    if (bpf_probe_read_user(&next, sizeof(next), cmd + TEXT_MAX - 1) == 0 && next)
+                        flags = TEXT_TRUNCATED;
+                }
                 hash = pg_text_hash(buf->text);
                 if (bpf_map_lookup_elem(&unsafe_hash, &hash)) {
-                    keep_unsafe_text(tid, buf, len);
+                    if (!keep_unsafe_text(tid, buf, len))
+                        bpf_map_delete_elem(&unsafe_text, &tid); /* no stale text for another command */
                     unsafe = 1;
                 } else if (!bpf_map_lookup_elem(&text_seen, &hash)) {
                     emit_text(hash, len, flags, buf->text);
@@ -652,6 +661,19 @@ int uretprobe_parallel_main(struct pt_regs *ctx)
         close_session(s, (struct task_struct *)bpf_get_current_task(), tid);
     bpf_map_delete_elem(&in_parallel, &tid);
     bpf_map_delete_elem(&pg_session, &tid); /* the worker exits next */
+    return 0;
+}
+
+/* A backend that exits (FATAL, pg_terminate_backend, autovacuum worker end,
+ * longjmp past the ParallelQueryMain uretprobe) leaves no stale interval for a
+ * reused tid. Runs in the exiting task's context. */
+SEC("tracepoint/sched/sched_process_exit")
+int tp_process_exit(void *ctx)
+{
+    __u32 tid = (__u32)bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&pg_session, &tid);
+    bpf_map_delete_elem(&in_parallel, &tid);
+    bpf_map_delete_elem(&unsafe_text, &tid);
     return 0;
 }
 

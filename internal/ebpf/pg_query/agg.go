@@ -19,7 +19,7 @@ const drainGrace = 50 * time.Millisecond
 // one the programs were writing. Poll goroutine only. Every entry is
 // returned exactly once; on a delete error the rest stay for a later drain.
 func (l *Loader) DrainAgg() ([]pgtrace.AggEntry, error) {
-	if l.objs.AggActive == nil {
+	if !l.ready.Load() || l.objs.AggActive == nil {
 		return nil, errors.New("pg_query: DrainAgg called before Start")
 	}
 	old := l.aggActive
@@ -81,6 +81,9 @@ func drainRows(iterate func(yield func(PgQueryAggKeyT, PgQueryAggValT)) error, d
 
 // OpenSessions returns the backends' open intervals (for in-flight credit).
 func (l *Loader) OpenSessions() ([]pgtrace.Session, error) {
+	if !l.ready.Load() {
+		return nil, errNotStarted
+	}
 	var (
 		tid uint32
 		s   PgQueryPgSessionT
@@ -100,6 +103,14 @@ func (l *Loader) OpenSessions() ([]pgtrace.Session, error) {
 // ClearSessions deletes every session (after DetachAll, so stale intervals
 // never close with a huge wall time on re-attach).
 func (l *Loader) ClearSessions() error {
+	if !l.ready.Load() {
+		return errNotStarted
+	}
+	for _, m := range []*ebpf.Map{l.objs.InParallel, l.objs.UnsafeText} {
+		if err := clearMap32(m); err != nil {
+			return err
+		}
+	}
 	var tid uint32
 	var keys []uint32
 	it := l.objs.PgSession.Iterate()
@@ -115,8 +126,31 @@ func (l *Loader) ClearSessions() error {
 	return it.Err()
 }
 
+// clearMap32 deletes every entry of a map keyed by uint32 (value ignored).
+func clearMap32(m *ebpf.Map) error {
+	var keys []uint32
+	var k uint32
+	val := make([]byte, m.ValueSize())
+	it := m.Iterate()
+	for it.Next(&k, val) {
+		keys = append(keys, k)
+	}
+	if err := it.Err(); err != nil {
+		return err
+	}
+	for i := range keys {
+		if err := m.Delete(&keys[i]); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // QueryIDs returns hash → PostgreSQL queryid (enrichment).
 func (l *Loader) QueryIDs() (map[uint64]int64, error) {
+	if !l.ready.Load() {
+		return nil, errNotStarted
+	}
 	var h, id uint64
 	out := map[uint64]int64{}
 	it := l.objs.Qid.Iterate()
@@ -128,6 +162,9 @@ func (l *Loader) QueryIDs() (map[uint64]int64, error) {
 
 // ForgetText makes the kernel resend the text of hash.
 func (l *Loader) ForgetText(hash uint64) {
+	if !l.ready.Load() {
+		return
+	}
 	if err := l.objs.TextSeen.Delete(&hash); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		slog.Debug("pg_query: text_seen delete", "err", err)
 	}
@@ -135,6 +172,9 @@ func (l *Loader) ForgetText(hash uint64) {
 
 // MarkUnsafe sends every later interval of hash through the exact path.
 func (l *Loader) MarkUnsafe(hash uint64) {
+	if !l.ready.Load() {
+		return
+	}
 	if err := l.objs.UnsafeHash.Put(&hash, uint8(1)); err != nil {
 		slog.Warn("pg_query: unsafe_hash full; hash keeps aggregating", "hash", hash, "err", err)
 	}
@@ -143,7 +183,7 @@ func (l *Loader) MarkUnsafe(hash uint64) {
 func (l *Loader) counter(idx uint32) uint64 {
 	var perCPU []uint64
 	var total uint64
-	if l.objs.Counters != nil && l.objs.Counters.Lookup(idx, &perCPU) == nil {
+	if l.ready.Load() && l.objs.Counters != nil && l.objs.Counters.Lookup(idx, &perCPU) == nil {
 		for _, v := range perCPU {
 			total += v
 		}

@@ -32,6 +32,9 @@ type Loader struct {
 	textRd      *ringbuf.Reader
 	cmdRd       *ringbuf.Reader
 	slowRd      *ringbuf.Reader
+	attached    map[pgtrace.BinaryKey]pgtrace.Attached
+	exitLink    link.Link
+	ready       atomic.Bool // objects loaded; false before Start, after a failed Start and after Stop
 	aggActive   uint32
 	literalSkip atomic.Bool
 	acct        pgtrace.Accounting
@@ -45,12 +48,14 @@ type Loader struct {
 
 var _ pgtrace.Tracer = (*Loader)(nil)
 
+var errNotStarted = errors.New("pg_query: not started")
+
 // NewLoader: slowNs is the slow-interval threshold (0 → 100 ms).
 func NewLoader(slowNs uint64) *Loader {
 	if slowNs == 0 {
 		slowNs = 100_000_000
 	}
-	return &Loader{slowNs: slowNs, links: map[pgtrace.BinaryKey][]link.Link{},
+	return &Loader{slowNs: slowNs, links: map[pgtrace.BinaryKey][]link.Link{}, attached: map[pgtrace.BinaryKey]pgtrace.Attached{},
 		texts: make(chan pgtrace.TextEvent, 4096), cmds: make(chan pgtrace.CmdEvent, 8192), slows: make(chan pgtrace.SlowEvent, 256)}
 }
 
@@ -101,8 +106,17 @@ func (l *Loader) Start(ctx context.Context) error {
 		}
 		*r.dst = rd
 	}
+	// One exit hook per loader: drops a dead task's session so a reused tid
+	// never closes a stale interval.
+	lk, err := link.Tracepoint("sched", "sched_process_exit", l.objs.TpProcessExit, nil)
+	if err != nil {
+		l.Stop()
+		return fmt.Errorf("pg_query: attaching sched_process_exit: %w", err)
+	}
+	l.exitLink = lk
 	ioac, delays := kfeat.TaskFields()
 	l.acct = pgtrace.Accounting{DiskBytes: ioac, BlkioDelay: delays}
+	l.ready.Store(true)
 	l.consume(ctx)
 	slog.Info("pg_query: loaded", "literal_skip", skip, "disk_bytes", ioac, "blkio_delay", delays)
 	return nil
@@ -131,6 +145,9 @@ func loadWithFallback(load, disable func() error) (bool, error) {
 
 // SetClusters replaces the clusters map: postmaster tgid → BackendState values.
 func (l *Loader) SetClusters(m map[uint32]pgtrace.ClusterConst) error {
+	if !l.ready.Load() {
+		return errNotStarted
+	}
 	var k uint32
 	var v PgQueryClusterCfgT
 	var stale []uint32
@@ -157,20 +174,24 @@ func (l *Loader) SetClusters(m map[uint32]pgtrace.ClusterConst) error {
 	return nil
 }
 
-// Attach attaches the probes to one binary (idempotent per key). Required
+// Attach attaches the probes to one binary. Repeat calls return the stored
+// result, attaching only a hook (SyncRep, QueryID) newly requested. Required
 // hooks failing detaches everything for that binary; optional ones degrade.
 func (l *Loader) Attach(b pgtrace.Binary) (pgtrace.Attached, error) {
+	if !l.ready.Load() {
+		return pgtrace.Attached{}, errNotStarted
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var got pgtrace.Attached
-	if _, ok := l.links[b.Key]; ok {
+	got, existing := l.attached[b.Key]
+	if existing && !((b.SyncRep && !got.SyncRep && b.Hooks.SyncRep != "") || (b.QueryID && !got.QueryID && b.Hooks.QueryID != "")) {
 		return got, nil
 	}
 	exe, err := link.OpenExecutable(b.Path)
 	if err != nil {
 		return got, fmt.Errorf("pg_query: opening %s: %w", b.Path, err)
 	}
-	var ls []link.Link
+	ls := l.links[b.Key]
 	closeAll := func() {
 		for _, lk := range ls {
 			lk.Close()
@@ -207,20 +228,22 @@ func (l *Loader) Attach(b pgtrace.Binary) (pgtrace.Attached, error) {
 		}
 		return true
 	}
-	if err := probe(b.Hooks.Activity, l.objs.UprobeReportActivity, false); err != nil {
-		closeAll()
-		return got, fmt.Errorf("pg_query: %s: %w", b.Path, err)
+	if !existing {
+		if err := probe(b.Hooks.Activity, l.objs.UprobeReportActivity, false); err != nil {
+			closeAll()
+			return got, fmt.Errorf("pg_query: %s: %w", b.Path, err)
+		}
+		if err := probe(b.Hooks.PortalRun, l.objs.UprobePortalRun, false); err != nil {
+			closeAll()
+			return got, fmt.Errorf("pg_query: %s: %w", b.Path, err)
+		}
+		got.WAL = pair(b.Hooks.XLogFlush, l.objs.UprobeXlogFlush, l.objs.UretprobeXlogFlush)
+		got.Parallel = pair(b.Hooks.Parallel, l.objs.UprobeParallelMain, l.objs.UretprobeParallelMain)
 	}
-	if err := probe(b.Hooks.PortalRun, l.objs.UprobePortalRun, false); err != nil {
-		closeAll()
-		return got, fmt.Errorf("pg_query: %s: %w", b.Path, err)
-	}
-	got.WAL = pair(b.Hooks.XLogFlush, l.objs.UprobeXlogFlush, l.objs.UretprobeXlogFlush)
-	got.Parallel = pair(b.Hooks.Parallel, l.objs.UprobeParallelMain, l.objs.UretprobeParallelMain)
-	if b.SyncRep {
+	if b.SyncRep && !got.SyncRep {
 		got.SyncRep = pair(b.Hooks.SyncRep, l.objs.UprobeSyncRep, l.objs.UretprobeSyncRep)
 	}
-	if b.QueryID && b.Hooks.QueryID != "" {
+	if b.QueryID && !got.QueryID && b.Hooks.QueryID != "" {
 		if err := probe(b.Hooks.QueryID, l.objs.UprobeQueryId, false); err != nil {
 			slog.Warn("pg_query: queryid hook unavailable", "path", b.Path, "err", err)
 		} else {
@@ -228,6 +251,7 @@ func (l *Loader) Attach(b pgtrace.Binary) (pgtrace.Attached, error) {
 		}
 	}
 	l.links[b.Key] = ls
+	l.attached[b.Key] = got
 	return got, nil
 }
 
@@ -239,6 +263,7 @@ func (l *Loader) Detach(key pgtrace.BinaryKey) {
 		lk.Close()
 	}
 	delete(l.links, key)
+	delete(l.attached, key)
 }
 
 // DetachAll removes every probe (circuit breaker, Stop).
@@ -250,12 +275,18 @@ func (l *Loader) DetachAll() {
 			lk.Close()
 		}
 		delete(l.links, k)
+		delete(l.attached, k)
 	}
 }
 
 // Stop detaches and releases everything.
 func (l *Loader) Stop() {
+	l.ready.Store(false)
 	l.DetachAll()
+	if l.exitLink != nil {
+		l.exitLink.Close()
+		l.exitLink = nil
+	}
 	for _, rd := range []**ringbuf.Reader{&l.textRd, &l.cmdRd, &l.slowRd} {
 		if *rd != nil {
 			(*rd).Close()
