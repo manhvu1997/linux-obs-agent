@@ -64,6 +64,10 @@ var (
 		"Kernel text hashes found inconsistent: a verification sample or resend whose digest differed from the cached one, or a first-sight text whose kernel hash differed from the Go reference; the hash is switched to exact per-event processing.", nil, nil)
 )
 
+// myDigests are MySQL's per-digest descriptors (no WAL wait).
+var myDigests = digestDescs{cpu: myDigestCPUDesc, calls: myDigestCallsDesc, disk: myDigestDiskReadDesc,
+	out: myDigestOutDesc, runq: myDigestRunqDesc, ioWait: myDigestIOWaitDesc, info: myDigestInfoDesc}
+
 // MySQLHealth are the tracer's health counters. A nil func reports 0.
 type MySQLHealth struct {
 	Dropped        func() uint64 // commands lost (obs_agent_mysql_events_dropped_total)
@@ -135,20 +139,44 @@ func (c *MySQLCollector) Collect(ch chan<- prometheus.Metric) {
 	if s.QueryCPUCoveragePercent != nil {
 		emit(ch, myQueryCoverageDesc, prometheus.GaugeValue, *s.QueryCPUCoveragePercent/100)
 	}
-	var exported []querystats.ExportedDigest
-	switch c.mode {
+	exported := emitDigests(ch, myDigests, s, c.mode, c.minimalTopN, ioWaitOK, false)
+	emit(ch, myCoverageDesc, prometheus.GaugeValue, coverage(c.mode, exported, s.QueryCPUMsTotal))
+	h := c.health
+	emit(ch, myDroppedDesc, prometheus.CounterValue, h.read(h.Dropped))
+	emit(ch, myTextDroppedDesc, prometheus.CounterValue, h.read(h.TextDropped))
+	emit(ch, myAggOverflowDesc, prometheus.CounterValue, h.read(h.AggOverflow))
+	emit(ch, myHashMismatchDesc, prometheus.CounterValue, h.read(h.HashMismatches))
+}
+
+// digestDescs are one engine's per-digest descriptors; a nil descriptor is
+// not exported.
+type digestDescs struct {
+	cpu, calls, disk, out, runq, ioWait, walWait, info *prometheus.Desc
+}
+
+// emitDigests emits the per-digest series of mode (full | minimal | off) and
+// returns the exported digests. lv are leading label values (PostgreSQL:
+// cluster); digest_id (and digest_text for info) follow them.
+func emitDigests(ch chan<- prometheus.Metric, d digestDescs, s *querystats.Snapshot, mode string, minimalTopN int,
+	ioWaitOK, walWaitOK bool, lv ...string) []querystats.ExportedDigest {
+	sec := func(ns uint64) float64 { return float64(ns) / 1e9 }
+	l := func(id string, more ...string) []string {
+		return append(append(append([]string{}, lv...), id), more...)
+	}
+	switch mode {
 	case config.DigestsOff:
+		return nil
 	case config.DigestsMinimal:
-		exported = unionTop(s.Exported, c.minimalTopN)
+		exported := unionTop(s.Exported, minimalTopN)
 		var cpu, calls, disk, allCPU, allCalls, allDisk uint64
-		for _, d := range exported {
-			emit(ch, myDigestCPUDesc, prometheus.CounterValue, sec(d.Counters.CPUNs), d.ID)
-			emit(ch, myDigestCallsDesc, prometheus.CounterValue, float64(d.Counters.Calls), d.ID)
-			emit(ch, myDigestDiskReadDesc, prometheus.CounterValue, float64(d.Counters.DiskReadBytes), d.ID)
-			emit(ch, myDigestInfoDesc, prometheus.GaugeValue, 1, d.ID, SanitizeLabel(d.Text, digestTextMaxBytes))
-			cpu += d.Counters.CPUNs
-			calls += d.Counters.Calls
-			disk += d.Counters.DiskReadBytes
+		for _, x := range exported {
+			emit(ch, d.cpu, prometheus.CounterValue, sec(x.Counters.CPUNs), l(x.ID)...)
+			emit(ch, d.calls, prometheus.CounterValue, float64(x.Counters.Calls), l(x.ID)...)
+			emit(ch, d.disk, prometheus.CounterValue, float64(x.Counters.DiskReadBytes), l(x.ID)...)
+			emit(ch, d.info, prometheus.GaugeValue, 1, l(x.ID, SanitizeLabel(x.Text, digestTextMaxBytes))...)
+			cpu += x.Counters.CPUNs
+			calls += x.Counters.Calls
+			disk += x.Counters.DiskReadBytes
 		}
 		for _, q := range s.Commands {
 			allCPU += q.CPUNs
@@ -157,29 +185,28 @@ func (c *MySQLCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		// "other" = everything not exported. It can drop when a digest
 		// joins the exported set: a counter reset that rate() tolerates.
-		emit(ch, myDigestCPUDesc, prometheus.CounterValue, sec(subFloor(allCPU, cpu)), "other")
-		emit(ch, myDigestCallsDesc, prometheus.CounterValue, float64(subFloor(allCalls, calls)), "other")
-		emit(ch, myDigestDiskReadDesc, prometheus.CounterValue, float64(subFloor(allDisk, disk)), "other")
-	default: // config.DigestsFull
-		exported = s.Exported
-		for _, d := range exported {
-			emit(ch, myDigestCPUDesc, prometheus.CounterValue, sec(d.Counters.CPUNs), d.ID)
-			emit(ch, myDigestCallsDesc, prometheus.CounterValue, float64(d.Counters.Calls), d.ID)
-			emit(ch, myDigestOutDesc, prometheus.CounterValue, float64(d.Counters.BytesOut), d.ID)
-			emit(ch, myDigestRunqDesc, prometheus.CounterValue, sec(d.Counters.RunqNs), d.ID)
-			emit(ch, myDigestDiskReadDesc, prometheus.CounterValue, float64(d.Counters.DiskReadBytes), d.ID)
-			if ioWaitOK {
-				emit(ch, myDigestIOWaitDesc, prometheus.CounterValue, sec(d.Counters.IOWaitNs), d.ID)
-			}
-			emit(ch, myDigestInfoDesc, prometheus.GaugeValue, 1, d.ID, SanitizeLabel(d.Text, digestTextMaxBytes))
-		}
+		emit(ch, d.cpu, prometheus.CounterValue, sec(subFloor(allCPU, cpu)), l("other")...)
+		emit(ch, d.calls, prometheus.CounterValue, float64(subFloor(allCalls, calls)), l("other")...)
+		emit(ch, d.disk, prometheus.CounterValue, float64(subFloor(allDisk, disk)), l("other")...)
+		return exported
 	}
-	emit(ch, myCoverageDesc, prometheus.GaugeValue, coverage(c.mode, exported, s.QueryCPUMsTotal))
-	h := c.health
-	emit(ch, myDroppedDesc, prometheus.CounterValue, h.read(h.Dropped))
-	emit(ch, myTextDroppedDesc, prometheus.CounterValue, h.read(h.TextDropped))
-	emit(ch, myAggOverflowDesc, prometheus.CounterValue, h.read(h.AggOverflow))
-	emit(ch, myHashMismatchDesc, prometheus.CounterValue, h.read(h.HashMismatches))
+	for _, x := range s.Exported { // config.DigestsFull
+		emit(ch, d.cpu, prometheus.CounterValue, sec(x.Counters.CPUNs), l(x.ID)...)
+		emit(ch, d.calls, prometheus.CounterValue, float64(x.Counters.Calls), l(x.ID)...)
+		if d.out != nil {
+			emit(ch, d.out, prometheus.CounterValue, float64(x.Counters.BytesOut), l(x.ID)...)
+		}
+		emit(ch, d.runq, prometheus.CounterValue, sec(x.Counters.RunqNs), l(x.ID)...)
+		emit(ch, d.disk, prometheus.CounterValue, float64(x.Counters.DiskReadBytes), l(x.ID)...)
+		if ioWaitOK {
+			emit(ch, d.ioWait, prometheus.CounterValue, sec(x.Counters.IOWaitNs), l(x.ID)...)
+		}
+		if walWaitOK && d.walWait != nil {
+			emit(ch, d.walWait, prometheus.CounterValue, sec(x.Counters.RedoWaitNs), l(x.ID)...)
+		}
+		emit(ch, d.info, prometheus.GaugeValue, 1, l(x.ID, SanitizeLabel(x.Text, digestTextMaxBytes))...)
+	}
+	return s.Exported
 }
 
 // unionTop: the top n by lifetime CPU plus the top n by lifetime disk read,

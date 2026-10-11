@@ -259,6 +259,14 @@ func main() {
 				HashMismatches: mysqlAnalyzer.HashMismatches,
 			}, cfg.MySQL.PrometheusDigests, cfg.MySQL.PrometheusMinimalTopN))
 		}
+		if pgAnalyzer != nil {
+			promExp.RegisterCollectors(promcollect.NewPostgresCollector(pgAnalyzer.Views, promcollect.PostgresHealth{
+				Dropped: pgAnalyzer.Dropped, TextDropped: pgAnalyzer.TextDropped, AggOverflow: pgAnalyzer.AggOverflow,
+				HashMismatches: pgAnalyzer.HashMismatches, ShedTotal: pgAnalyzer.ShedTotal, CreditDropped: pgAnalyzer.CreditDropped,
+				Active:       func() bool { return pgAnalyzer.State() == postgres.StateActive },
+				OverCapacity: pgAnalyzer.OverCapacity,
+			}, cfg.Postgres.PrometheusDigests, cfg.Postgres.PrometheusMinimalTopN, cfg.Process.IncludeIO))
+		}
 		go func() {
 			if err := promExp.Run(ctx); err != nil {
 				slog.Error("prometheus exporter error", "err", err)
