@@ -95,12 +95,22 @@ type Enricher struct {
 	mu       sync.Mutex
 	clusters map[int]*clusterState
 	closed   bool
+	timeout  time.Duration // deadline of one Poll (connect + statements)
 }
 
 // NewEnricher: after maxFails (3) consecutive errors a cluster's connection
 // is closed and retried after retry (5 min).
 func NewEnricher(dial Dialer) *Enricher {
-	return &Enricher{dial: dial, retry: 5 * time.Minute, maxFails: 3, clusters: map[int]*clusterState{}}
+	return &Enricher{dial: dial, retry: 5 * time.Minute, maxFails: 3, timeout: 15 * time.Second, clusters: map[int]*clusterState{}}
+}
+
+// WithTimeout sets the deadline of one Poll (connect plus statements); a
+// stalled network read can never hold a cluster's state longer.
+func (e *Enricher) WithTimeout(d time.Duration) *Enricher {
+	if d > 0 {
+		e.timeout = d
+	}
+	return e
 }
 
 // Poll refreshes one cluster: connect (and read settings) when needed, then
@@ -119,6 +129,8 @@ func (e *Enricher) Poll(ctx context.Context, port int, ids []int64, now time.Tim
 	e.mu.Unlock()
 	st.poll.Lock()
 	defer st.poll.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, e.timeout)
+	defer cancel()
 	if st.dead || now.Before(st.retryAt) {
 		return
 	}
@@ -204,14 +216,15 @@ func (e *Enricher) Snapshot(port int) View {
 	return v
 }
 
-// Forget closes and drops a cluster that is gone. It waits for a Poll of
-// that cluster still running, and a late Poll never reconnects it.
+// Forget drops a cluster that is gone and closes its connection once a Poll
+// of it still running has returned (bounded by the Poll timeout). It does not
+// block, and a late Poll never reconnects the forgotten state.
 func (e *Enricher) Forget(port int) {
 	e.mu.Lock()
 	st := e.clusters[port]
 	delete(e.clusters, port)
 	e.mu.Unlock()
-	e.kill(st)
+	go e.kill(st) // never wait for a Poll stalled on the network: the caller may be the main loop
 }
 
 func (e *Enricher) kill(st *clusterState) {

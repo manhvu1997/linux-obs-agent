@@ -25,6 +25,7 @@ func PgxDialer(dsnTemplate, password string, statementTimeout time.Duration) Dia
 		if password != "" {
 			cfg.Password = password
 		}
+		cfg.ConnectTimeout = 5 * time.Second
 		cfg.RuntimeParams["application_name"] = "obs-agent"
 		cfg.RuntimeParams["statement_timeout"] = strconv.FormatInt(statementTimeout.Milliseconds(), 10)
 		c, err := pgx.ConnectConfig(ctx, cfg)

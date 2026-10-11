@@ -40,6 +40,7 @@ const (
 	reasonAsyncIO        = "io_method_async"
 	reasonNoXLogFlush    = "xlogflush_unavailable"
 	reasonNotAttached    = "not_attached"
+	reasonNoTracer       = "tracer_unavailable"
 	StateActive          = "active"
 	StateShed            = "shed"
 )
@@ -118,6 +119,38 @@ func (c *cluster) setPost(pm Postmaster) {
 	c.pmMu.Unlock()
 }
 
+// tr is the tracer, or a no-op one after a failed start.
+func (a *Analyzer) tr() pgtrace.Tracer {
+	if a.noTracer.Load() {
+		return noTracer{}
+	}
+	return a.d.Tracer
+}
+
+// noTracer stands in for a tracer that failed to start.
+type noTracer struct{}
+
+func (noTracer) Start(context.Context) error                       { return nil }
+func (noTracer) Stop()                                             {}
+func (noTracer) SetClusters(map[uint32]pgtrace.ClusterConst) error { return nil }
+func (noTracer) Attach(pgtrace.Binary) (pgtrace.Attached, error)   { return pgtrace.Attached{}, nil }
+func (noTracer) Detach(pgtrace.BinaryKey)                          {}
+func (noTracer) DetachAll()                                        {}
+func (noTracer) ClearSessions() error                              { return nil }
+func (noTracer) DrainAgg() ([]pgtrace.AggEntry, error)             { return nil, nil }
+func (noTracer) OpenSessions() ([]pgtrace.Session, error)          { return nil, nil }
+func (noTracer) QueryIDs() (map[uint64]int64, error)               { return nil, nil }
+func (noTracer) ForgetText(uint64)                                 {}
+func (noTracer) MarkUnsafe(uint64)                                 {}
+func (noTracer) Texts() <-chan pgtrace.TextEvent                   { return nil }
+func (noTracer) Cmds() <-chan pgtrace.CmdEvent                     { return nil }
+func (noTracer) Slows() <-chan pgtrace.SlowEvent                   { return nil }
+func (noTracer) Dropped() uint64                                   { return 0 }
+func (noTracer) TextDropped() uint64                               { return 0 }
+func (noTracer) AggOverflow() uint64                               { return 0 }
+func (noTracer) LiteralSkip() bool                                 { return true }
+func (noTracer) Accounting() pgtrace.Accounting                    { return pgtrace.Accounting{} }
+
 // ClusterView is one cluster's latest state for the exporters.
 type ClusterView struct {
 	Name          string
@@ -155,7 +188,9 @@ type Analyzer struct {
 	views         atomic.Pointer[[]ClusterView]
 	state         atomic.Value // string
 	overCap       atomic.Bool
-	enriching     atomic.Bool // single-flight guard of the SQL poll
+	noTracer      atomic.Bool   // the tracer failed to start: report without digests
+	cmdCalls      atomic.Uint64 // calls of fallback command events since the last poll (breaker input)
+	enriching     atomic.Bool   // single-flight guard of the SQL poll
 	wg            sync.WaitGroup
 	shedTotal     atomic.Uint64
 	creditDropped atomic.Uint64
@@ -221,10 +256,14 @@ func monoNow() uint64 {
 // Start loads the tracer, discovers clusters and polls until ctx is done.
 func (a *Analyzer) Start(ctx context.Context) error {
 	if err := a.d.Tracer.Start(ctx); err != nil {
+		// Spec §11: keep discovering clusters and reporting backend types
+		// without the tracer; the report says why there are no digests.
+		slog.Warn("postgres: tracer unavailable; reporting backend types only", "err", err)
 		a.state.Store("unavailable: " + err.Error())
-		return err
+		a.noTracer.Store(true)
+	} else {
+		defer a.d.Tracer.Stop()
 	}
-	defer a.d.Tracer.Stop()
 	defer func() { // join the goroutines first: none may use the tracer or enricher afterwards
 		a.wg.Wait()
 		if a.d.Enricher != nil {
@@ -240,11 +279,16 @@ func (a *Analyzer) Start(ctx context.Context) error {
 	}
 	a.primeNode()
 	a.discover(time.Now())
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
-		a.consume(ctx)
-	}()
+	if a.noTracer.Load() {
+		a.poll(time.Now()) // publish the "unavailable" report without waiting for a tick
+	}
+	if !a.noTracer.Load() {
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			a.consume(ctx)
+		}()
+	}
 
 	poll := time.NewTicker(a.opts.PollInterval)
 	disc := time.NewTicker(a.opts.DiscoverInterval)
@@ -293,11 +337,11 @@ func (a *Analyzer) consume(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case ev := <-a.d.Tracer.Texts():
+		case ev := <-a.tr().Texts():
 			a.learnText(ev)
-		case ev := <-a.d.Tracer.Cmds():
+		case ev := <-a.tr().Cmds():
 			a.recordCmd(ev, time.Now())
-		case ev := <-a.d.Tracer.Slows():
+		case ev := <-a.tr().Slows():
 			a.recordSlow(ev)
 		}
 	}
@@ -354,7 +398,7 @@ func (a *Analyzer) learnText(ev pgtrace.TextEvent) {
 		return
 	}
 	want := pghash.ExactHash
-	if a.d.Tracer.LiteralSkip() {
+	if a.tr().LiteralSkip() {
 		want = pghash.KernelHash
 	}
 	if got := want([]byte(ev.Text)); got != ev.Hash {
@@ -425,6 +469,7 @@ func (a *Analyzer) recordCmd(ev pgtrace.CmdEvent, now time.Time) {
 	if c == nil {
 		return
 	}
+	a.cmdCalls.Add(ev.Calls)
 	p := procCounters{CPU: ev.CPUNs, Runq: ev.RunqNs, Read: ev.DiskReadBytes, Write: ev.DiskWriteBytes, Blkio: ev.IOWaitNs}
 	a.cred.SettleCmd(aggKey{ev.Postmaster, ev.Kind, ev.Hash}, ev.PID, &p)
 	s := textcache.Sums{PID: ev.Postmaster, Kind: ev.Kind, Calls: ev.Calls, WallNs: ev.WallNs, WallMaxNs: ev.WallNs, CPUNs: p.CPU,
@@ -601,7 +646,7 @@ func (a *Analyzer) discoverLocked(now time.Time) {
 		used[c.key] = true
 		syncReps[c.key] = syncReps[c.key] || a.wantSyncRep(c.post().Port)
 	}
-	if err := a.d.Tracer.SetClusters(consts); err != nil {
+	if err := a.tr().SetClusters(consts); err != nil {
 		slog.Warn("postgres: clusters map", "err", err)
 	}
 	if len(consts) > 0 && a.overCap.Load() {
@@ -613,7 +658,7 @@ func (a *Analyzer) discoverLocked(now time.Time) {
 	for key, b := range a.binaries {
 		if !used[key] || b.err != nil {
 			if b.attached {
-				a.d.Tracer.Detach(key)
+				a.tr().Detach(key)
 				b.attached = false
 			}
 			continue
@@ -622,11 +667,16 @@ func (a *Analyzer) discoverLocked(now time.Time) {
 		if b.attached && b.syncRep == syncRep && b.queryID == queryID {
 			continue
 		}
-		if b.attached {
-			a.d.Tracer.Detach(key) // optional hooks changed: re-attach
-		}
+		if b.attached && ((b.syncRep && !syncRep) || (b.queryID && !queryID)) {
+			// An optional hook must go: only a full re-attach removes it, and
+			// the sessions opened under the old hooks are meaningless after it.
+			a.tr().Detach(key)
+			if err := a.tr().ClearSessions(); err != nil {
+				slog.Warn("postgres: clearing sessions", "err", err)
+			}
+		} // adding a hook needs no Detach: Attach attaches only what is new, without a gap
 		h := b.hooks
-		res, err := a.d.Tracer.Attach(pgtrace.Binary{Key: key, Path: b.path, SyncRep: syncRep, QueryID: queryID,
+		res, err := a.tr().Attach(pgtrace.Binary{Key: key, Path: b.path, SyncRep: syncRep, QueryID: queryID,
 			Hooks: pgtrace.Hooks{Activity: h.Activity, PortalRun: h.PortalRun, QueryID: h.QueryID,
 				XLogFlush: h.XLogFlush, SyncRep: h.SyncRep, Parallel: h.Parallel}})
 		if err != nil {
@@ -741,7 +791,11 @@ func (a *Analyzer) async(c *cluster) bool {
 }
 
 func (a *Analyzer) setReasons(c *cluster, res pgtrace.Attached, h *querystats.HostDelta) {
-	acct := a.d.Tracer.Accounting()
+	if a.noTracer.Load() {
+		h.QueryDiskReason, h.IOWaitReason, h.RedoWaitReason, h.ReplicaWaitReason = reasonNoTracer, reasonNoTracer, reasonNoTracer, reasonNoTracer
+		return
+	}
+	acct := a.tr().Accounting()
 	async := a.async(c)
 	switch {
 	case !acct.DiskBytes:
@@ -785,11 +839,11 @@ func (a *Analyzer) poll(now time.Time) {
 		a.mu.Unlock()
 		a.cred.Reset()
 	}
-	entries, err := a.d.Tracer.DrainAgg()
+	entries, err := a.tr().DrainAgg()
 	if err != nil {
 		slog.Warn("postgres: draining kernel aggregation", "err", err)
 	}
-	sessions, err := a.d.Tracer.OpenSessions()
+	sessions, err := a.tr().OpenSessions()
 	var credits []credit
 	if err != nil {
 		// An unreadable session map is not "no sessions": crediting nothing
@@ -802,11 +856,12 @@ func (a *Analyzer) poll(now time.Time) {
 	}
 	a.creditDropped.Store(a.cred.Dropped())
 	byPM, calls := a.resolve(entries, credits)
+	calls += a.cmdCalls.Swap(0) // intervals the kernel map could not aggregate count too
 	if a.brk.observe(float64(calls)/a.opts.PollInterval.Seconds(), now) == actShed {
 		slog.Warn("postgres: statement rate above postgres.max_statements_per_sec for two polls; probes detached",
 			"rate_per_sec", float64(calls)/a.opts.PollInterval.Seconds(), "cooldown", a.opts.ShedCooldown)
-		a.d.Tracer.DetachAll()
-		if err := a.d.Tracer.ClearSessions(); err != nil {
+		a.tr().DetachAll()
+		if err := a.tr().ClearSessions(); err != nil {
 			slog.Warn("postgres: clearing sessions", "err", err)
 		}
 		a.mu.Lock()
@@ -854,7 +909,7 @@ func (a *Analyzer) digestEnrichment(c *cluster) (map[string]enrichment, pgstat.V
 		return nil, pgstat.View{Status: pgstat.StatusNotConfigured}
 	}
 	v := a.d.Enricher.Snapshot(c.post().Port)
-	qids, err := a.d.Tracer.QueryIDs()
+	qids, err := a.tr().QueryIDs()
 	if err != nil || len(v.Deltas) == 0 {
 		return nil, v
 	}
@@ -970,7 +1025,7 @@ func (a *Analyzer) clusterJSON(v ClusterView) model.PostgresCluster {
 
 func (a *Analyzer) report(views []ClusterView, now time.Time) *model.PostgresAnalysis {
 	r := &model.PostgresAnalysis{Type: "postgres_analysis", Timestamp: now, SlowThresholdMs: a.opts.SlowQueryThresholdMs,
-		WindowSeconds: int(a.opts.DigestWindow / time.Second), Clusters: []model.PostgresCluster{}, DroppedEvents: a.d.Tracer.Dropped()}
+		WindowSeconds: int(a.opts.DigestWindow / time.Second), Clusters: []model.PostgresCluster{}, DroppedEvents: a.tr().Dropped()}
 	enrichment := pgstat.StatusNotConfigured
 	for i, v := range views {
 		pc := a.clusterJSON(v)
@@ -1014,8 +1069,39 @@ func (a *Analyzer) Views() []ClusterView {
 	return out
 }
 
-// Assess builds overload_cause over every cluster for one diagnose call.
+// Fresh reports whether the cached digests can still be judged against fresh
+// node data: tracing is active and the latest poll is at most 2 poll intervals
+// old. Otherwise reason says why not ("tracing shed", "tracer unavailable",
+// "no data yet", "stale").
+func (a *Analyzer) Fresh(now time.Time) (ok bool, reason string) {
+	switch st := a.State(); {
+	case st == StateShed:
+		return false, "tracing shed"
+	case st != StateActive:
+		return false, "tracer unavailable"
+	}
+	l := a.latest.Load()
+	if l == nil {
+		return false, "no data yet"
+	}
+	max := 2 * a.opts.PollInterval
+	if max <= 0 {
+		max = 10 * time.Second
+	}
+	if now.Sub(l.Timestamp) > max {
+		return false, "stale"
+	}
+	return true, ""
+}
+
+// Assess builds overload_cause over every cluster for one diagnose call. While
+// tracing is shed, unavailable or the cache is stale it returns a no_data
+// verdict: frozen digests must not be combined with fresh node numbers.
 func (a *Analyzer) Assess(in overload.Inputs, th overload.Thresholds, now time.Time) *model.QueryOverload {
+	if ok, why := a.Fresh(now); !ok {
+		return &model.QueryOverload{Type: "query_overload", Timestamp: now, Verdict: model.OverloadNoData, Resource: "cpu",
+			Confidence: model.ConfidenceLow, Summary: "no PostgreSQL query data: " + why, Checks: []model.OverloadCheck{}}
+	}
 	var rs []*model.QueryOverload
 	for _, v := range a.Views() {
 		rs = append(rs, overload.AssessEngine(overload.PostgresEngine, v.Overload, in, th, a.opts.BackgroundDominantPercent, now))
@@ -1042,9 +1128,9 @@ func (a *Analyzer) ShedTotal() uint64      { return a.shedTotal.Load() }
 func (a *Analyzer) CreditDropped() uint64  { return a.creditDropped.Load() }
 func (a *Analyzer) HashMismatches() uint64 { return a.text.Mismatches() }
 func (a *Analyzer) OverCapacity() bool     { return a.overCap.Load() }
-func (a *Analyzer) Dropped() uint64        { return a.d.Tracer.Dropped() }
-func (a *Analyzer) TextDropped() uint64    { return a.d.Tracer.TextDropped() }
-func (a *Analyzer) AggOverflow() uint64    { return a.d.Tracer.AggOverflow() }
+func (a *Analyzer) Dropped() uint64        { return a.tr().Dropped() }
+func (a *Analyzer) TextDropped() uint64    { return a.tr().TextDropped() }
+func (a *Analyzer) AggOverflow() uint64    { return a.tr().AggOverflow() }
 
 // enrich runs one SQL poll for every cluster (ids: the reported digests'
 // queryids), then re-checks whether sync replication needs its hook.
@@ -1057,7 +1143,7 @@ func (a *Analyzer) forgetIfGone(pid uint32, port int) {
 }
 
 func (a *Analyzer) enrich(ctx context.Context, now time.Time) {
-	qids, _ := a.d.Tracer.QueryIDs()
+	qids, _ := a.tr().QueryIDs()
 	for _, v := range a.Views() {
 		c := a.cluster(v.PostmasterPID)
 		if c == nil || c.post().Port == 0 {

@@ -122,6 +122,9 @@ func pgStats(s model.QueryDigestStats) model.QueryDigestStats {
 }
 
 func toPGDigest(s model.QueryDigestStats) model.PGDigestStats {
+	if s.Command == CommandAutovacuum || s.Command == CommandReplication || s.Command == CommandParallel { // autovacuum, replication, parallel: never culprits or victims
+		s.CPURole, s.IORole, s.VictimOf = "", "", ""
+	}
 	return model.PGDigestStats{
 		DigestID: s.DigestID, Command: s.Command, DigestText: s.DigestText, SampleQuery: s.SampleQuery, Truncated: s.Truncated,
 		Calls: s.Calls, CallsPerSec: s.CallsPerSec, CPUCores: s.CPUCores, PercentOfNodeCPUUsed: s.PercentOfNodeCPUUsed,

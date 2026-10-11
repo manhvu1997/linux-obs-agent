@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/manhvu1997/linux-obs-agent/internal/model"
+	"github.com/manhvu1997/linux-obs-agent/internal/overload"
 	"github.com/manhvu1997/linux-obs-agent/internal/pgdrain"
 	"github.com/manhvu1997/linux-obs-agent/internal/postgres/pghash"
 	"github.com/manhvu1997/linux-obs-agent/internal/postgres/pgstat"
@@ -430,5 +433,112 @@ func TestSharedDataDirBasenameClustersStayDistinct(t *testing.T) {
 	}
 	if got := ClusterName(Postmaster{PID: 9, DataDir: "/d/x", Port: 5432}, 17); got != "17/x:5432" || containerOf("12:cpu:/docker/"+"0123456789abcdef0123") != "0123456789ab" {
 		t.Fatalf("fallback name %q", got)
+	}
+}
+
+// Item 2: a tracer that fails to start still yields a report with the cause.
+func TestTracerStartFailurePublishesUnavailableReport(t *testing.T) {
+	a, tr := testAnalyzer(t, hostProcs())
+	tr.startErr = errors.New("kernel too old")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = a.Start(ctx); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for a.Latest() == nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	r := a.Latest()
+	if r == nil {
+		t.Fatal("no report after a failed tracer start")
+	}
+	if got := r.Accounting["state"]; got != "unavailable: kernel too old" || len(r.Clusters) != 2 {
+		t.Fatalf("state %q clusters %d", got, len(r.Clusters))
+	}
+	if a.State() != "unavailable: kernel too old" || len(tr.attached) != 0 {
+		t.Fatalf("state %q attached %v", a.State(), tr.attached)
+	}
+	cancel()
+	<-done
+}
+
+// Item 4: shed or stale caches must not be judged against fresh node data.
+func TestAssessNoDataWhenShedOrStale(t *testing.T) {
+	a, tr := testAnalyzer(t, hostProcs())
+	a.discover(time.Unix(0, 0))
+	h := learn(a, "select * from big where x > 1")
+	tr.entries = [][]pgtrace.AggEntry{{{Postmaster: 100, Kind: pgtrace.KindClient, Hash: h, Calls: 1, WallNs: 5e9, CPUNs: 5e9}}}
+	a.poll(t0)
+	in := overload.Inputs{}
+	if ok, _ := a.Fresh(t0.Add(time.Second)); !ok {
+		t.Fatal("a fresh poll must be usable")
+	}
+	if oc := a.Assess(in, overload.Thresholds{}, t0.Add(time.Second)); oc.Verdict == model.OverloadNoData {
+		t.Fatalf("fresh data judged no_data: %+v", oc)
+	}
+	stale := t0.Add(11 * time.Second) // > 2 x PollInterval (5 s)
+	if oc := a.Assess(in, overload.Thresholds{}, stale); oc.Verdict != model.OverloadNoData || !strings.Contains(oc.Summary, "stale") {
+		t.Fatalf("stale: %+v", oc)
+	}
+	if r := a.WithOverload(in, overload.Thresholds{}, stale); r.OverloadCause.Verdict != model.OverloadNoData {
+		t.Fatalf("WithOverload stale: %+v", r.OverloadCause)
+	}
+	a.state.Store(StateShed)
+	if oc := a.Assess(in, overload.Thresholds{}, t0.Add(time.Second)); oc.Verdict != model.OverloadNoData || !strings.Contains(oc.Summary, "tracing shed") {
+		t.Fatalf("shed: %+v", oc)
+	}
+}
+
+// Item 9: fallback command events count towards the breaker.
+func TestBreakerCountsCmdEvents(t *testing.T) {
+	a, _ := testAnalyzer(t, hostProcs())
+	a.opts.MaxStatementsPerSec = 100
+	a.brk.max = 100
+	a.discover(time.Unix(0, 0))
+	h := learn(a, "select 1")
+	ev := pgtrace.CmdEvent{Postmaster: 100, PID: 7, Kind: pgtrace.KindClient, Hash: h, Calls: 10_000, WallNs: 1e9}
+	a.recordCmd(ev, t0)
+	a.poll(t0)
+	a.recordCmd(ev, t0)
+	a.poll(t0.Add(5 * time.Second))
+	if a.State() != StateShed {
+		t.Fatal("event-path statements must trip the breaker")
+	}
+}
+
+// Item 10: adding an optional hook is incremental; removing one re-attaches
+// and clears the sessions.
+func TestHookAddIsIncrementalRemovalClears(t *testing.T) {
+	a, tr := testAnalyzer(t, hostProcs())
+	a.opts.SyncRepWait = "false"
+	a.discover(time.Unix(0, 0))
+	attaches := tr.attaches
+	a.opts.SyncRepWait = "true"
+	a.discover(time.Unix(30, 0))
+	if tr.detaches != 0 || tr.cleared != 0 || tr.attaches != attaches+2 {
+		t.Fatalf("adding sync rep: detaches %d cleared %d attaches %d (was %d)", tr.detaches, tr.cleared, tr.attaches, attaches)
+	}
+	a.opts.SyncRepWait = "false"
+	a.discover(time.Unix(60, 0))
+	if tr.detaches != 2 || tr.cleared != 2 {
+		t.Fatalf("removing sync rep: detaches %d cleared %d", tr.detaches, tr.cleared)
+	}
+}
+
+// Item 7: autovacuum / replication digests never show a role.
+func TestBackgroundDigestsHaveNoRoles(t *testing.T) {
+	a, tr := testAnalyzer(t, hostProcs())
+	a.discover(time.Unix(0, 0))
+	h := learn(a, "autovacuum: VACUUM ANALYZE public.orders")
+	tr.entries = [][]pgtrace.AggEntry{{{Postmaster: 100, Kind: pgtrace.KindClient, Hash: h, Calls: 1, WallNs: 20e9, CPUNs: 20e9}}}
+	a.poll(t0)
+	if sn := cluster100(t, a).Snapshot.TopByCPU[0]; sn.CPURole != "culprit" {
+		t.Skipf("fixture no longer makes the digest a culprit in querystats: %+v", sn)
+	}
+	for _, c := range a.Latest().Clusters {
+		for _, d := range c.TopDigests {
+			if d.CPURole != "" || d.IORole != "" || d.VictimOf != "" {
+				t.Fatalf("background digest carries a role: %+v", d)
+			}
+		}
 	}
 }

@@ -25,6 +25,7 @@ type fakeTracer struct {
 	slows     chan pgtrace.SlowEvent
 	unsafe    []uint64
 	attaches  int
+	startErr  error
 	detaches  int
 	sessErr   error
 	qids      map[uint64]int64
@@ -35,7 +36,7 @@ func newFakeTracer() *fakeTracer {
 		cmds: make(chan pgtrace.CmdEvent, 8), slows: make(chan pgtrace.SlowEvent, 8)}
 }
 
-func (f *fakeTracer) Start(context.Context) error { return nil }
+func (f *fakeTracer) Start(context.Context) error { return f.startErr }
 func (f *fakeTracer) Stop()                       {}
 func (f *fakeTracer) SetClusters(m map[uint32]pgtrace.ClusterConst) error {
 	f.clusters = m

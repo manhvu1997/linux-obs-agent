@@ -508,6 +508,9 @@ func (p *PrometheusExporter) PostgresVerdict() string {
 	if p.postgresAnalyzer == nil {
 		return ""
 	}
+	if ok, _ := p.postgresAnalyzer.Fresh(time.Now()); !ok {
+		return "" // shed, unavailable or stale: no snapshot trigger
+	}
 	in := overload.Inputs{Metrics: p.coll.Latest()}
 	if d := iodiag.Classify(in.Metrics, nil, p.iodiagThresholds()); d != nil {
 		in.IOVerdict = d.Verdict

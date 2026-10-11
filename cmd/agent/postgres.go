@@ -16,7 +16,8 @@ func newPostgresAnalyzer(cfg *config.Config) *postgres.Analyzer {
 	pc := &cfg.Postgres
 	var enr *pgstat.Enricher
 	if pc.SQL.Enabled() {
-		enr = pgstat.NewEnricher(pgstat.PgxDialer(pc.SQL.DSN, pc.SQL.Password, pc.SQL.StatementTimeout))
+		enr = pgstat.NewEnricher(pgstat.PgxDialer(pc.SQL.DSN, pc.SQL.Password, pc.SQL.StatementTimeout)).
+			WithTimeout(5*time.Second + 2*pc.SQL.StatementTimeout)
 	}
 	return postgres.NewAnalyzer(postgres.OptionsFromConfig(pc, cfg.Process.IncludeIO), postgres.Deps{
 		Tracer:   pgquery.NewLoader(pc.SlowQueryThresholdMs * uint64(time.Millisecond)),

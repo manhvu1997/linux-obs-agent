@@ -142,3 +142,33 @@ func TestPollAfterForgetDoesNotReconnect(t *testing.T) {
 		t.Fatalf("dials %d", dials)
 	}
 }
+
+// A dialer that never returns on its own: Poll is bounded by the timeout, and
+// Forget never waits for a running Poll.
+func TestPollTimeoutAndForgetDoesNotBlock(t *testing.T) {
+	entered := make(chan struct{})
+	e := NewEnricher(func(ctx context.Context, _ int) (Conn, error) {
+		close(entered)
+		<-ctx.Done() // a stalled network read, released only by the deadline
+		return nil, ctx.Err()
+	}).WithTimeout(300 * time.Millisecond)
+	done := make(chan struct{})
+	go func() { e.Poll(context.Background(), 5432, nil, time.Unix(0, 0)); close(done) }()
+	<-entered
+	t0 := time.Now()
+	forgot := make(chan struct{})
+	go func() { e.Forget(5432); close(forgot) }()
+	select {
+	case <-forgot:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Forget blocked behind a stalled Poll")
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Poll was not bounded by its timeout")
+	}
+	if time.Since(t0) > 2*time.Second {
+		t.Fatal("deadline too late")
+	}
+}
