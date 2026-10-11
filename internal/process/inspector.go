@@ -80,6 +80,22 @@ type Inspector struct {
 	// table; nil until EnableFamilyDrain. Own lock: scan holds mu briefly.
 	drainMu  sync.Mutex
 	famDrain map[string]*famAcc
+
+	// onScan are called after every scan with all processes (read-only);
+	// registered with OnScan before Run.
+	onScan []func(all []model.ProcessStats, at time.Time)
+}
+
+// OnScan registers f to receive every scan's processes (PostgreSQL backend
+// types). f must not modify the slice and must return quickly. Call before Run.
+func (i *Inspector) OnScan(f func(all []model.ProcessStats, at time.Time)) {
+	i.onScan = append(i.onScan, f)
+}
+
+func (i *Inspector) notifyScan(all []model.ProcessStats, at time.Time) {
+	for _, f := range i.onScan {
+		f(all, at)
+	}
 }
 
 func NewInspector(cfg *config.ProcessConfig) *Inspector {
@@ -239,6 +255,7 @@ func (i *Inspector) scan() {
 	i.pidFamily = pidFamily
 	i.mu.Unlock()
 	i.observeFamilies(fams)
+	i.notifyScan(all, now)
 }
 
 func sortedProcs(all []model.ProcessStats, less func(a, b model.ProcessStats) bool) []model.ProcessStats {
