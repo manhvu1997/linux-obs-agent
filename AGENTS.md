@@ -28,6 +28,7 @@
 19. [Correlated I/O Diagnosis — connecting the chain](#19-correlated-io-diagnosis--connecting-the-chain)
 20. [Process Families, Network Flows & Query Digests](#20-process-families-network-flows--query-digests)
 21. [Review output](#21-review-output)
+23. [PostgreSQL Query Overload Attribution](#23-postgresql-query-overload-attribution)
 
 ---
 
@@ -150,11 +151,17 @@ linux-obs-agent/
 │   │   │   ├── mongo_query.bpf.c    ← eBPF C: syscall tracepoints on connect/write/read
 │   │   │   ├── gen.go
 │   │   │   └── loader.go            ← Go: track connections to port 27017, parse OP_MSG
-│   │   └── netflow/                 ← always-on TCP flow accounting
+│   │   ├── netflow/                 ← always-on TCP flow accounting
 │   │       ├── netflow.bpf.c        ← inet_sock_set_state, inet_csk_accept,
 │   │       │                          tcp_sendmsg, tcp_cleanup_rbuf
 │   │       ├── gen.go
 │   │       └── loader.go            ← implements netflow.Source
+│   │   ├── kfeat/                   ← shared kernel-feature probes (BTF struct fields)
+│   │   └── pg_query/                ← always-on PostgreSQL statement tracer (§23)
+│   │       ├── pg_query.bpf.c       ← uprobes on pgstat_report_activity, PortalRun, XLogFlush,
+│   │       │                          SyncRepWaitForLSN, ParallelQueryMain; per-cluster agg
+│   │       ├── gen.go
+│   │       └── loader.go            ← Go: attach per binary, DrainAgg, OpenSessions, breaker hooks
 │   │
 │   ├── trigger/
 │   │   └── engine.go                ← threshold evaluator → calls ebpf.Manager.Activate
@@ -198,6 +205,20 @@ linux-obs-agent/
 │   ├── promcollect/                 ← family + MySQL digest Prometheus collectors
 │   ├── mysql/cmdmap/cmdmap.go       ← MySQL command → class + digest
 │   │
+│   ├── postgres/                    ← PostgreSQL query attribution (§23)
+│   │   ├── discover.go              ← postmaster discovery from /proc, per-binary probe attach
+│   │   ├── analyzer.go              ← text events → digests, agg drain, report, breaker, drains
+│   │   ├── inflight.go              ← in-flight crediting of long statements from /proc
+│   │   ├── backendtype.go           ← process title → backend type; clustercpu.go: cluster CPU
+│   │   ├── report.go / options.go / breaker.go
+│   │   ├── pghash/                  ← Go reference of the kernel text hash
+│   │   ├── pgsym/                   ← version + hook symbols + BackendState per major
+│   │   │                              (testdata/*.syms, cmd/pgsymdump)
+│   │   ├── pgstat/                  ← optional pg_stat_statements enrichment (pgx)
+│   │   └── pgtrace/                 ← Tracer interface implemented by ebpf/pg_query
+│   ├── pgdrain/pgdrain.go           ← per-interval drain bundle of the PostgreSQL analyzer
+│   ├── textcache/                   ← kernel hash → digest cache shared by MySQL and PostgreSQL
+│   ├── overload/                    ← engine-neutral overload verdict (MySQL + PostgreSQL engines)
 │   ├── process/
 │   │   └── inspector.go             ← /proc/[pid] scanner, top-N CPU/RSS, K8s metadata
 │   │
@@ -215,6 +236,8 @@ linux-obs-agent/
 │   └── db-inspector-config.yaml.example ← annotated db-inspector config reference
 │
 ├── Makefile                         ← generate / build / build-inspector / install / image
+├── scripts/
+│   └── test-pg-matrix.sh            ← runtime matrix for pg_query vs PostgreSQL 16-18 (Docker, root)
 └── go.mod
 ```
 
@@ -260,6 +283,15 @@ MongoDB slow-query analysis loop. `Analyzer.Start()` loads the `mongo_query` eBP
 
 ### `internal/dbinspector`
 Extensible registry for database inspectors. `DBInspector` is a three-method interface (`Name()`, `Start()`, `Report()`). `Registry.StartAll()` launches each inspector in its own goroutine. `Registry.Report()` aggregates all inspector snapshots into a single `*model.InspectReport`. Adding a new database requires only a new adapter file implementing `DBInspector` — zero changes to existing code.
+
+### `internal/postgres`
+PostgreSQL query-attribution tracer's userspace (§23). `discover.go` finds postmasters from `/proc` every `postgres.discover_interval` and attaches the `pg_query` probes once per distinct binary inode; `pgsym` resolves hook symbols and the `BackendState` constants per major (16–19, anything else refused); `analyzer.go` turns text events into digests (`sqldigest.Postgres` dialect + `textcache`), drains the double-buffered kernel aggregation every poll into `querystats`, credits long-running statements in flight (`inflight.go`), classifies backend types and cluster CPU, runs the statements/s circuit breaker and builds `postgres_report`. `pgstat` is the optional `pg_stat_statements` enrichment. Pure Go apart from the loader in `internal/ebpf/pg_query`, so most of it is tested on any OS.
+
+### `internal/textcache`
+Kernel text-hash → classified digest cache (LRU, 32 768 hashes) shared by the MySQL and PostgreSQL analyzers: learns a text on first sight, verifies 1 in 1 024 resends against the cached digest (a mismatch marks the hash unsafe) and parks hashes whose text has not arrived until the next tick before reporting `<text unavailable>`.
+
+### `internal/overload`
+Overload verdict builder, now engine-neutral: an `Engine` descriptor (process name, report name, consumer-check name, wait kinds, optional `background_overload`) selects MySQL or PostgreSQL behaviour. The MySQL descriptor reproduces the previous output exactly (golden tests); the PostgreSQL engine assesses each cluster, adds `background_overload` and picks the reported cluster (§23.4).
 
 ### `internal/exporter`
 Two export paths:
@@ -1054,6 +1086,7 @@ All metrics are prefixed with `obs_agent_`.
 | `ebpf_events_total{module="fsync"}` | Counter | Fsync outlier events (latency > threshold) |
 | `family_*` (cpu_percent, mem_rss_bytes, processes, net_*, inbound/outbound bytes) | Gauge/Counter | Per process family; never per PID. See §20 |
 | `mysql_*` (queries, query_cpu/runq_wait/wall seconds, query_bytes, digest_*, digest_info, events_dropped) | Counter | Per command class and per query digest. See §20 |
+| `postgres_*` (queries, query_cpu / runq_wait / wall / io_wait / wal_wait / syncrep_wait seconds, query_disk_read / write bytes, digest_*, digest_info, backend_cpu_seconds / backend_disk_read_bytes, coverage ratios, `*_available`, `enrichment_up`, `tracing_active`, `shed_total`, `events_dropped_total`, `agg_overflow_total`, `hash_mismatch_total`, `text_events_dropped_total`, `credit_dropped_total`, `backends_over_capacity`) | Counter/Gauge | PostgreSQL attribution, labelled `cluster` plus `command` / `backend_type` / `digest_id`; never per PID. Registered only when `postgres.enabled`. See §23.7 |
 
 ---
 
@@ -1075,10 +1108,17 @@ All metrics are prefixed with `obs_agent_`.
 | **MySQL per-command events (20k QPS)** — estimated, not measured | **~0.3% kernel + ~1% userspace** | **4 MB ringbuf + ~5 MB digests** |
 | **Family grouping (10s scan)** — estimated, not measured | **~0.02%** | **< 1 MB** |
 | netinv (per /api/diagnose) — estimated, not measured | 20–50 ms per call | transient |
+| **PostgreSQL tracer: statement probes (10k statements/s, extended protocol)** — estimated, not measured (`TestTraceCostPerStatement` not run) | **~5 traps × ~1.5 µs ≈ 0.075 core, paid on the Postgres threads (≈ +5–7 µs per statement), not by the agent**; hard ceiling: circuit breaker at `postgres.max_statements_per_sec` (30 000) | — |
+| **PostgreSQL tracer: kernel maps (`pg_query`)** — estimated, not measured | — | **~13 MB** (agg 2 × 16 384 × 104 B ≈ 3.4 MB, `pg_session` ≈ 2 MB, ringbufs ≈ 3.3 MB, `text_seen` / `qid` ≈ 3 MB) |
+| **PostgreSQL tracer: userspace (drain, new texts, in-flight credit, 10 s backend-type scan)** — estimated, not measured | **< 0.1 %** (+ ~0.01 % scan) | **~10 MB** (digests, text cache) |
+| **PostgreSQL SQL enrichment (optional)** — estimated, not measured | 1 filtered query per cluster per 60 s | < 1 MB |
 | **Total (all eBPF active + fsync + netflow + MySQL events)** — estimated, not measured | **~2.3%** | **~70 MB** |
 | **Total (no trigger-eBPF; fsync + netflow + MySQL events)** — estimated, not measured | **~1.9%** | **~35 MB** |
+| **Total + PostgreSQL tracer (agent only; traps excluded)** — estimated, not measured | **+~0.1 %** (→ ~2.4 % / ~2.0 %) | **+~24 MB** (→ ~94 MB / ~59 MB) |
 
 The totals add the always-on netflow (~0.4 % / ~6 MB) and MySQL per-command events (~1.3 % / ~9 MB, only when `mysql.enabled`) to the previously measured figures. All other measurements are on a 4-core 8GB VM under moderate load. The systemd unit enforces hard limits (`CPUQuota=10%`, `MemoryMax=200M`) as a safety net.
+
+**PostgreSQL rows:** all are estimates (the runtime matrix with `TestTraceCostPerStatement` has not been run, §23.11); they are not part of the totals above, which exclude PostgreSQL — the "+ PostgreSQL" total row adds the agent-side rows only (`postgres.enabled`). The per-statement trap cost lands on the Postgres backends' own threads, so the agent's `CPUQuota` does not cap it; the circuit breaker does.
 
 **Fsync overhead detail**: At 10 000 fsync/s with a 5 ms slow threshold, the kprobe/kretprobe pair executes ~20 000 times/s. Each execution does one map lookup + one atomic add (~50 ns each). Total: ~1 ms/s ≈ **0.01% CPU** on a single core. The ringbuf emits zero events at normal latencies.
 
@@ -1705,3 +1745,287 @@ All figures in this table are **estimated, not measured**.
 
 ## 21. Review output
 Use codex to review output of this code each change
+
+---
+
+## 23. PostgreSQL Query Overload Attribution
+
+### 23.1 Why
+
+When a PostgreSQL host is overloaded the operator needs the answer the MySQL tracer gives (§20): *which query is causing it, on which resource, in which cluster, and how sure are we* — and, specific to Postgres, *or is it not a query at all* (autovacuum, checkpointer, I/O workers). The tracer measures per-digest on-CPU time, run-queue wait, wall time, disk read/write bytes, block-I/O wait, WAL-flush wait and synchronous-replication wait for PostgreSQL 16–19 in the kernel, without database credentials; SQL enrichment (§23.6) is optional. Off by default (`postgres.enabled: false`): nothing is attached or allocated. MySQL outputs are unchanged by this feature.
+
+The five-question triage the report and both dashboards follow:
+
+1. Is the server overloaded? (CPU, load, disk, PSI)
+2. Is it Postgres? (cluster CPU / disk vs other process families)
+3. Is it queries or background work? (CPU by backend type, coverage)
+4. Which query? (top digests, culprit role)
+5. Is a slow query the cause or a victim? (where query time goes, `victim_of`)
+
+### 23.2 Hook mechanism
+
+Each backend's time is cut into **intervals** at every `pgstat_report_activity(state, text)` call (uprobe; hooked in `.dynsym`, so it works on stripped distro binaries). An interval opened by a `RUNNING` report is tagged with that report's SQL text; any other state closes it and opens nothing (idle and idle-in-transaction time is never attributed).
+
+```
+uprobe pgstat_report_activity(state = RDI, text = RSI)
+  s = pg_session[tid]
+  if s.open:  close(s)                         → Δ into agg_<active>
+  if state == STATE_RUNNING (per major) and text:
+        read ≤ 511 B (bpf_probe_read_user_str), hash in the same pass
+        open(s, kind = parallel if in_parallel_query[tid] else client, hash)
+  elif state == STATE_FASTPATH:  open(s, kind = fastpath, hash = 0)
+
+open:  baselines = se.sum_exec_runtime, sched_info.run_delay, ioac.read/write_bytes,
+                   delays->blkio_delay; postmaster = task->real_parent->tgid
+close: agg[{postmaster, kind, hash}] += {calls, wall, cpu, runq, rd, wr, blkio, wal, syncrep}
+       if kind == client and wall >= slow threshold: slow event (no text, §23.12)
+
+uprobe PortalRun            isTopLevel (RDX) != 0 and open  → calls++
+uprobe pgstat_report_query_id   only attached with SQL enrichment: qid[hash] = id
+uprobe/uretprobe XLogFlush  outermost frame while open: wal += max(0, Δwall − Δcpu − Δrunq − Δblkio)
+uprobe/uretprobe SyncRepWaitForLSN   only when sync replication is in use: same formula into syncrep
+uprobe/uretprobe ParallelQueryMain   entry: in_parallel_query[tid] = 1; return: close interval, delete flag
+```
+
+- Both protocols land on the same hash (simple Query; Parse/Bind/Execute each report `RUNNING` with the same text); `calls` counts top-level `PortalRun`s, so a JDBC batch of N Executes with one Sync counts N. Parse and planning CPU are inside the intervals.
+- Independent of `track_activities` (the uprobe fires at function entry, before the function's own early return). An ERROR returns to the main loop, which reports idle and closes the interval.
+- **Cluster key.** Backends and parallel workers are forked by the postmaster, so `{postmaster tgid, kind, hash}` identifies the aggregation entry: 500 backends running one statement are one entry, and `16/main` and `17/main` on one host stay apart. `kind ∈ {client, parallel, fastpath}`; in userspace, `parallel` deltas contribute **only CPU and disk bytes** to the digest (the leader's wall and waits already cover the elapsed time).
+- **Discovery** (`internal/postgres/discover.go`, every `postgres.discover_interval`, 30 s, read-only `/proc`): a postmaster is a process with `comm == "postgres"` whose parent's comm is not `postgres`; binary from `/proc/<pid>/exe` (probes attach once per distinct inode, through `/proc/<postmaster>/exe`, so a binary deleted by `apt upgrade` still works), data dir from `cwd`, port from `postmaster.pid`, cluster name from the systemd unit in the cgroup (`postgresql@16-main.service`), else `<major>/<datadir basename>`. `postgres.binary_paths` is an allow-list.
+- **Hash rule** (`pg_query.bpf.c`, Go reference `internal/postgres/pghash`): FNV-1a 64 over ≤ 511 bytes, skipping digit runs that start at a token boundary and the contents of `'…'` (`''` = close + open), as MySQL, with Postgres adjustments, all at least as conservative as the Go normaliser: `"…"` identifiers hashed as-is; the first backslash anywhere, an `E'`/`e'` prefix or a dollar quote (`$` + `[A-Za-z_$]`) switches to **exact hashing for the rest of the text**; `$1` parameters hashed as-is. Verification as MySQL: 1 call in 1 024 resends its text; a digest mismatch puts the hash in `unsafe_hash` (exact per-interval events from then on) and counts `obs_agent_postgres_hash_mismatch_total`. If the verifier rejects the loop, the loader retries once with literal skipping off (`loadWithFallback`).
+- **Maps:** `pg_session` LRU_HASH 16 384 (key tid), `in_parallel_query` 1 024, `agg_a` / `agg_b` HASH 16 384 each + `agg_active` ARRAY (double-buffered, drained by flipping and waiting 50 ms, as MySQL §20), `text_seen` LRU 32 768, `text_events` ringbuf 1 MB, `cmd_events` ringbuf 2 MB (fallback: agg full or unsafe hash), `slow_events` ringbuf 256 KB, `unsafe_hash` 1 024, `qid` LRU 32 768 (enrichment only), per-CPU `scratch` and `counters`. A `sched_process_exit` tracepoint deletes an exiting thread's `pg_session` / `in_parallel_query` / unsafe-text entries.
+- Userspace (`internal/postgres/analyzer.go`): `text_events` → `sqldigest.Normalize(text, sqldigest.Postgres)` → system-catalog folding → shared digest cache (`internal/textcache`); every `poll_interval` the agg buffer is flipped and drained into `querystats` with `PID = postmaster pid`, `Command = kind`; a hash whose text has not arrived waits one tick, then reads `<text unavailable>`; `fastpath` with hash 0 reads `<FASTPATH function call>`. **In-flight crediting** (`inflight.go`): every poll, intervals open longer than one poll are credited their CPU, run-queue wait, disk bytes and I/O wait from `/proc/<tid>/{schedstat,io,stat}` (not wall, not calls), and the credit is subtracted when the interval closes through `agg`; a credit not matched within 2 drains is dropped and counted (`credit_dropped_total`). A 30-minute query is therefore visible as the culprit within one poll.
+- `sqldigest` Postgres dialect: `"…"` verbatim, nested `/* */` comments, `#` is an operator, literals (`'…'`, `E''`, `B''`, `X''`, `U&''`, `$tag$…$tag$`, numbers, `TRUE/FALSE/NULL`, `$n`) → `?`, `::type` kept, `IN (?+)`, `ANY(ARRAY[?+])`, `VALUES (?+)`; a truncated literal turns the rest into `?`. **System catalog folding** (`postgres.fold_system_catalogs`, default true): a client statement qualifying `pg_catalog.`, `information_schema.` or a `pg_stat` relation becomes `<system catalogs>` with no `sample_query` (autovacuum / replication digests are never folded).
+- **Backend types and cluster CPU** (`backendtype.go`, `clustercpu.go`): from the existing 10 s process scan restricted to the postmasters' children, classified by process title (`postgres: 16/main: autovacuum worker` → `autovacuum`; robust to a missing `cluster_name`): `client`, `parallel_worker`, `autovacuum`, `checkpointer`, `bgwriter`, `walwriter`, `walsender`, `walreceiver`, `io_worker`, `archiver`, `logical_replication`, `postmaster`, `other`. Cluster CPU comes from the systemd unit's cgroup counter when the cluster has its own unit (it includes backends that exited between polls), else the sum of the postmaster's and its children's `/proc` CPU (a poll in which a PID appeared or vanished is partial). Per-type disk reads need `process.include_io` (default true).
+
+### 23.3 Version compatibility
+
+Hook symbols are resolved by exact name by `internal/postgres/pgsym` from `.symtab`, then `.dynsym`; the version comes from the `PostgreSQL <major>.<minor>|beta<n>|rc<n> … on <host>, compiled by` banner in `.rodata` (no need to run the binary). A major < 16 or > 19 is **refused** with the version named (a wrong `BackendState` value would record garbage silently). `exec_simple_query` / `exec_*_message` are `static` and not exported, so they cannot be hooked; USDT `query__start/done` fire only in `exec_simple_query` and are not used.
+
+| PostgreSQL | `STATE_RUNNING` | `STATE_FASTPATH` | Why |
+|---|---|---|---|
+| 16, 17 | 2 | 4 | `UNDEFINED, IDLE, RUNNING, IDLEINTRANSACTION, FASTPATH, …` |
+| 18, 19 | 3 | 5 | PG 18 inserted `STATE_STARTING` after `UNDEFINED` |
+
+`PortalRun`'s `isTopLevel` is the 3rd argument (RDX) in 16–19. `pgstat_report_query_id` takes the queryid in RDI (sign differs by version, bits identical). Start log: `postgres hooks (18.6): activity=ok portalrun=ok queryid=off|ok xlogflush=ok syncrep=off|ok parallel=ok`.
+
+Fixtures (`internal/postgres/pgsym/testdata/*.syms`, from real PGDG amd64 builds): `16.15-22.04`, `16.15-24.04`, `17.11`, `18.6`, `19beta4`. The **19 fixture comes from beta4**; refresh it at GA. PGDG publishes current 16–18 minors for Ubuntu 22.04 and 24.04 but **not 20.04**: 20.04 hosts run archived or Ubuntu-archive builds. Ubuntu 20.04 also needs the HWE kernel (`linux-generic-hwe-20.04`, 5.15); on the GA 5.4 kernel (below the 5.5 floor) the tracer refuses with that message and `accounting.state = unavailable: …`, while backend types and families are still reported.
+
+**Adding a release** (PostgreSQL 20+, RHEL-family PGDG yum paths): extract its `postgres` binary, run `go run ./internal/postgres/pgsym/cmd/pgsymdump -label "<version> (<package>)" <postgres> > internal/postgres/pgsym/testdata/<version>.syms`, add the `StatesFor` row and the expected hooks to the pgsym compat test, then run the runtime matrix on a Linux x86_64 host: `make generate` as your user (not under sudo), then `sudo GO=$(command -v go) make test-pg-matrix` (Docker; images from `PG_IMAGES`, default `postgres:16 postgres:17 postgres:18`; add `postgres:19` once the image exists). Binaries are discovered from running postmasters, so no path is configured.
+
+### 23.4 GET /api/diagnose — postgres_report
+
+Absent unless `postgres.enabled`; `mysql_report` is unchanged.
+
+```bash
+curl -s localhost:9200/api/diagnose | jq '.postgres_report | {accounting, node, overload_cause}'
+curl -s localhost:9200/api/diagnose | jq '.postgres_report.clusters[] | {cluster, version, io_method, cpu_by_backend_type, top: .top_digests[0]}'
+```
+
+```json
+"postgres_report": {
+  "type": "postgres_analysis", "timestamp": "2026-10-11T10:00:00Z", "window_seconds": 60,
+  "accounting": { "state": "active", "cpu_wait": "ok", "disk_bytes": "io_method_async",
+                  "disk_wait": "io_method_async", "wal_wait": "ok",
+                  "syncrep_wait": "not_attached", "enrichment": "ok" },
+  "node": { "num_cpu": 16, "cpu_used_cores": 14.1, "cpu_used_percent": 88.1,
+            "disk_read_mb_per_sec": 210.0, "disk_write_mb_per_sec": 35.2 },
+  "thresholds": { "cpu_culprit_percent_of_node_cpu_used": 20, "…": "…" },
+  "clusters": [ {
+    "cluster": "postgresql@18-main.service", "version": "18.6", "postmaster_pid": 1021,
+    "port": 5432, "io_method": "worker",
+    "query_cpu_coverage_percent": 71.4,
+    "cpu_by_backend_type": { "client": 8.9, "autovacuum": 2.1, "io_worker": 0.6, "checkpointer": 0.2 },
+    "disk_read_by_backend_type": { "io_worker": 180.2, "autovacuum": 22.0 },
+    "top_digests": [ { "digest_id": "4c1d…", "command": "client",
+      "digest_text": "select … from orders where created_at > ? group by status",
+      "queryid": -8120371553361011234, "calls_per_sec": 40, "cpu_cores": 4.1,
+      "percent_of_node_cpu_used": 29.1, "cpu_role": "culprit",
+      "disk_read_mb_per_sec": 128.3, "percent_of_disk_read": 61.0, "disk_estimated": true, "io_role": "culprit",
+      "latency_ms_avg": 410.0, "latency_ms_max": 1300.0, "shared_hit_percent": 42.0,
+      "time_breakdown_percent": { "cpu": 78, "cpu_wait": 9, "wal_wait": 0, "other": 13 } } ],
+    "top_digests_by_disk_read": [], "top_digests_by_wait": [],
+    "victims": { "cpu": 12, "wal": 0 },
+    "recent_slow_queries": [ { "pid": 20441, "digest_id": "4c1d…", "digest_text": "…", "latency_ms": 1300.2 } ]
+  } ],
+  "overload_cause": { "verdict": "query_cpu_overload", "resource": "cpu",
+                      "cluster": "postgresql@18-main.service", "confidence": "high",
+                      "summary": "…", "digest": {}, "checks": [], "evidence": {}, "secondary": null }
+}
+```
+
+(The JSON is the design example; the Go structs in `internal/model` are the authority for field names.) Per digest, formulas are those of §20 (`W` = `postgres.digest_window`, 60 s) with these Postgres specifics: latency from `client` intervals only; `disk_read_pages_per_call` divides by 8 192 (1–4 = cache misses → more RAM / `shared_buffers`; hundreds+ = a scan → `EXPLAIN (ANALYZE, BUFFERS)`, index); `time_breakdown_percent` has `cpu`, `cpu_wait`, `disk_wait`, `wal_wait`, `syncrep_wait` (only when attached) and `other` (locks, client, network); `victim_of` is `cpu | disk | wal | syncrep` (Σ measured waits ≥ `victim_wait_percent` and slow; the value is the largest; `wal` and `syncrep` count as disk victims in the checks); `cpu_role` / `io_role` use the same rules and default thresholds as MySQL; `bytes_out` does not exist for Postgres (dropped for cost). Enrichment-only fields: `queryid`, `shared_hit_percent`, `buffer_read_mb_per_sec`, `temp_write_mb_per_sec`, `read_time_ms_per_call`. A value whose input is unavailable is omitted, never 0. `querystats` keeps engine-neutral names (`commit_wait`, `replica`, a fourth optional wait `ReplicaWaitNs`); `internal/postgres` renames them to `wal_wait` / `syncrep_wait` / `wal` / `syncrep` when building the report.
+
+Cluster level: `cluster`, `version`, `postmaster_pid`, `port`, `io_method` (when known), `query_cpu_coverage_percent`, `query_disk_read_coverage_percent`, `cpu_by_backend_type` (cores), `disk_read_by_backend_type` (MB/s), `top_digests` (20 by CPU), `top_digests_by_disk_read` (10), `top_digests_by_wait` (10), `victims`, `recent_slow_queries`.
+
+`accounting`:
+
+| Key | Values |
+|---|---|
+| `state` | `active` \| `shed` (circuit breaker, §23.11) \| `unavailable: <reason>` |
+| `cpu_wait` | `ok` \| `run_delay_unavailable` |
+| `disk_bytes` | `ok` \| `io_accounting_unavailable` \| `io_method_async` |
+| `disk_wait` | `ok` \| `blkio_delay_unavailable` \| `delayacct_disabled` \| `io_method_async` |
+| `wal_wait` | `ok` \| `xlogflush_unavailable` |
+| `syncrep_wait` | `ok` \| `not_attached` |
+| `enrichment` | `ok` \| `not_configured` \| `pg_stat_statements_missing` \| `auth_failed` \| `error: <short>` (e.g. `error: compute_query_id off`) |
+
+**`overload_cause`** is built by `internal/overload` (now engine-neutral: an `Engine` descriptor carries the process name, report name, consumer-check name, wait kinds and whether `background_overload` is possible; the MySQL descriptor reproduces the previous output exactly, covered by golden tests). Postgres assesses CPU and disk separately, per cluster, with four checks each: `node_saturated` (as MySQL; disk: `io_diagnosis.verdict` ∈ {`high_disk_throughput`, `storage_latency_stall`, `writeback_congestion`}), `postgres_top_consumer` (the cluster's family is #1 by that resource), `dominant_digest` (the top digest has the culprit role), `victims` (≥ 1 digest with `victim_of` of that resource). Verdicts: `query_cpu_overload`, `query_disk_overload` (confidence high / medium / low as §20; **capped at medium when `disk_estimated`**), `node_not_saturated`, `not_postgres` (another family is the top consumer), `no_dominant_query`, `no_data`, and:
+
+- **`background_overload`** (`resource: cpu | disk`): node saturated, cluster family #1, no culprit digest, and one non-client backend type uses ≥ `postgres.background_dominant_percent` (50) of the cluster's resource. It names the type (`evidence.background_type`) and gives one next step per type: autovacuum → `autovacuum_vacuum_cost_limit` / table bloat; checkpointer → `max_wal_size` / `checkpoint_completion_target`; io_worker → configure `postgres.sql` to see which digests the workers serve; walsender → replication consumers.
+- **Several clusters:** each is assessed; the reported one is the saturated cluster with the largest culprit share (or the background verdict when no cluster has a culprit); the others are in `other_clusters` (JSON); when both CPU and disk of the reported cluster are saturated, the other resource's assessment is in `secondary`.
+
+When the verdict (or `secondary`) is `query_disk_overload` or a disk `background_overload`, `io_diagnosis.next_steps` starts with a pointer to `postgres_report.overload_cause` (on a copy, as MySQL). With both engines enabled each prepends one pointer to its own report.
+
+### 23.5 PostgreSQL 18+ asynchronous I/O
+
+With `io_method = worker` (PG 18 default, `io_workers = 3`) or `io_uring`, block reads for a query are issued by I/O worker processes (or io_uring worker threads), so the backend's `ioac` and `blkio_delay` do not show them.
+
+- Detection: SQL `SHOW io_method` when enrichment is on; otherwise PG ≥ 18 with `io_worker` processes present ⇒ `worker`; PG ≥ 18 with no workers and no SQL ⇒ treated as async (conservative).
+- `accounting.disk_bytes` and `disk_wait` read `io_method_async`; the per-digest kernel disk fields are omitted (so are `obs_agent_postgres_query_disk_*` and `io_wait` series).
+- With enrichment, the cluster's `io_worker` read bytes over W are split across digests by their share of `shared_blks_read` → `disk_read_mb_per_sec` and `percent_of_disk_read` with `disk_estimated: true`; `io_role` may fire; disk verdict confidence ≤ medium.
+- Always: `disk_read_by_backend_type.io_worker` shows the cluster-level reads. `io_method = sync` restores exact kernel attribution (a documented trade-off, not a recommendation).
+
+### 23.6 SQL enrichment
+
+Off unless `postgres.sql.dsn` is set (`internal/postgres/pgstat`, `github.com/jackc/pgx/v5`, pure Go, no CGO). One connection per discovered cluster (`{port}` in the DSN is substituted), `application_name=obs-agent`, `statement_timeout` (default 2 s). The role needs `pg_monitor`, with `pg_stat_statements` in `shared_preload_libraries` and `CREATE EXTENSION pg_stat_statements` in the DSN's database. The password comes from `sql.password_file` (wins) or `POSTGRES_SQL_PASSWORD`, and is never logged.
+
+- Once per connect: `server_version_num`, `io_method` (18+), `synchronous_standby_names`, `track_io_timing`, `block_size`, `compute_query_id`.
+- Every `sql.poll_interval` (60 s), **one** query: `SELECT queryid, calls, shared_blks_hit, shared_blks_read, temp_blks_written, <shared_blk_read_time | blk_read_time> FROM pg_stat_statements(false) WHERE queryid = ANY($1)` with the ≤ 50 queryids of the currently reported digests (no text transferred; `blk_read_time` on 16, `shared_blk_read_time` on 17+).
+- Deltas between polls give `shared_hit_percent`, `buffer_read_mb_per_sec`, `temp_write_mb_per_sec` (spill → `work_mem`), `read_time_ms_per_call` (only with `track_io_timing`). A `pg_stat_statements` reset (counter decrease) skips one delta.
+- The join is exact: `qid[hash]` comes from the `pgstat_report_query_id` hook, attached **only in this mode**. `compute_query_id = off` ⇒ `accounting.enrichment = error: compute_query_id off`.
+- Failure: 3 consecutive errors close the connection, retry after 5 min; `accounting.enrichment` carries the reason; the kernel path is unaffected. `obs_agent_postgres_enrichment_up` mirrors it.
+- `syncrep_wait: auto` attaches the `SyncRepWaitForLSN` probes when the SQL shows synchronous standbys (without `sql.dsn`, `auto` = off); the decision is per binary (OR over its clusters), so it does not flap.
+
+### 23.7 Prometheus
+
+Prefix `obs_agent_postgres_`. Never labelled by PID, client port or raw SQL. Labels: `cluster`, `command` (`client | parallel | fastpath`, plus `autovacuum | replication`, §23.12), `backend_type` (fixed set above), `digest_id` (mode-capped). Series are in `internal/promcollect/postgres.go`.
+
+| Metric | Type | Labels / note |
+|---|---|---|
+| `queries_total`, `query_cpu_seconds_total`, `query_runq_wait_seconds_total`, `query_wall_seconds_total` | Counter | `cluster, command` |
+| `query_disk_read_bytes_total`, `query_disk_write_bytes_total` | Counter | `cluster, command`; absent while `accounting.disk_bytes` ≠ ok |
+| `query_io_wait_seconds_total`, `query_wal_wait_seconds_total`, `query_syncrep_wait_seconds_total` | Counter | `cluster, command`; absent while not measured over the whole window |
+| `digest_{cpu_seconds,calls,disk_read_bytes}_total` (`minimal`, `full`); `digest_{runq_wait,io_wait,wal_wait}_seconds_total` (`full`) | Counter | `cluster, digest_id` |
+| `digest_info` (=1) | Gauge | `cluster, digest_id, digest_text` |
+| `backend_cpu_seconds_total`, `backend_disk_read_bytes_total` | Counter | `cluster, backend_type` |
+| `query_cpu_coverage_ratio` (not clamped, absent while unknown), `digest_coverage_ratio` | Gauge | `cluster` |
+| `io_wait_available`, `wal_wait_available`, `enrichment_up` (1/0) | Gauge | `cluster` |
+| `tracing_active` (1 attached; 0 shed or unavailable) | Gauge | **unlabelled** |
+| `shed_total`, `events_dropped_total`, `text_events_dropped_total`, `agg_overflow_total`, `hash_mismatch_total`, `credit_dropped_total` | Counter | unlabelled |
+| `backends_over_capacity` (1 when live backends exceed the 16 384-entry `pg_session` map) | Gauge | unlabelled |
+
+Digest modes `postgres.prometheus_digests` = `minimal` (default; top `prometheus_minimal_top_n` (20) by lifetime CPU ∪ top 20 by disk read, plus `digest_id="other"`), `full` (sticky set `sticky_digests_max` / `sticky_digest_ttl`, adds the runq / io / WAL waits), `off`. Join digest text: `… * on(instance, cluster, digest_id) group_left(digest_text) obs_agent_postgres_digest_info`. `/metrics` stays unauthenticated.
+
+### 23.8 ClickHouse
+
+Four new tables in `clickhouse.database`; MySQL tables are untouched. Same engine, daily partitioning, TTL, `ttl_only_drop_parts`, NULL = not measured, no row without signal, `input_format_skip_unknown_fields` as the MySQL tables in the ClickHouse export. `obs-agent clickhouse-schema` prints them; `-alter` adds `CREATE TABLE IF NOT EXISTS` for each, so one command migrates an existing database. `deploy/clickhouse/schema.sql` is regenerated (a test keeps it equal to the generator output).
+
+| Table | One row per |
+|---|---|
+| `pg_digest_stats` | host, cluster, postmaster pid, digest, command, interval — `calls`, `cpu_ns`, `runq_ns`, `wall_ns`, `wall_max_ns`; `Nullable`: `disk_read_bytes`, `disk_write_bytes`, `io_wait_ns`, `wal_wait_ns`, `syncrep_wait_ns` (NULL unless measured for every poll of the interval; disk NULL under async I/O), and the enrichment deltas `shared_blks_hit`, `shared_blks_read`, `temp_blks_written`; `disk_estimated` (UInt8) |
+| `pg_digest_text` | digest (`ReplacingMergeTree`, no TTL) — `digest_text`, `queryid`, `sample_query` (NULL unless both privacy flags), `first_seen` |
+| `pg_slow_queries` | slow statement — `latency_ms`, `cpu_ms`, `digest_id`, `query` (the digest text unless both `clickhouse.include_sample_queries` and `postgres.sample_queries`, then the first-seen sample) |
+| `pg_backend_stats` | host, cluster, backend type, interval — `cpu_ns`, `disk_read_bytes`, `disk_write_bytes` (Nullable), `processes_max` |
+
+Shares divide by the existing `host_stats` (same hosts, same range) exactly as the MySQL tables in the ClickHouse export; drains, `max_digest_keys` → `other`, `<minor>` folding (`min_digest_share_percent`), text-once, retry/reject and buffer eviction are shared with MySQL (builders parameterised by table prefix). The PostgreSQL SQL (top digests with shares, async-I/O estimate, slow statements) is in `deploy/clickhouse/queries.sql`. The Snapshotter has a third reason kind `postgres_verdict:<verdict>` for `query_*_overload` and `background_overload` (`snapshots_total{reason_kind="postgres_verdict"}`); privacy stripping also covers `postgres_report`. **Rollout:** upgrade the agents, then run `obs-agent clickhouse-schema -alter | clickhouse-client --multiquery`; before the migration the `pg_*` batches are rejected (unknown table) and counted in `rows_dropped_total{reason="rejected"}`.
+
+### 23.9 Dashboards and alerts
+
+`deploy/grafana/obs-agent-postgres-overview.json` (Prometheus; variables `instance`, `cluster`) and `obs-agent-postgres-analysis.json` (ClickHouse; `host`, `cluster`, `digest`, hidden `flush_s` = `clickhouse.flush_interval`) are **generated** (`go run ./deploy/grafana/gen`; edit `deploy/grafana/gen/postgres.go`). MySQL dashboards are byte-identical. Both open with a **How to use this dashboard** text panel, and each row starts with a one-line text panel naming which of the five questions it answers. Overview rows: *1. Is the server overloaded?* (node CPU, load per CPU, PSI io full, tracing active) → *2. Is it PostgreSQL?* (cluster CPU vs top families) → *3. Queries or background work?* (CPU by backend type, statement CPU coverage, disk reads by backend type) → *4. Which query?* (% of node CPU / disk reads by top digests, Top digests table) → *5. Cause or victim?* (Where query time goes, WAL wait share, Sync-replication wait share, statements per second) → *Agent health* (accounting availability, dropped / overflow / mismatches / unmatched credit). Analysis rows: Top digests (history), CPU by backend type (history) with the "Estimated disk reads per digest (PostgreSQL 18+)" table, and the digest drill-down with slow statements.
+
+**Plain-language rule**, enforced by `TestPostgresPanelsExplainThemselves`: every panel's ⓘ description has four non-empty labelled parts — `What:` (one sentence, no jargon), `Good / bad:` (concrete numbers or shapes), `If bad:` (the next click or action), `Formula:` (the exact computation) — at most 600 characters before the generated `Alert: <name> (<severity>) fires …` line that panels backing an alert carry. Terms are defined on first use in the intro panel.
+
+Alerts (`deploy/prometheus/obs-agent-alerts.yaml`, group `obs-agent-postgres`; `promtool test rules deploy/prometheus/obs-agent-alerts_test.yaml`). Same policy as §20: page on symptoms, ticket on causes; series per `(instance, cluster)`; every `description` is a numbered runbook.
+
+| Alert | Severity | Condition (`for`) |
+|---|---|---|
+| `PostgresQueriesStarvedForCPU` | critical | client runq wait ÷ client wall > 0.3 **and** avg node CPU ≥ 85 % (5m) |
+| `PostgresQueriesStalledOnDisk` | critical | (io wait + WAL wait) ÷ wall > 0.3 **and** PSI io.full avg10 > 10 (5m); an absent wait counts as 0; **never fires without PSI** |
+| `PostgresDigestCPUHog` | warning | one digest's CPU ÷ node CPU cores in use > 0.2 **and** node CPU ≥ 85 % (5m); excludes `other` |
+| `PostgresDigestDiskReadHog` | warning | one digest's disk reads ÷ node physical-disk reads > 0.2 **and** node reads > 5 MiB/s (5m); needs `disk_bytes = ok` |
+| `PostgresCommitsStalledOnWAL` | warning | WAL wait ÷ wall > 0.2 (5m) |
+| `PostgresSyncReplicationSlow` | warning | sync-rep wait ÷ wall > 0.2 (5m) |
+| `PostgresBackgroundCPUHigh` | warning | one non-client, non-parallel, non-postmaster backend type ≥ 50 % of the cluster's CPU **and** node CPU ≥ 85 % (10m) |
+| `ObsAgentPostgresTracingShed` | warning | `obs_agent_postgres_tracing_active == 0` (1m): shed by the circuit breaker, or unavailable |
+| `ObsAgentPostgresAccountingDegraded` | info | dropped / agg overflow / hash mismatch / credit-dropped rising over `[10m]` (10m); route `severity="info"` to a null receiver as in §20 |
+
+### 23.10 Configuration
+
+`postgres:` in `deploy/config.yaml.example`:
+
+```yaml
+postgres:
+  enabled: false
+  binary_paths: []                 # allow-list; empty = every running postmaster
+  discover_interval: 30s
+  slow_query_threshold_ms: 100
+  poll_interval: 5s
+  digest_window: 60s
+  top_digests: 20
+  max_recent_queries: 100
+  fold_system_catalogs: true
+  sample_queries: true             # false: never store literal-bearing samples
+  enable_delayacct: false          # write kernel.task_delayacct=1 at start
+  syncrep_wait: auto               # auto (needs sql) | true | false
+  max_statements_per_sec: 30000    # circuit breaker (§23.11)
+  shed_cooldown: 10m
+  background_dominant_percent: 50
+  prometheus_digests: minimal      # full | minimal | off
+  prometheus_minimal_top_n: 20
+  sticky_digests_max: 50
+  sticky_digest_ttl: 1h
+  # role / overload thresholds, same keys and defaults as mysql:
+  # cpu_culprit_percent_of_node_cpu_used 20, cpu_culprit_min_node_cpu_used_percent 50,
+  # victim_wait_percent 50, io_culprit_percent_of_disk_read 20,
+  # io_culprit_min_node_disk_read_mb_per_sec 5, overload_node_cpu_percent 85, overload_node_load 1.5
+  sql:
+    dsn: ""                        # "host=/var/run/postgresql port={port} dbname=postgres user=obs_agent"
+    password_file: ""
+    poll_interval: 60s
+    statement_timeout: 2s
+```
+
+Environment overrides: `POSTGRES_TRACING_ENABLED`, `POSTGRES_SLOW_QUERY_THRESHOLD_MS`, `POSTGRES_BINARY_PATHS` (comma-separated), `POSTGRES_ENABLE_DELAYACCT`, `POSTGRES_SQL_DSN`, `POSTGRES_SQL_PASSWORD`, `POSTGRES_PROMETHEUS_DIGESTS`, `POSTGRES_MAX_STATEMENTS_PER_SEC`. Validation runs only when enabled, except `prometheus_digests` ∈ {full, minimal, off} and `prometheus_minimal_top_n` ≥ 1 which are always checked: windows ≥ poll interval, `sql.poll_interval` ≥ 30 s, `0 < sql.statement_timeout < sql.poll_interval`, `syncrep_wait` ∈ {auto, true, false}, `max_statements_per_sec` ≥ 1 000, `background_dominant_percent` > 0, `password_file` readable.
+
+### 23.11 Resource budget and circuit breaker
+
+The cost that matters is the **uprobe trap** (~1–3 µs, *estimated, not measured*) on the Postgres backend's own thread, paid before any BPF filtering; only fewer attached probes reduce it.
+
+| Control | Effect |
+|---|---|
+| Minimal default hook set: `pgstat_report_activity`, `PortalRun` (entry only), `XLogFlush` (once per commit), `ParallelQueryMain` (once per worker) | ~3 traps per simple-protocol statement, ~5 per extended (Parse + Bind + Execute + idle + PortalRun) |
+| `pgstat_report_query_id` only with SQL enrichment | −1 trap per statement by default |
+| `SyncRepWaitForLSN` only with sync replication | no trap on most hosts |
+| No `bytes_out` (no host-wide `tcp_sendmsg` kretprobe) | no cost on unrelated TCP traffic; family network bytes come from `netflow` |
+| In-flight crediting only for intervals open longer than one poll | `/proc` reads proportional to long queries, not to connections |
+| **Circuit breaker**: traced statements/s > `max_statements_per_sec` (30 000) for 2 consecutive polls ⇒ detach all probes for `shed_cooldown` (10 m), `accounting.state = shed`, `shed_total++`, `tracing_active = 0`, alert `ObsAgentPostgresTracingShed`; `max_statements_per_sec <= 0` turns the breaker off in the analyzer, but config validation requires ≥ 1 000 when enabled | Hard ceiling on worst-case cost |
+| SQL enrichment: one filtered query per cluster per 60 s, no text transfer | negligible |
+| Agent hard limits (systemd) `CPUQuota=10%`, `MemoryMax=200M` | caps the agent process only, not the traps |
+| *Rejected*: reuse the hash across Bind/Execute by text pointer | Bind copies the text, so pointers never match; a content compare costs as much as hashing |
+
+**Measured trap cost: none yet.** `TestTraceCostPerStatement` (`internal/ebpf/pg_query/loader_integration_test.go`, run by `make test-pg-matrix`) logs `per statement (extended protocol): traced …, untraced …, added …` for 20 000 `SELECT 1`; it has **not been run**, so every figure below (and the §14 rows) is *estimated, not measured*: ~5 traps × ~1.5 µs ≈ 0.075 core at 10 k statements/s on the Postgres threads (≈ +5–7 µs per statement); kernel maps ~13 MB (`agg` 2 × 16 384 × 104 B ≈ 3.4 MB, `pg_session` 16 384 × 120 B ≈ 2 MB, ringbufs ~3.3 MB, `text_seen` / `qid` ~3 MB); agent userspace < 0.1 % CPU and ~10 MB; backend-type breakdown ~0.01 % (existing 10 s scan). Record the measured numbers here and in §14 after running the matrix.
+
+### 23.12 Accuracy and limits
+
+- **Slow-query rows carry the digest, not the literal instance**: the text pointer may already be freed at interval close and storing 512 B per session would cost 8 MB. `recent_slow_queries` shows the digest text and, when allowed, the first-seen `sample_query`.
+- Multi-statement simple queries (`SELECT 1; SELECT 2`) are one text and one digest; `calls` counts each statement's `PortalRun`.
+- Time a backend spends blocked reading the next pipelined message before Sync lands in wall (`other`).
+- `other` also holds heavyweight-lock and LWLock waits, client round trips and network (no lock-wait split yet).
+- Statements longer than the window are credited in flight for CPU, run-queue wait, disk bytes and I/O wait only; their wall and `calls` arrive at completion.
+- `pg_session` is an LRU of 16 384 entries: more concurrent backends (or a backend killed mid-interval) lose intervals; `obs_agent_postgres_backends_over_capacity` flags it.
+- **Non-client postmaster children** (autovacuum, walsender, bgworkers) are traced as intervals too: they appear as digests with `command` `autovacuum` / `replication`, listed in the top lists but never culprits and never slow queries; their catalog statements are not folded into `<system catalogs>`. `background_overload` is the verdict that names them.
+- Cluster CPU (and so `query_cpu_coverage_percent`) comes from the systemd unit cgroup when the cluster has one, else the sum of `/proc` CPU of the postmaster and its children; without a unit, a poll in which a PID appeared or vanished is partial.
+- Per-digest disk attribution on PG 18+ with async I/O is an **estimate** (needs enrichment) or absent; exact only with `io_method = sync`.
+- Torn reads of open sessions (the in-flight snapshot) are best effort. A never-credited session closed through a command event has no credit tombstone, so a stale session list can credit it once.
+- The kernel text-hash loop's verifier acceptance is confirmed only by the runtime matrix; if the verifier rejects it the loader falls back to exact hashing (`loadWithFallback`, one warning), which keeps totals exact but stops statements that differ only in literals from sharing a kernel entry.
+- When `postgres.sql.poll_interval` < `clickhouse.flush_interval`, only the latest enrichment delta per flush is exported (polls between flushes are lost).
+- `Enricher.Forget` (cluster drop) can briefly wait on an in-flight SQL poll (up to `statement_timeout`).
+- `wall_max` is best effort (no compare-and-swap before kernel 5.12); sums are exact. Per-call CPU is ± one scheduler tick; per-digest totals are exact.
+- The PostgreSQL 19 fixture is from 19beta4; PGDG no longer publishes current 16–18 minors for Ubuntu 20.04, which needs the HWE kernel. Requirements as MySQL: kernel ≥ 5.5 with BTF, x86_64 only (the loader refuses otherwise, `accounting.state = unavailable: …`).
+- **Privacy:** `sample_query` carries literals; it is controlled by `postgres.sample_queries` and, for ClickHouse, also by `clickhouse.include_sample_queries`. The DSN password is never logged. `/api/diagnose` and `/metrics` stay unauthenticated (peer IPs, cmdlines): restrict `:9200`.
+
+### 23.13 Verification status
+
+**Ran** (devbox, macOS arm64, Go 1.26.1): unit tests of the pure packages — `internal/postgres` (+ `pghash`, `pgsym`, `pgstat`, `pgtrace`), `internal/textcache`, `internal/sqldigest`, `internal/querystats`, `internal/overload`, `internal/promcollect`, `internal/chsink` (rows, schema golden, `-alter`, snapshot reason), `internal/config`, `internal/model`, `internal/drain` (several with `-race`); `promtool check rules` and `promtool test rules deploy/prometheus/obs-agent-alerts_test.yaml` (the PostgreSQL cases fire and do not fire); the Grafana generator tests (`go test ./deploy/grafana/gen/`, including the plain-language rule), with the MySQL dashboard JSONs regenerated byte-identical. `pg_query.bpf.c` was compiled to a BPF object only against **stub** headers (a hand-written minimal `vmlinux.h`, no-op CO-RE macros): this proves syntax, types and `_Static_assert` layouts, nothing more. Hash parity between `pg_text_hash` and `pghash` was checked by reading the code, not by a runtime test.
+
+**Did not run:** compilation against a real `vmlinux.h` and CO-RE relocations; `make generate`; BPF verifier acceptance (including the hash loop); the Go code that needs generated eBPF types — `internal/ebpf/pg_query` loader (only proof-read; `go vet` fails here only on the missing generated symbols), `internal/mysql` (its `btfcheck` helpers moved to `internal/ebpf/kfeat`), `internal/exporter` and `cmd/agent` wiring (identifiers grep-checked only); `make build`; the Docker runtime matrix `scripts/test-pg-matrix.sh` (written and shell-checked, never executed) on any kernel or image, including `TestTraceCostPerStatement`; `make test-clickhouse` for the `pg_*` tables and the `-alter` migration; a real Grafana import and a real ClickHouse; the acceptance scenario (pgbench victims + an unindexed `GROUP BY` culprit, then an autovacuum storm). Run on a Linux x86_64 host as root with Docker: `devbox run -- make generate && devbox run -- go vet ./... && go test ./internal/exporter/ && make build`, then `sudo GO="$(devbox run -- bash -c 'command -v go')" make test-pg-matrix`.
