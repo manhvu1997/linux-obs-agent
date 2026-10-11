@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -390,5 +391,44 @@ func TestEnricherForgetOnDrop(t *testing.T) {
 	a2.enrich(context.Background(), t0)
 	if a2.d.Enricher.Snapshot(5432).Status != pgstat.StatusNotConfigured {
 		t.Fatal("enrich must forget a cluster dropped while it polled")
+	}
+}
+
+func podProcs() *fakeProc {
+	p := hostProcs()
+	for _, x := range []struct {
+		pid  uint32
+		id   string
+		port string
+	}{{150, "aaaaaaaaaaaa1111", "5432"}, {160, "bbbbbbbbbbbb2222", "5432"}} {
+		p.comm[x.pid], p.ppid[x.pid] = "postgres", 1
+		p.cmdline[x.pid] = "/usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/data"
+		p.exe[x.pid] = p.exe[100]
+		p.files["/proc/"+itoa(x.pid)+"/cwd/postmaster.pid"] = itoa(x.pid) + "\n/var/lib/postgresql/data\n1760000000\n" + x.port + "\n"
+		p.cgroup[x.pid] = "0::/kubepods/burstable/pod1/cri-containerd-" + x.id + ".scope\n"
+	}
+	return p
+}
+
+func itoa(n uint32) string { return strconv.FormatUint(uint64(n), 10) }
+
+// Cluster names: two pods sharing the data dir basename stay distinct and stable.
+func TestSharedDataDirBasenameClustersStayDistinct(t *testing.T) {
+	a, _ := testAnalyzer(t, podProcs())
+	a.discover(time.Unix(0, 0))
+	c1, c2 := a.cluster(150), a.cluster(160)
+	if c1 == nil || c2 == nil || c1.name == c2.name {
+		t.Fatalf("clusters %+v %+v", c1, c2)
+	}
+	if c1.name != "16/data@aaaaaaaaaaaa" || c2.name != "16/data@bbbbbbbbbbbb" {
+		t.Fatalf("names %q %q", c1.name, c2.name)
+	}
+	a.discover(time.Unix(30, 0))
+	a.discover(time.Unix(60, 0))
+	if a.cluster(150) != c1 || a.cluster(160) != c2 {
+		t.Fatal("rediscovery must keep both clusters (and their state)")
+	}
+	if got := ClusterName(Postmaster{PID: 9, DataDir: "/d/x", Port: 5432}, 17); got != "17/x:5432" || containerOf("12:cpu:/docker/"+"0123456789abcdef0123") != "0123456789ab" {
+		t.Fatalf("fallback name %q", got)
 	}
 }

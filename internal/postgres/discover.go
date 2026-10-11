@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,16 +102,52 @@ func parsePostmasterPid(b []byte) (dataDir string, port int) {
 	return dataDir, port
 }
 
+var containerID = regexp.MustCompile(`[0-9a-f]{12,64}`)
+
+// containerOf returns the first 12 hex digits of the innermost container id in
+// a /proc/<pid>/cgroup content ("docker-<64 hex>.scope", ".../cri-containerd-<id>.scope",
+// ".../<id>"), or "".
+func containerOf(cgroup string) string {
+	best := ""
+	for _, line := range strings.Split(cgroup, "\n") {
+		_, p, ok := strings.Cut(line, "::")
+		if !ok {
+			if parts := strings.SplitN(line, ":", 3); len(parts) == 3 {
+				p = parts[2]
+			} else {
+				continue
+			}
+		}
+		for _, seg := range strings.Split(p, "/") {
+			if id := containerID.FindString(seg); id != "" {
+				best = id[:12]
+			}
+		}
+	}
+	return best
+}
+
 // ClusterName is the systemd unit when the postmaster has its own, else
-// "<major>/<data directory basename>" (Debian's "16/main" convention).
+// "<major>/<data directory basename>" made unique by the container id
+// ("@<id12>") or, without one, the port (":<port>"). Two pods running the same
+// image share the basename (…/data), so it alone is not an identity. The name
+// never contains a PID: it labels Prometheus series and must survive a restart.
 func ClusterName(pm Postmaster, major int) string {
 	if pm.Unit != "" {
 		return pm.Unit
 	}
+	base := "unknown"
 	if pm.DataDir != "" {
-		return fmt.Sprintf("%d/%s", major, path.Base(pm.DataDir))
+		base = path.Base(pm.DataDir)
 	}
-	return fmt.Sprintf("%d/pid-%d", major, pm.PID)
+	name := fmt.Sprintf("%d/%s", major, base)
+	switch id := containerOf(pm.Cgroup); {
+	case id != "":
+		return name + "@" + id
+	case pm.Port > 0:
+		return fmt.Sprintf("%s:%d", name, pm.Port)
+	}
+	return name
 }
 
 // realProc reads the host's /proc (the agent runs with hostPID).

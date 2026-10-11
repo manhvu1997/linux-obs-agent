@@ -88,7 +88,7 @@ func TestDiscoverPostmasters(t *testing.T) {
 	if ClusterName(a, 16) != "postgresql@16-main.service" {
 		t.Fatalf("name %q", ClusterName(a, 16))
 	}
-	if b := pms[1]; b.Unit != "" || ClusterName(b, 18) != "18/main" || b.Port != 5433 {
+	if b := pms[1]; b.Unit != "" || ClusterName(b, 18) != "18/main:5433" || b.Port != 5433 {
 		t.Fatalf("pm 200 %+v name %q", b, ClusterName(b, 18))
 	}
 }
@@ -104,7 +104,7 @@ func TestOrphanBackendIsNotPostmaster(t *testing.T) {
 }
 
 func TestClusterNameFallbacks(t *testing.T) {
-	if got := ClusterName(Postmaster{PID: 9}, 17); got != "17/pid-9" {
+	if got := ClusterName(Postmaster{PID: 9}, 17); got != "17/unknown" {
 		t.Fatalf("got %q", got)
 	}
 }

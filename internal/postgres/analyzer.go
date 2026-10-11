@@ -549,6 +549,10 @@ func (a *Analyzer) discoverLocked(now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	seen := map[uint32]bool{}
+	live := make(map[uint32]bool, len(pms))
+	for _, pm := range pms {
+		live[pm.PID] = true
+	}
 	for _, pm := range pms {
 		if allow != nil && !allow[pm.Key] {
 			continue // postgres.binary_paths excludes this binary
@@ -577,7 +581,7 @@ func (a *Analyzer) discoverLocked(now time.Time) {
 		}
 		name := ClusterName(pm, b.hooks.Version.Major)
 		for pid, old := range a.clusters {
-			if old.name == name { // restarted: a new postmaster under the same name
+			if old.name == name && !live[pid] { // restarted: the old postmaster is gone
 				a.dropClusterLocked(pid)
 			}
 		}
