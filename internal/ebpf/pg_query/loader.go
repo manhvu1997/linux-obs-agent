@@ -184,7 +184,9 @@ func (l *Loader) Attach(b pgtrace.Binary) (pgtrace.Attached, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	got, existing := l.attached[b.Key]
-	if existing && !((b.SyncRep && !got.SyncRep && b.Hooks.SyncRep != "") || (b.QueryID && !got.QueryID && b.Hooks.QueryID != "")) {
+	needSyncRep := b.SyncRep && !got.SyncRep && b.Hooks.SyncRep != ""
+	needQueryID := b.QueryID && !got.QueryID && b.Hooks.QueryID != ""
+	if existing && !needSyncRep && !needQueryID {
 		return got, nil
 	}
 	exe, err := link.OpenExecutable(b.Path)
