@@ -23,6 +23,10 @@ import (
 //
 //	PG_POSTMASTER_PID  host PID of the postmaster (docker inspect -f '{{.State.Pid}}')
 //	PG_DSN             e.g. postgres://postgres:secret@127.0.0.1:15432/postgres?sslmode=disable
+//
+// reattach re-attaches the probes startLoader attached (after l.DetachAll).
+var reattach func()
+
 func startLoader(t *testing.T) (*Loader, *pgx.Conn, uint32) {
 	t.Helper()
 	pidS, dsn := os.Getenv("PG_POSTMASTER_PID"), os.Getenv("PG_DSN")
@@ -58,8 +62,14 @@ func startLoader(t *testing.T) (*Loader, *pgx.Conn, uint32) {
 	if err := l.SetClusters(map[uint32]pgtrace.ClusterConst{pid: {Running: h.States.Running, Fastpath: h.States.Fastpath}}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := l.Attach(pgtrace.Binary{Key: pgtrace.BinaryKey{Dev: uint64(st.Dev), Ino: uint64(st.Ino)}, Path: exe, QueryID: true,
-		Hooks: pgtrace.Hooks{Activity: h.Activity, PortalRun: h.PortalRun, QueryID: h.QueryID, XLogFlush: h.XLogFlush, SyncRep: h.SyncRep, Parallel: h.Parallel}})
+	bin := pgtrace.Binary{Key: pgtrace.BinaryKey{Dev: uint64(st.Dev), Ino: uint64(st.Ino)}, Path: exe, QueryID: true,
+		Hooks: pgtrace.Hooks{Activity: h.Activity, PortalRun: h.PortalRun, QueryID: h.QueryID, XLogFlush: h.XLogFlush, SyncRep: h.SyncRep, Parallel: h.Parallel}}
+	reattach = func() {
+		if _, err := l.Attach(bin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := l.Attach(bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,9 +200,13 @@ func TestParallelWorkerCPUOnLeaderDigest(t *testing.T) {
 
 func TestLongStatementVisibleInFlight(t *testing.T) {
 	l, conn, _ := startLoader(t)
-	q := "SELECT count(*) FROM generate_series(1, 400000000)"
+	// ~8 s of wall time plus a bounded CPU burst (about a second): long enough to be open
+	// at the 3 s check, cheap in temp space, and never minutes.
+	q := "SELECT pg_sleep(8), (SELECT count(*) FROM generate_series(1, 3000000))"
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	done := make(chan error, 1)
-	go func() { _, err := conn.Exec(context.Background(), q, pgx.QueryExecModeSimpleProtocol); done <- err }()
+	go func() { _, err := conn.Exec(ctx, q, pgx.QueryExecModeSimpleProtocol); done <- err }()
 	time.Sleep(3 * time.Second)
 	ss, err := l.OpenSessions()
 	if err != nil {
@@ -205,27 +219,42 @@ func TestLongStatementVisibleInFlight(t *testing.T) {
 	if !found {
 		t.Fatalf("running statement not in OpenSessions: %+v", ss)
 	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("the long statement did not finish within 60 s")
 	}
 }
 
-// The measured cost replaces the estimate in CLAUDE.md §14.
+// The measured cost replaces the estimate in CLAUDE.md §14. It runs
+// "SELECT $1::int" with one argument, so pgx uses the extended protocol
+// (Parse once, then Bind/Execute from its statement cache); a warm-up round and
+// alternating traced / untraced rounds keep caches and drift out of the figure.
 func TestTraceCostPerStatement(t *testing.T) {
 	l, conn, _ := startLoader(t)
 	ctx := context.Background()
-	run := func() time.Duration {
+	const n, rounds = 20000, 6
+	run := func(count int) time.Duration {
 		t0 := time.Now()
-		for i := 0; i < 20000; i++ {
-			if _, err := conn.Exec(ctx, "SELECT 1"); err != nil {
+		for i := 0; i < count; i++ {
+			if _, err := conn.Exec(ctx, "SELECT $1::int", i); err != nil {
 				t.Fatal(err)
 			}
 		}
 		return time.Since(t0)
 	}
-	traced := run()
-	l.DetachAll()
-	plain := run()
-	t.Logf("per statement (extended protocol): traced %v, untraced %v, added %v",
-		traced/20000, plain/20000, (traced-plain)/20000)
+	run(n / 4) // warm-up: statement cache, plan cache, CPU frequency
+	var traced, plain time.Duration
+	for r := 0; r < rounds; r++ {
+		traced += run(n)
+		l.DetachAll()
+		plain += run(n)
+		reattach()
+	}
+	total := rounds * n
+	t.Logf("per statement (SELECT $1::int, extended protocol, %d alternating rounds of %d): traced %v, untraced %v, added %v",
+		rounds, n, traced/time.Duration(total), plain/time.Duration(total), (traced-plain)/time.Duration(total))
 }
