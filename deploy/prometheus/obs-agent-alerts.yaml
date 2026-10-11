@@ -217,7 +217,7 @@ groups:
           severity: warning
         annotations:
           summary: "PostgreSQL {{ $labels.backend_type }} backends use at least half of {{ $labels.cluster }}'s CPU on {{ $labels.instance }}"
-          description: "1. Open obs-agent PostgreSQL Overview → 'CPU by backend type'. 2. autovacuum: check bloat (pg_stat_user_tables.n_dead_tup) and autovacuum_vacuum_cost_limit / autovacuum_max_workers; the 'autovacuum' digests name the tables. 3. checkpointer: raise max_wal_size / checkpoint_timeout. 4. io_worker: queries are reading; see the top digests by disk read. 5. walsender: check replication consumers."
+          description: "1. Open obs-agent PostgreSQL Overview → 'Background share of PostgreSQL CPU' (share of PostgreSQL's own CPU, the alert's 50% line) and 'CPU by backend type (% of node CPU)' (share of the whole server). 2. autovacuum: check bloat (pg_stat_user_tables.n_dead_tup) and autovacuum_vacuum_cost_limit / autovacuum_max_workers; the 'autovacuum' digests name the tables. 3. checkpointer: raise max_wal_size / checkpoint_timeout. 4. io_worker: queries are reading; see the top digests by disk read. 5. walsender: check replication consumers."
           diagnose: "http://{{ $labels.instance }}/api/diagnose"
 
       - alert: ObsAgentPostgresTracingShed

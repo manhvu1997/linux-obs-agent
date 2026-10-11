@@ -301,19 +301,24 @@ const (
 	alertWin = "5m"
 )
 
+// withHost adds the hostname label (obs_agent_host_info) to a per-instance
+// expression, so a table shows the host instead of IP:port.
+func withHost(e string) string {
+	return `(` + e + `) * on (instance) group_left (host) obs_agent_host_info{` + inst + `}`
+}
+
 func overview() Dashboard {
 	var d Dashboard
 	d.UID, d.Title, d.Tags = "obs-agent-overview", "obs-agent Overview", []string{"obs-agent"}
 	d.SchemaVersion, d.Time, d.Refresh = 39, map[string]string{"from": "now-6h", "to": "now"}, "1m"
 	d.Templating.List = []Var{
 		dsVar("ds_prometheus", "Prometheus", "prometheus"),
-		{Name: "instance", Type: "query", Datasource: &promDS, Query: "label_values(obs_agent_cpu_usage_percent, instance)",
-			Definition: "label_values(obs_agent_cpu_usage_percent, instance)", Multi: true, IncludeAll: true, Refresh: 2},
+		{Name: "host", Label: "Hostname", Type: "query", Datasource: &promDS, Query: "label_values(obs_agent_host_info, host)",
+			Definition: "label_values(obs_agent_host_info, host)", Multi: true, IncludeAll: true, Refresh: 2},
+		{Name: "instance", Type: "query", Datasource: &promDS, Query: `label_values(obs_agent_host_info{host=~"$host"}, instance)`,
+			Definition: `label_values(obs_agent_host_info{host=~"$host"}, instance)`, Multi: true, IncludeAll: true, Refresh: 2},
 		{Name: "family", Type: "query", Datasource: &promDS, Query: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`,
 			Definition: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`, Multi: true, IncludeAll: true, Refresh: 2},
-		{Name: "host", Label: "ClickHouse host", Type: "query", Datasource: &promDS,
-			Query: `label_values(obs_agent_clickhouse_host_info{` + inst + `}, host)`, Definition: `label_values(obs_agent_clickhouse_host_info{` + inst + `}, host)`,
-			Multi: true, IncludeAll: true, Refresh: 2, Hide: 2},
 		{Name: "mysql_family", Label: "mysqld family", Type: "query", Datasource: &promDS,
 			Query: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`, Definition: `label_values(obs_agent_family_cpu_percent{` + inst + `}, family)`,
 			Regex: `/^(?!.*exporter).*(mysql|mariadb).*$/i`, Multi: true, IncludeAll: true, Refresh: 2},
@@ -403,23 +408,23 @@ func overview() Dashboard {
 		"query CPU is what digests can explain. The gap up to the mysqld family's CPU is spent outside statements (reading the next packet, network, "+
 			"InnoDB background threads) and cannot be attributed to a query. Pick the mysqld family with the mysqld family variable if the default regex misses it."), 12)
 	digSum := func(m string) string {
-		return `sum by (digest_id) (rate(` + m + `{` + inst + `,digest_id!="other"}[5m]))`
+		return `sum by (instance, digest_id) (rate(` + m + `{` + inst + `,digest_id!="other"}[5m]))`
 	}
 	top := promTable("Top digests (last 5m)",
-		digSum(digCPU),
-		`100 * `+digSum(digCPU)+` / scalar(sum(`+nodeCores("5m")+`))`,
-		digSum(digRead)+` / 1048576`,
-		`100 * `+digSum(digRead)+` / on () group_left () sum(`+nodeRead("5m")+`)`,
-		digSum(digRead)+` / `+digSum("obs_agent_mysql_digest_calls_total")+` / 16384`)
+		withHost(digSum(digCPU)),
+		withHost(`100 * `+digSum(digCPU)+` / on (instance) group_left () `+nodeCores("5m")),
+		withHost(digSum(digRead)+` / 1048576`),
+		withHost(`100 * `+digSum(digRead)+` / on (instance) group_left () `+nodeRead("5m")),
+		withHost(digSum(digRead)+` / `+digSum("obs_agent_mysql_digest_calls_total")+` / 16384`))
 	top.Transformations = []map[string]any{{"id": "merge", "options": map[string]any{}},
 		{"id": "organize", "options": map[string]any{
 			"renameByName":  map[string]any{"Value #A": "cores", "Value #B": "% node CPU", "Value #C": "disk MB/s", "Value #D": "% disk read", "Value #E": "pages/call"},
-			"excludeByName": map[string]any{"Time": true}}}}
+			"excludeByName": map[string]any{"Time": true, "instance": true}}}}
 	top.Options = map[string]any{"sortBy": []any{map[string]any{"displayName": "cores", "desc": true}}}
 	top.FieldConfig = withColumnUnits(top.FieldConfig, map[string]string{"% node CPU": "percent", "% disk read": "percent"})
 	b.add(described(top,
-		"over the last 5m, summed over the selected instances: cores = digest on-CPU s/s; % node CPU = cores ÷ node CPU cores in use × 100; "+
-			"disk MB/s = digest disk-read bytes/s ÷ 1048576; % disk read = digest ÷ node physical-disk read bytes/s × 100; "+
+		"over the last 5m, one row per host and digest: cores = digest on-CPU s/s; % node CPU = cores ÷ that host's node CPU cores in use × 100; "+
+			"disk MB/s = digest disk-read bytes/s ÷ 1048576; % disk read = digest ÷ that host's physical-disk read bytes/s × 100; "+
 			"pages/call = disk-read bytes per call ÷ 16384 (InnoDB page).",
 		"the top rows by cores and % disk read are the culprits. pages/call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size), "+
 			"hundreds = a scan (EXPLAIN, index, LIMIT). Only exported digests appear (prometheus_digests minimal: top 20 by CPU ∪ top 20 by disk read); "+
@@ -581,7 +586,7 @@ func analysis() Dashboard {
 	d.SchemaVersion, d.Time, d.Refresh = 39, map[string]string{"from": "now-6h", "to": "now"}, ""
 	d.Templating.List = []Var{
 		dsVar("ds_clickhouse", "ClickHouse", "grafana-clickhouse-datasource"),
-		{Name: "host", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
+		{Name: "host", Label: "Hostname", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
 			Query: "SELECT DISTINCT host FROM obs.family_stats WHERE $__timeFilter(window_end) ORDER BY host"},
 		{Name: "family", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
 			Query: "SELECT DISTINCT family FROM obs.family_stats WHERE $__timeFilter(window_end) AND " + hostF + " ORDER BY family"},
@@ -592,7 +597,7 @@ func analysis() Dashboard {
 		{Name: "slow_ms", Label: "Slow threshold (ms)", Type: "constant", Query: "100", Hide: 2},
 	}
 	d.Links = []map[string]any{{"title": "obs-agent Overview (Prometheus)", "type": "link", "targetBlank": true,
-		"url": "/d/obs-agent-overview/obs-agent-overview?$__url_time_range"}}
+		"url": "/d/obs-agent-overview/obs-agent-overview?${host:queryparam}&${family:queryparam}&$__url_time_range"}}
 
 	// Node totals of the selected hosts over the selected range, from
 	// host_stats: the denominators of every "% of node" share. They divide

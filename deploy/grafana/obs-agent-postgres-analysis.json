@@ -23,6 +23,7 @@
       },
       {
         "name": "host",
+        "label": "Hostname",
         "type": "query",
         "datasource": {
           "type": "grafana-clickhouse-datasource",
@@ -41,6 +42,20 @@
           "uid": "${ds_clickhouse}"
         },
         "query": "SELECT DISTINCT cluster FROM obs.pg_digest_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) ORDER BY cluster",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      },
+      {
+        "name": "pg_family",
+        "label": "PostgreSQL family",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${ds_clickhouse}"
+        },
+        "query": "SELECT DISTINCT family FROM obs.family_stats WHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) ORDER BY family",
+        "regex": "/^(?!.*exporter).*(postgres|patroni).*$/i",
         "multi": true,
         "includeAll": true,
         "refresh": 2
@@ -68,7 +83,7 @@
       "targetBlank": true,
       "title": "PostgreSQL Overview (Prometheus)",
       "type": "link",
-      "url": "/d/obs-agent-postgres-overview/obs-agent-postgresql-overview?$__url_time_range"
+      "url": "/d/obs-agent-postgres-overview/obs-agent-postgresql-overview?${host:queryparam}&${cluster:queryparam}&${pg_family:queryparam}&$__url_time_range"
     }
   ],
   "panels": [
@@ -91,7 +106,7 @@
         "overrides": []
       },
       "options": {
-        "content": "**How to use this dashboard** — answer five questions in order; this dashboard keeps the history (ClickHouse) behind the Overview.\n\n1. **Is the server overloaded?** CPU, load, disk stall.\n2. **Is it PostgreSQL?** The cluster's CPU against other process families.\n3. **Queries or background work?** CPU by backend type: client queries, or autovacuum, checkpointer, I/O workers.\n4. **Which query?** The digests with the largest share of the node's CPU or disk reads.\n5. **Cause or victim?** Where query time goes: a query that mostly *waits* is a victim — fix the culprit, not the victim.\n\n**Words used here.** *Digest*: one query shape — the SQL with its values replaced by `?`, so `id = 1` and `id = 2` count together. *Run-queue wait*: time a query was ready to run but no CPU was free. *WAL*: PostgreSQL's write-ahead log; a commit waits for it to reach disk. *Backend type*: what a PostgreSQL process does (client connection, autovacuum, checkpointer, I/O worker…). The full evidence for one moment is in `/api/diagnose` → `postgres_report.overload_cause`.",
+        "content": "**How to use this dashboard** — pick a **Hostname**, then answer six questions in order; this dashboard keeps the history (ClickHouse) behind the Overview.\n\n1. **Is the server overloaded?** CPU, load, disk stall.\n2. **Is it PostgreSQL?** The cluster's CPU against other process families.\n3. **Queries or background work?** CPU by backend type: client queries, or autovacuum, checkpointer, I/O workers.\n4. **Which query?** The digests with the largest share of the node's CPU or disk reads.\n5. **Cause or victim?** Where query time goes: a query that mostly *waits* is a victim — fix the culprit, not the victim.\n6. **Who talks to it?** The client IPs that send queries and the services PostgreSQL connects to.\n\n**Words used here.** *Digest*: one query shape — the SQL with its values replaced by `?`, so `id = 1` and `id = 2` count together. *Run-queue wait*: time a query was ready to run but no CPU was free. *WAL*: PostgreSQL's write-ahead log; a commit waits for it to reach disk. *Backend type*: what a PostgreSQL process does (client connection, autovacuum, checkpointer, I/O worker…). The full evidence for one moment is in `/api/diagnose` → `postgres_report.overload_cause`.",
         "mode": "markdown"
       }
     },
@@ -586,6 +601,203 @@
         "overrides": []
       },
       "description": "What: the slowest single client statements in the range (one row per slow execution).\nGood / bad: many rows of the same digest at the incident time point at it; a slow row with little cpu_ms waited.\nIf bad: compare cpu_ms with latency_ms: mostly CPU = the query itself is heavy; mostly waiting = a victim.\nFormula: pg_slow_queries rows with latency ≥ postgres.slow_query_threshold_ms; query is digest text unless raw samples are allowed."
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "Who talks to PostgreSQL? (history)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "datasource": {
+        "type": "",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "text",
+      "title": "Question 6",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 65
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "The client IPs that sent queries to PostgreSQL and the services it connected to, over the chosen time range (one row per flush interval in netflow_peer_stats).",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 17,
+      "type": "table",
+      "title": "Top inbound clients of PostgreSQL",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 67
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 1,
+          "rawSql": "SELECT host, replaceRegexpOne(toString(peer_ip), '^::ffff:', '') AS client, service_port AS port,\n  sum(bytes_rx) AS bytesIn, sum(bytes_tx) AS bytesOut, sum(conns_opened) AS conns\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${pg_family:singlequote}) AND direction = 'inbound'\nGROUP BY host, client, port ORDER BY bytesOut DESC LIMIT 50",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bytesIn"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bytesOut"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "What: per PostgreSQL host and client IP: bytes received (queries), bytes sent (results) and connections opened on PostgreSQL's port.\nGood / bad: the application hosts you expect, with few connections each (a pool); client :: / port 0 = clients beyond the cap.\nIf bad: many conns with few bytes = no connection pool; the largest bytesOut fetches the biggest results — match it to a digest.\nFormula: Σ netflow_peer_stats.bytes_rx / bytes_tx / conns_opened, direction inbound, family in pg_family."
+    },
+    {
+      "id": 18,
+      "type": "table",
+      "title": "Top outbound peers of PostgreSQL",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 67
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 1,
+          "rawSql": "SELECT host, replaceRegexpOne(toString(peer_ip), '^::ffff:', '') AS peer, service_port AS port,\n  sum(bytes_rx) AS bytesIn, sum(bytes_tx) AS bytesOut, sum(conns_opened) AS conns\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${pg_family:singlequote}) AND direction = 'outbound'\nGROUP BY host, peer, port ORDER BY bytesIn + bytesOut DESC LIMIT 50",
+          "editorType": "sql",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bytesIn"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bytesOut"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          }
+        ]
+      },
+      "description": "What: per PostgreSQL host and remote IP it connected to: bytes both ways and connections opened (standbys, WAL archive, DCS).\nGood / bad: stable replication and archive peers; a new peer or a large jump in bytesOut is worth checking.\nIf bad: check standby lag (pg_stat_replication) and the archive target when a peer grows.\nFormula: Σ netflow_peer_stats.bytes_rx / bytes_tx / conns_opened, direction outbound, family in pg_family."
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "PostgreSQL TCP throughput by direction",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 75
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds_clickhouse}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds_clickhouse}"
+          },
+          "format": 0,
+          "rawSql": "SELECT toDateTime(intDiv(toUInt32(window_end), greatest($__interval_s, ${flush_s})) * greatest($__interval_s, ${flush_s}), 'UTC') AS time, direction,\n  sum(bytes_rx + bytes_tx) / greatest($__interval_s, ${flush_s}) AS bytesPerSec\nFROM obs.netflow_peer_stats\nWHERE $__timeFilter(window_end) AND host IN (${host:singlequote}) AND family IN (${pg_family:singlequote})\nGROUP BY time, direction ORDER BY time",
+          "editorType": "sql",
+          "queryType": "timeseries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "description": "What: TCP bytes per second of the PostgreSQL family over time: inbound = its clients, outbound = connections it opened.\nGood / bad: inbound follows the applications' demand; a step at the incident time is a change in what clients ask for.\nIf bad: compare with the digest calls in 'Calls and latency of the selected digest'.\nFormula: Σ (bytes_rx + bytes_tx) per flush interval ÷ interval seconds, by direction."
     }
   ]
 }

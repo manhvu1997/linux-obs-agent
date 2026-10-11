@@ -22,6 +22,7 @@
       },
       {
         "name": "host",
+        "label": "Hostname",
         "type": "query",
         "datasource": {
           "type": "grafana-clickhouse-datasource",
@@ -74,7 +75,7 @@
       "targetBlank": true,
       "title": "obs-agent Overview (Prometheus)",
       "type": "link",
-      "url": "/d/obs-agent-overview/obs-agent-overview?$__url_time_range"
+      "url": "/d/obs-agent-overview/obs-agent-overview?${host:queryparam}&${family:queryparam}&$__url_time_range"
     }
   ],
   "panels": [

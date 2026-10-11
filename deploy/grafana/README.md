@@ -68,13 +68,23 @@ that type and starts on the default one; switch it at any time (e.g. staging vs 
 and the host/family lists follow. To pin one in a link, add `var-ds_prometheus=<data source name or uid>`
 (or `var-ds_clickhouse=…`) to the URL.
 
+## Selecting a host
+
+Every dashboard starts with a **Hostname** variable. On the Overviews it lists the `host`
+label of `obs_agent_host_info` (`agent.node_name`, else the OS hostname), and the
+`instance` (IP:port) list follows the chosen hostnames. Agents older than
+`obs_agent_host_info` are not listed: upgrade them. On the Analysis dashboards Hostname is
+the ClickHouse `host` column, which holds the same value. The live "Top digests (last 5m)"
+tables show one row per host.
+
 ## Linking
 
-The Overview's "MySQL & Network Analysis" link carries `var-host`, `var-family` and the time
-range ("All" arrives as `$__all`, which the Analysis variables accept). It does not carry a ClickHouse data source:
-the Analysis dashboard opens on its default ClickHouse data source. Prometheus `instance` (`host:9200`) differs from the ClickHouse `host` column (hostname);
-the link uses `obs_agent_clickhouse_host_info{host}` to translate, so it only works for agents with
-`clickhouse.enabled: true`.
+The links between Overview and Analysis carry `var-host`, the family variable and the time
+range ("All" arrives as `$__all`, which the variables accept); the PostgreSQL links also
+carry `var-cluster` and `var-pg_family`. They do not carry a data source: the target opens
+on its default data source. Prometheus `instance` (`host:9200`) differs from the ClickHouse
+`host` column (hostname); both dashboards select by hostname, so the same value works on
+both sides.
 
 ## Reading the ClickHouse panels
 
@@ -109,11 +119,16 @@ Pipe it to `jq` — it is exactly what `/api/diagnose` returned at that moment.
 
 `obs-agent-postgres-overview.json` (Prometheus) and `obs-agent-postgres-analysis.json`
 (ClickHouse) follow the same import steps. Both open with **How to use this dashboard**:
-five questions in order (is the server overloaded → is it PostgreSQL → queries or
-background work → which query → cause or victim), one row each. Every panel's ⓘ help
-has four plain-language parts — **What**, **Good / bad**, **If bad**, **Formula** — plus
-the alert it backs. Variables: `instance` and `cluster` (Overview); `host`, `cluster`,
-`digest` and the hidden constant `flush_s` (Analysis, must equal
-`clickhouse.flush_interval`). Panels are empty until `postgres.enabled` is on; the
+six questions in order (is the server overloaded → is it PostgreSQL → queries or
+background work → which query → cause or victim → who talks to it), one row each. Every
+panel's ⓘ help has four plain-language parts — **What**, **Good / bad**, **If bad**,
+**Formula** — plus the alert it backs. Variables: Hostname (`host`), `instance`, `cluster`
+and `pg_family` (Overview; only agents running the PostgreSQL tracer are listed);
+Hostname (`host`), `cluster`, `pg_family`, `digest` and the hidden constant `flush_s`
+(Analysis, must equal `clickhouse.flush_interval`). `pg_family` picks the PostgreSQL
+process family for the client / peer panels (default: families matching
+`postgres|patroni`, exporters excluded). "CPU by backend type (% of node CPU)" is a share
+of the whole server; "Background share of PostgreSQL CPU" is a share of PostgreSQL's own
+CPU (the `PostgresBackgroundCPUHigh` line). Panels are empty until `postgres.enabled` is on; the
 per-digest disk panels are empty on PostgreSQL 18+ with asynchronous I/O unless
 `postgres.sql` is configured (see the "Estimated disk reads per digest" table).

@@ -56,12 +56,18 @@ const (
 	pgInst = `instance=~"$instance",cluster=~"$cluster"`
 	pgHost = `host IN (${host:singlequote}) AND cluster IN (${cluster:singlequote})`
 
-	pgIntro = "**How to use this dashboard** — answer five questions in order; each row answers one.\n\n" +
+	// The PostgreSQL process family (systemd unit or cgroup) for the network
+	// panels; exporters are excluded. Pick another family in the variable if
+	// the regex misses it.
+	pgFamilyRegex = `/^(?!.*exporter).*(postgres|patroni).*$/i`
+
+	pgIntro = "**How to use this dashboard** — pick a **Hostname**, then answer six questions in order; each row answers one.\n\n" +
 		"1. **Is the server overloaded?** CPU, load, disk stall.\n" +
 		"2. **Is it PostgreSQL?** The cluster's CPU against other process families.\n" +
 		"3. **Queries or background work?** CPU by backend type: client queries, or autovacuum, checkpointer, I/O workers.\n" +
 		"4. **Which query?** The digests with the largest share of the node's CPU or disk reads.\n" +
-		"5. **Cause or victim?** Where query time goes: a query that mostly *waits* is a victim — fix the culprit, not the victim.\n\n" +
+		"5. **Cause or victim?** Where query time goes: a query that mostly *waits* is a victim — fix the culprit, not the victim.\n" +
+		"6. **Who talks to it?** The client IPs that send queries and the services PostgreSQL connects to.\n\n" +
 		"**Words used here.** *Digest*: one query shape — the SQL with its values replaced by `?`, so `id = 1` and `id = 2` count together. " +
 		"*Run-queue wait*: time a query was ready to run but no CPU was free. *WAL*: PostgreSQL's write-ahead log; a commit waits for it to reach disk. " +
 		"*Backend type*: what a PostgreSQL process does (client connection, autovacuum, checkpointer, I/O worker…). " +
@@ -74,13 +80,21 @@ func pgOverview() Dashboard {
 	d.SchemaVersion, d.Time, d.Refresh = 39, map[string]string{"from": "now-6h", "to": "now"}, "1m"
 	d.Templating.List = []Var{
 		dsVar("ds_prometheus", "Prometheus", "prometheus"),
-		{Name: "instance", Type: "query", Datasource: &promDS, Query: "label_values(obs_agent_postgres_tracing_active, instance)",
-			Definition: "label_values(obs_agent_postgres_tracing_active, instance)", Multi: true, IncludeAll: true, Refresh: 2},
+		// Only hosts whose agent runs the PostgreSQL tracer.
+		{Name: "host", Label: "Hostname", Type: "query", Datasource: &promDS, Regex: `/host="([^"]+)"/`,
+			Query:      "query_result(obs_agent_host_info and on (instance) obs_agent_postgres_tracing_active)",
+			Definition: "query_result(obs_agent_host_info and on (instance) obs_agent_postgres_tracing_active)", Multi: true, IncludeAll: true, Refresh: 2},
+		{Name: "instance", Type: "query", Datasource: &promDS, Regex: `/instance="([^"]+)"/`,
+			Query:      `query_result(obs_agent_host_info{host=~"$host"} and on (instance) obs_agent_postgres_tracing_active)`,
+			Definition: `query_result(obs_agent_host_info{host=~"$host"} and on (instance) obs_agent_postgres_tracing_active)`, Multi: true, IncludeAll: true, Refresh: 2},
 		{Name: "cluster", Type: "query", Datasource: &promDS, Query: `label_values(obs_agent_postgres_queries_total{instance=~"$instance"}, cluster)`,
 			Definition: `label_values(obs_agent_postgres_queries_total{instance=~"$instance"}, cluster)`, Multi: true, IncludeAll: true, Refresh: 2},
+		{Name: "pg_family", Label: "PostgreSQL family", Type: "query", Datasource: &promDS, Regex: pgFamilyRegex,
+			Query:      `label_values(obs_agent_family_cpu_percent{instance=~"$instance"}, family)`,
+			Definition: `label_values(obs_agent_family_cpu_percent{instance=~"$instance"}, family)`, Multi: true, IncludeAll: true, Refresh: 2},
 	}
 	d.Links = []map[string]any{{"title": "PostgreSQL Analysis (ClickHouse)", "type": "link", "targetBlank": true,
-		"url": "/d/obs-agent-postgres-analysis/obs-agent-postgresql-analysis?$__url_time_range"}}
+		"url": "/d/obs-agent-postgres-analysis/obs-agent-postgresql-analysis?${host:queryparam}&${cluster:queryparam}&${pg_family:queryparam}&$__url_time_range"}}
 	ratio := func(num, den string) string {
 		return `100 * sum by (instance, cluster) (rate(` + num + `{` + pgInst + `,command="client"}[` + alertWin + `]))` +
 			` / sum by (instance, cluster) (rate(` + den + `{` + pgInst + `,command="client"}[` + alertWin + `]))`
@@ -133,27 +147,37 @@ func pgOverview() Dashboard {
 
 	b.row("3. Queries or background work?")
 	b.addH(textPanel("Question 3", "Client queries are what applications send. Background work (autovacuum, checkpoints, I/O workers) is PostgreSQL maintaining itself; it has different fixes."), 24, 2)
-	b.add(withAlert(explained(prom("CPU by backend type (% of cluster)", "percent",
-		[2]string{`100 * sum by (instance, cluster, backend_type) (rate(obs_agent_postgres_backend_cpu_seconds_total{` + pgInst + `}[` + alertWin + `]))` +
+	// A share of the node (all cores), so "client 90%" means 90% of the
+	// machine; the share of PostgreSQL's own CPU is the panel next to it.
+	b.add(dashedLine(explained(prom("CPU by backend type (% of node CPU)", "percent",
+		[2]string{`100 * sum by (instance, cluster, backend_type) (rate(obs_agent_postgres_backend_cpu_seconds_total{` + pgInst + `}[$__rate_interval]))` +
+			` / on (instance) group_left () obs_agent_cpu_count{instance=~"$instance"}`, "{{instance}} {{cluster}} {{backend_type}}"},
+		[2]string{`avg_over_time(obs_agent_cpu_usage_percent{instance=~"$instance"}[$__rate_interval])`, "{{instance}} node CPU used (all processes)"}),
+		"CPU used by each kind of PostgreSQL process as a share of the whole server (all cores), next to the node's total CPU used.",
+		"the node line under the dashed 85% line means CPU is still free, whatever the split; backend lines never exceed the node line.",
+		"node above 85% with client on top: row 4; a background type on top: see 'Background share of PostgreSQL CPU'.",
+		"rate(backend_cpu_seconds_total) per type ÷ obs_agent_cpu_count × 100; node: obs_agent_cpu_usage_percent."), 85, false), 12)
+	b.add(withAlert(explained(prom("Background share of PostgreSQL CPU", "percent",
+		[2]string{`100 * sum by (instance, cluster, backend_type) (rate(obs_agent_postgres_backend_cpu_seconds_total{` + pgInst + `,backend_type!~"client|parallel_worker|postmaster"}[` + alertWin + `]))` +
 			` / on (instance, cluster) group_left () sum by (instance, cluster) (rate(obs_agent_postgres_backend_cpu_seconds_total{` + pgInst + `}[` + alertWin + `]))`, "{{instance}} {{cluster}} {{backend_type}}"}),
-		"each backend type's share of the cluster's CPU: client, autovacuum, checkpointer, io_worker, walsender…",
-		"client usually dominates; a background type above the dashed 50% line on a busy node is the cause.",
-		"autovacuum: check table bloat and autovacuum cost limits; checkpointer: raise max_wal_size; io_worker: queries are reading (row 4).",
-		"rate(backend_cpu_seconds_total) per type ÷ the cluster's total × 100, over 5m (the alert's window)."), pgRule("PostgresBackgroundCPUHigh")), 12)
+		"each background type's share of PostgreSQL's own CPU, not of the server: 60% can be 0.1 core on an idle machine.",
+		"under the dashed 50% line is normal; above it while the node is busy (≥ 85%, left panel) background work is the cause.",
+		"autovacuum: check table bloat and cost limits; checkpointer: raise max_wal_size; io_worker: queries are reading (row 4).",
+		"rate(backend_cpu_seconds_total) of non-client types ÷ the cluster's total × 100, over 5m (the alert's window)."), pgRule("PostgresBackgroundCPUHigh")), 12)
 	cov := promStat("Statement CPU coverage", "percent", `100 * obs_agent_postgres_query_cpu_coverage_ratio{`+pgInst+`}`, "{{instance}} {{cluster}}")
 	cov.FieldConfig["defaults"].(map[string]any)["thresholds"] = map[string]any{"mode": "absolute",
 		"steps": []any{map[string]any{"color": "blue", "value": nil}}}
 	b.add(explained(cov,
 		"how much of the cluster's CPU was spent inside statements the agent could see.",
 		"high (70–100%) means queries explain the load; low means background work or connection handling.",
-		"if low, read the backend-type panel on the left.",
+		"if low, read the backend-type panels above.",
 		"statement CPU ÷ cluster CPU × 100 (obs_agent_postgres_query_cpu_coverage_ratio)."), 6)
 	b.add(explained(prom("Disk reads by backend type (MB/s)", "MiBs",
 		[2]string{`sum by (instance, cluster, backend_type) (rate(obs_agent_postgres_backend_disk_read_bytes_total{` + pgInst + `}[$__rate_interval])) / 1048576`, "{{instance}} {{cluster}} {{backend_type}}"}),
 		"storage reads by each backend type of the cluster.",
 		"on PostgreSQL 18+ the io_worker line carries the reads of queries; autovacuum reading a lot means vacuuming big tables.",
 		"compare with row 4's disk-read shares; on PostgreSQL 18+ enable postgres.sql to split io_worker reads per query.",
-		"rate(obs_agent_postgres_backend_disk_read_bytes_total) / 1048576 (needs process.include_io)."), 6)
+		"rate(obs_agent_postgres_backend_disk_read_bytes_total) / 1048576 (needs process.include_io)."), 18)
 
 	b.row("4. Which query?")
 	b.addH(textPanel("Question 4", "A line above the dashed line is one query shape doing a fifth of all the server's CPU work or disk reads: that is the culprit to fix."), 24, 2)
@@ -171,24 +195,24 @@ func pgOverview() Dashboard {
 		"1–4 pages per call: add RAM / shared_buffers; hundreds: a scan — add an index or a LIMIT.",
 		"rate(digest_disk_read_bytes_total) ÷ rate(node_disk_read_bytes_total) × 100, over 5m."), pgRule("PostgresDigestDiskReadHog")), 12)
 	dig := func(m string) string {
-		return `sum by (cluster, digest_id) (rate(` + m + `{` + pgInst + `,digest_id!="other"}[5m]))`
+		return `sum by (instance, cluster, digest_id) (rate(` + m + `{` + pgInst + `,digest_id!="other"}[5m]))`
 	}
 	top := promTable("Top digests (last 5m)",
-		dig("obs_agent_postgres_digest_cpu_seconds_total"),
-		`100 * `+dig("obs_agent_postgres_digest_cpu_seconds_total")+` / scalar(sum(`+nodeCores+`))`,
-		dig("obs_agent_postgres_digest_calls_total"),
-		dig("obs_agent_postgres_digest_disk_read_bytes_total")+` / 1048576`)
+		withHost(dig("obs_agent_postgres_digest_cpu_seconds_total")),
+		withHost(`100 * `+dig("obs_agent_postgres_digest_cpu_seconds_total")+` / on (instance) group_left () `+nodeCores),
+		withHost(dig("obs_agent_postgres_digest_calls_total")),
+		withHost(dig("obs_agent_postgres_digest_disk_read_bytes_total")+` / 1048576`))
 	top.Transformations = []map[string]any{{"id": "merge", "options": map[string]any{}},
 		{"id": "organize", "options": map[string]any{
 			"renameByName":  map[string]any{"Value #A": "cores", "Value #B": "% node CPU", "Value #C": "calls/s", "Value #D": "disk MB/s"},
-			"excludeByName": map[string]any{"Time": true}}}}
+			"excludeByName": map[string]any{"Time": true, "instance": true}}}}
 	top.Options = map[string]any{"sortBy": []any{map[string]any{"displayName": "cores", "desc": true}}}
 	top.FieldConfig = withColumnUnits(top.FieldConfig, map[string]string{"% node CPU": "percent"})
 	b.add(explained(top,
-		"the heaviest query shapes right now: CPU cores, share of node CPU, calls per second, disk reads.",
+		"the heaviest query shapes right now, one row per host, cluster and digest: CPU cores, share of node CPU, calls per second, disk reads.",
 		"a few cores spread over many digests is normal; one digest with a large share is the culprit.",
 		"copy its digest_id into the Analysis dashboard for history, or read its text in postgres_report.",
-		"per digest over 5m: rate(cpu seconds), ÷ node cores × 100, rate(calls), rate(disk read bytes) / 1048576."), 24)
+		"per digest over 5m: rate(cpu seconds), ÷ that host's node cores × 100, rate(calls), rate(disk read bytes) / 1048576."), 24)
 
 	b.row("5. Cause or victim?")
 	b.addH(textPanel("Question 5", "A slow query that mostly waits for a CPU, the disk or the WAL is a victim of something else. Fix the culprit from row 4 first."), 24, 2)
@@ -222,6 +246,35 @@ func pgOverview() Dashboard {
 		"find the caller of the digest that grew in row 4.",
 		"rate(obs_agent_postgres_queries_total) by command."), 12)
 
+	b.row("6. Who talks to PostgreSQL?")
+	b.addH(textPanel("Question 6", "The machines that send queries to PostgreSQL (inbound) and the services PostgreSQL connects to (outbound: standbys, WAL archive, Patroni's etcd/consul). A new or unusually loud client often explains a load change."), 24, 2)
+	fam := `instance=~"$instance",family=~"$pg_family"`
+	b.add(explained(prom("Top inbound clients of PostgreSQL", "Bps",
+		[2]string{`topk(10, sum by (instance, family, peer_ip, service_port) (rate(obs_agent_family_inbound_peer_bytes_total{` + fam + `}[$__rate_interval])))`, "{{instance}} {{family}} ← {{peer_ip}}:{{service_port}}"}),
+		"TCP bytes per second exchanged with each client IP on PostgreSQL's listening port (both directions); top 10.",
+		"a few application hosts on top is normal; an unknown IP, or one client far above the others, is worth a look.",
+		"match the client to the digest that grew in row 4; peer_ip 'other' = clients beyond netflow.max_inbound_peers.",
+		"topk(10, rate(obs_agent_family_inbound_peer_bytes_total)) for the PostgreSQL family (pg_family variable)."), 12)
+	b.add(explained(prom("Top outbound peers of PostgreSQL", "Bps",
+		[2]string{`topk(10, sum by (instance, family, peer_ip, service_port) (rate(obs_agent_family_outbound_peer_bytes_total{` + fam + `}[$__rate_interval])))`, "{{instance}} {{family}} → {{peer_ip}}:{{service_port}}"}),
+		"TCP bytes per second between PostgreSQL and the remote services it connects to (replication, WAL archive, DCS); top 10.",
+		"steady replication traffic is normal; a jump means a standby is catching up or a large archive upload.",
+		"check pg_stat_replication lag and the archive target when a peer jumps.",
+		"topk(10, rate(obs_agent_family_outbound_peer_bytes_total)) for the PostgreSQL family (pg_family variable)."), 12)
+	b.add(explained(prom("PostgreSQL connections by direction", "short",
+		[2]string{`sum by (instance, family, direction) (obs_agent_family_net_connections_active{` + fam + `})`, "{{instance}} {{family}} {{direction}} active"},
+		[2]string{`sum by (instance, family, direction) (rate(obs_agent_family_net_connections_opened_total{` + fam + `}[$__rate_interval]))`, "{{instance}} {{family}} {{direction}} opened/s"}),
+		"TCP connections the PostgreSQL family holds (active) and opens per second, inbound (clients) and outbound.",
+		"steady active connections with opened/s near zero means clients use a pool; many opened/s means a new connection per request.",
+		"put PgBouncer or a client-side pool in front: every new connection forks a backend process.",
+		"obs_agent_family_net_connections_active; rate(obs_agent_family_net_connections_opened_total)."), 12)
+	b.add(explained(prom("PostgreSQL TCP throughput by direction", "Bps",
+		[2]string{`sum by (instance, family, direction) (rate(obs_agent_family_net_bytes_total{` + fam + `}[$__rate_interval]))`, "{{instance}} {{family}} {{direction}}"}),
+		"TCP bytes per second of the PostgreSQL family: inbound = its clients, outbound = connections it opens.",
+		"inbound follows the applications' demand; a rise in bytes sent to clients means larger result sets.",
+		"find the digest whose calls or result size grew in the Analysis dashboard.",
+		"Σ rate(obs_agent_family_net_bytes_total) by direction (sent + received)."), 12)
+
 	b.row("Agent health")
 	b.addH(textPanel("Agent health", "Whether the numbers above are complete. Missing signals are shown as unavailable, never as zero."), 24, 2)
 	b.add(explained(prom("Accounting availability", "short",
@@ -251,15 +304,17 @@ func pgAnalysis() Dashboard {
 	d.SchemaVersion, d.Time, d.Refresh = 39, map[string]string{"from": "now-6h", "to": "now"}, ""
 	d.Templating.List = []Var{
 		dsVar("ds_clickhouse", "ClickHouse", "grafana-clickhouse-datasource"),
-		{Name: "host", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
+		{Name: "host", Label: "Hostname", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
 			Query: "SELECT DISTINCT host FROM obs.pg_digest_stats WHERE $__timeFilter(window_end) ORDER BY host"},
 		{Name: "cluster", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2,
 			Query: "SELECT DISTINCT cluster FROM obs.pg_digest_stats WHERE $__timeFilter(window_end) AND " + hostF + " ORDER BY cluster"},
+		{Name: "pg_family", Label: "PostgreSQL family", Type: "query", Datasource: &chDS, Multi: true, IncludeAll: true, Refresh: 2, Regex: pgFamilyRegex,
+			Query: "SELECT DISTINCT family FROM obs.family_stats WHERE $__timeFilter(window_end) AND " + hostF + " ORDER BY family"},
 		{Name: "digest", Label: "Digest id (drill-down)", Type: "textbox", Query: "", Current: map[string]any{"value": ""}},
 		{Name: "flush_s", Label: "ClickHouse flush interval (s)", Type: "constant", Query: "60", Hide: 2},
 	}
 	d.Links = []map[string]any{{"title": "PostgreSQL Overview (Prometheus)", "type": "link", "targetBlank": true,
-		"url": "/d/obs-agent-postgres-overview/obs-agent-postgresql-overview?$__url_time_range"}}
+		"url": "/d/obs-agent-postgres-overview/obs-agent-postgresql-overview?${host:queryparam}&${cluster:queryparam}&${pg_family:queryparam}&$__url_time_range"}}
 	rangeS := `greatest(dateDiff('second', $__fromTime, $__toTime), 1)`
 	hostSum := func(col string) string {
 		return `(SELECT sum(` + col + `) FROM obs.host_stats WHERE $__timeFilter(window_end) AND ` + hostF + `)`
@@ -350,6 +405,42 @@ ORDER BY latency_ms DESC LIMIT 200`),
 		"many rows of the same digest at the incident time point at it; a slow row with little cpu_ms waited.",
 		"compare cpu_ms with latency_ms: mostly CPU = the query itself is heavy; mostly waiting = a victim.",
 		"pg_slow_queries rows with latency ≥ postgres.slow_query_threshold_ms; query is digest text unless raw samples are allowed."), 24)
+
+	b.row("Who talks to PostgreSQL? (history)")
+	b.addH(chText("Question 6", "The client IPs that sent queries to PostgreSQL and the services it connected to, over the chosen time range (one row per flush interval in netflow_peer_stats)."), 24, 2)
+	peer := "replaceRegexpOne(toString(peer_ip), '^::ffff:', '')"
+	pgFam := `family IN (${pg_family:singlequote})`
+	in := chTable("Top inbound clients of PostgreSQL", `SELECT host, `+peer+` AS client, service_port AS port,
+  sum(bytes_rx) AS bytesIn, sum(bytes_tx) AS bytesOut, sum(conns_opened) AS conns
+FROM obs.netflow_peer_stats
+WHERE $__timeFilter(window_end) AND `+hostF+` AND `+pgFam+` AND direction = 'inbound'
+GROUP BY host, client, port ORDER BY bytesOut DESC LIMIT 50`)
+	in.FieldConfig = withColumnUnits(in.FieldConfig, map[string]string{"bytesIn": "bytes", "bytesOut": "bytes"})
+	b.add(explained(in,
+		"per PostgreSQL host and client IP: bytes received (queries), bytes sent (results) and connections opened on PostgreSQL's port.",
+		"the application hosts you expect, with few connections each (a pool); client :: / port 0 = clients beyond the cap.",
+		"many conns with few bytes = no connection pool; the largest bytesOut fetches the biggest results — match it to a digest.",
+		"Σ netflow_peer_stats.bytes_rx / bytes_tx / conns_opened, direction inbound, family in pg_family."), 12)
+	out := chTable("Top outbound peers of PostgreSQL", `SELECT host, `+peer+` AS peer, service_port AS port,
+  sum(bytes_rx) AS bytesIn, sum(bytes_tx) AS bytesOut, sum(conns_opened) AS conns
+FROM obs.netflow_peer_stats
+WHERE $__timeFilter(window_end) AND `+hostF+` AND `+pgFam+` AND direction = 'outbound'
+GROUP BY host, peer, port ORDER BY bytesIn + bytesOut DESC LIMIT 50`)
+	out.FieldConfig = withColumnUnits(out.FieldConfig, map[string]string{"bytesIn": "bytes", "bytesOut": "bytes"})
+	b.add(explained(out,
+		"per PostgreSQL host and remote IP it connected to: bytes both ways and connections opened (standbys, WAL archive, DCS).",
+		"stable replication and archive peers; a new peer or a large jump in bytesOut is worth checking.",
+		"check standby lag (pg_stat_replication) and the archive target when a peer grows.",
+		"Σ netflow_peer_stats.bytes_rx / bytes_tx / conns_opened, direction outbound, family in pg_family."), 12)
+	b.add(explained(chTS("PostgreSQL TCP throughput by direction", "Bps", `SELECT `+flushBucket+` AS time, direction,
+  sum(bytes_rx + bytes_tx) / `+flushBucketS+` AS bytesPerSec
+FROM obs.netflow_peer_stats
+WHERE $__timeFilter(window_end) AND `+hostF+` AND `+pgFam+`
+GROUP BY time, direction ORDER BY time`),
+		"TCP bytes per second of the PostgreSQL family over time: inbound = its clients, outbound = connections it opened.",
+		"inbound follows the applications' demand; a step at the incident time is a change in what clients ask for.",
+		"compare with the digest calls in 'Calls and latency of the selected digest'.",
+		"Σ (bytes_rx + bytes_tx) per flush interval ÷ interval seconds, by direction."), 24)
 	d.Panels = b.done()
 	return d
 }

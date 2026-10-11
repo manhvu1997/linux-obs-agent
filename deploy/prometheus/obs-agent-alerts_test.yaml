@@ -640,7 +640,7 @@ tests:
           - exp_labels: { instance: "pg1:9200", cluster: "postgresql@16-main.service", severity: "warning", backend_type: "autovacuum" }
             exp_annotations:
               summary: "PostgreSQL autovacuum backends use at least half of postgresql@16-main.service's CPU on pg1:9200"
-              description: "1. Open obs-agent PostgreSQL Overview → 'CPU by backend type'. 2. autovacuum: check bloat (pg_stat_user_tables.n_dead_tup) and autovacuum_vacuum_cost_limit / autovacuum_max_workers; the 'autovacuum' digests name the tables. 3. checkpointer: raise max_wal_size / checkpoint_timeout. 4. io_worker: queries are reading; see the top digests by disk read. 5. walsender: check replication consumers."
+              description: "1. Open obs-agent PostgreSQL Overview → 'Background share of PostgreSQL CPU' (share of PostgreSQL's own CPU, the alert's 50% line) and 'CPU by backend type (% of node CPU)' (share of the whole server). 2. autovacuum: check bloat (pg_stat_user_tables.n_dead_tup) and autovacuum_vacuum_cost_limit / autovacuum_max_workers; the 'autovacuum' digests name the tables. 3. checkpointer: raise max_wal_size / checkpoint_timeout. 4. io_worker: queries are reading; see the top digests by disk read. 5. walsender: check replication consumers."
               diagnose: "http://pg1:9200/api/diagnose"
 
   # Same split on a 50% busy node: no alert.

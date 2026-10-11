@@ -20,14 +20,28 @@
         "refresh": 1
       },
       {
+        "name": "host",
+        "label": "Hostname",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds_prometheus}"
+        },
+        "query": "label_values(obs_agent_host_info, host)",
+        "definition": "label_values(obs_agent_host_info, host)",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      },
+      {
         "name": "instance",
         "type": "query",
         "datasource": {
           "type": "prometheus",
           "uid": "${ds_prometheus}"
         },
-        "query": "label_values(obs_agent_cpu_usage_percent, instance)",
-        "definition": "label_values(obs_agent_cpu_usage_percent, instance)",
+        "query": "label_values(obs_agent_host_info{host=~\"$host\"}, instance)",
+        "definition": "label_values(obs_agent_host_info{host=~\"$host\"}, instance)",
         "multi": true,
         "includeAll": true,
         "refresh": 2
@@ -44,21 +58,6 @@
         "multi": true,
         "includeAll": true,
         "refresh": 2
-      },
-      {
-        "name": "host",
-        "label": "ClickHouse host",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${ds_prometheus}"
-        },
-        "query": "label_values(obs_agent_clickhouse_host_info{instance=~\"$instance\"}, host)",
-        "definition": "label_values(obs_agent_clickhouse_host_info{instance=~\"$instance\"}, host)",
-        "multi": true,
-        "includeAll": true,
-        "refresh": 2,
-        "hide": 2
       },
       {
         "name": "mysql_family",
@@ -516,7 +515,7 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "sum by (digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m]))",
+          "expr": "(sum by (instance, digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m]))) * on (instance) group_left (host) obs_agent_host_info{instance=~\"$instance\"}",
           "instant": true,
           "format": "table"
         },
@@ -526,7 +525,7 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * sum by (digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / scalar(sum((avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"})))",
+          "expr": "(100 * sum by (instance, digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"})) * on (instance) group_left (host) obs_agent_host_info{instance=~\"$instance\"}",
           "instant": true,
           "format": "table"
         },
@@ -536,7 +535,7 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / 1048576",
+          "expr": "(sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / 1048576) * on (instance) group_left (host) obs_agent_host_info{instance=~\"$instance\"}",
           "instant": true,
           "format": "table"
         },
@@ -546,7 +545,7 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on () group_left () sum((rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0))",
+          "expr": "(100 * sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0)) * on (instance) group_left (host) obs_agent_host_info{instance=~\"$instance\"}",
           "instant": true,
           "format": "table"
         },
@@ -556,7 +555,7 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / sum by (digest_id) (rate(obs_agent_mysql_digest_calls_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / 16384",
+          "expr": "(sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / sum by (instance, digest_id) (rate(obs_agent_mysql_digest_calls_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / 16384) * on (instance) group_left (host) obs_agent_host_info{instance=~\"$instance\"}",
           "instant": true,
           "format": "table"
         }
@@ -600,7 +599,7 @@
           }
         ]
       },
-      "description": "Formula: over the last 5m, summed over the selected instances: cores = digest on-CPU s/s; % node CPU = cores ÷ node CPU cores in use × 100; disk MB/s = digest disk-read bytes/s ÷ 1048576; % disk read = digest ÷ node physical-disk read bytes/s × 100; pages/call = disk-read bytes per call ÷ 16384 (InnoDB page).\nReading: the top rows by cores and % disk read are the culprits. pages/call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size), hundreds = a scan (EXPLAIN, index, LIMIT). Only exported digests appear (prometheus_digests minimal: top 20 by CPU ∪ top 20 by disk read); the long tail is in the Analysis dashboard.",
+      "description": "Formula: over the last 5m, one row per host and digest: cores = digest on-CPU s/s; % node CPU = cores ÷ that host's node CPU cores in use × 100; disk MB/s = digest disk-read bytes/s ÷ 1048576; % disk read = digest ÷ that host's physical-disk read bytes/s × 100; pages/call = disk-read bytes per call ÷ 16384 (InnoDB page).\nReading: the top rows by cores and % disk read are the culprits. pages/call 1–4 = buffer-pool misses (grow innodb_buffer_pool_size), hundreds = a scan (EXPLAIN, index, LIMIT). Only exported digests appear (prometheus_digests minimal: top 20 by CPU ∪ top 20 by disk read); the long tail is in the Analysis dashboard.",
       "transformations": [
         {
           "id": "merge",
@@ -610,7 +609,8 @@
           "id": "organize",
           "options": {
             "excludeByName": {
-              "Time": true
+              "Time": true,
+              "instance": true
             },
             "renameByName": {
               "Value #A": "cores",
