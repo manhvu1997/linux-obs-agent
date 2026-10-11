@@ -17,6 +17,14 @@ const (
 	OverloadNotMySQL         OverloadVerdict = "not_mysql"
 	OverloadNoDominantQuery  OverloadVerdict = "no_dominant_query"
 	OverloadNoData           OverloadVerdict = "no_data"
+	// OverloadNotPostgres: the saturated resource's top family is not the
+	// PostgreSQL cluster's.
+	OverloadNotPostgres OverloadVerdict = "not_postgres"
+	// OverloadBackground: the node is saturated, the cluster's family is the
+	// top consumer, no digest is a culprit, and one non-query backend type
+	// (autovacuum, checkpointer, io_worker, …) uses at least
+	// background_dominant_percent of the cluster's resource.
+	OverloadBackground OverloadVerdict = "background_overload"
 )
 
 // QueryOverload answers "which query is overloading this server, on which
@@ -42,6 +50,11 @@ type QueryOverload struct {
 	// Secondary is the other saturated resource's assessment, when both CPU
 	// and disk are saturated (never itself has a Secondary).
 	Secondary *QueryOverload `json:"secondary,omitempty"`
+	// Cluster is the PostgreSQL cluster assessed (empty for MySQL).
+	Cluster string `json:"cluster,omitempty"`
+	// OtherClusters: the other PostgreSQL clusters' assessments (each
+	// without OtherClusters).
+	OtherClusters []*QueryOverload `json:"other_clusters,omitempty"`
 }
 
 // OverloadDigest is the candidate digest (no raw SQL: digest text only).
@@ -106,6 +119,21 @@ type OverloadEvidence struct {
 	TopDiskFamily                string   `json:"top_disk_family,omitempty"`
 	TopDiskFamilyReadMBPerSec    *float64 `json:"top_disk_family_read_mb_per_sec,omitempty"`
 	MySQLFamilyDiskReadMBPerSec  *float64 `json:"mysql_family_disk_read_mb_per_sec,omitempty"`
+
+	// PostgreSQL: the cluster's family, commit-like victims and the
+	// dominant background backend type.
+	PostgresFamily                 string   `json:"postgres_family,omitempty"`
+	PostgresFamilyCPUPercent       *float64 `json:"postgres_family_cpu_percent,omitempty"`
+	PostgresFamilyDiskReadMBPerSec *float64 `json:"postgres_family_disk_read_mb_per_sec,omitempty"`
+	WALVictims                     *int     `json:"wal_victims,omitempty"`
+	SyncRepVictims                 *int     `json:"syncrep_victims,omitempty"`
+	BackgroundType                 string   `json:"background_type,omitempty"`
+	BackgroundCPUCores             *float64 `json:"background_cpu_cores,omitempty"`
+	BackgroundDiskReadMBPerSec     *float64 `json:"background_disk_read_mb_per_sec,omitempty"`
+	ClusterCPUCores                *float64 `json:"cluster_cpu_cores,omitempty"`
+	ClusterDiskReadMBPerSec        *float64 `json:"cluster_disk_read_mb_per_sec,omitempty"`
+	// DiskEstimated: per-digest disk reads are an estimate (PG 18+ async I/O).
+	DiskEstimated *bool `json:"disk_estimated,omitempty"`
 }
 
 // OverloadThresholds echoes the cut-offs so a consumer can re-derive the
@@ -118,4 +146,5 @@ type OverloadThresholds struct {
 	CPUCulpritMinNodeCPUUsedPercent  float64 `json:"cpu_culprit_min_node_cpu_used_percent,omitempty"`
 	IOCulpritPercentOfDiskRead       float64 `json:"io_culprit_percent_of_disk_read,omitempty"`
 	IOCulpritMinNodeDiskReadMBPerSec float64 `json:"io_culprit_min_node_disk_read_mb_per_sec,omitempty"`
+	BackgroundDominantPercent        float64 `json:"background_dominant_percent,omitempty"`
 }

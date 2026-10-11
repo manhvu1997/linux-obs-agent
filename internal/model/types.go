@@ -534,6 +534,9 @@ type DiagnoseReport struct {
 	// Only populated when MySQL tracing is enabled (mysql.enabled: true in config
 	// or MYSQL_TRACING_ENABLED=true).
 	MySQLReport *MySQLAnalysis `json:"mysql_report,omitempty"`
+
+	// PostgresReport: PostgreSQL query attribution (postgres.enabled).
+	PostgresReport *PostgresAnalysis `json:"postgres_report,omitempty"`
 }
 
 // ─── Fsync Tracer ─────────────────────────────────────────────────────────────
