@@ -24,6 +24,10 @@ type fakeTracer struct {
 	cmds      chan pgtrace.CmdEvent
 	slows     chan pgtrace.SlowEvent
 	unsafe    []uint64
+	attaches  int
+	detaches  int
+	sessErr   error
+	qids      map[uint64]int64
 }
 
 func newFakeTracer() *fakeTracer {
@@ -39,9 +43,10 @@ func (f *fakeTracer) SetClusters(m map[uint32]pgtrace.ClusterConst) error {
 }
 func (f *fakeTracer) Attach(b pgtrace.Binary) (pgtrace.Attached, error) {
 	f.attached[b.Key] = b
+	f.attaches++
 	return pgtrace.Attached{WAL: true, Parallel: true, SyncRep: b.SyncRep, QueryID: b.QueryID}, nil
 }
-func (f *fakeTracer) Detach(k pgtrace.BinaryKey) { delete(f.attached, k) }
+func (f *fakeTracer) Detach(k pgtrace.BinaryKey) { f.detaches++; delete(f.attached, k) }
 func (f *fakeTracer) DetachAll() {
 	f.detachAll++
 	f.attached = map[pgtrace.BinaryKey]pgtrace.Binary{}
@@ -55,8 +60,8 @@ func (f *fakeTracer) DrainAgg() ([]pgtrace.AggEntry, error) {
 	f.entries = f.entries[1:]
 	return e, nil
 }
-func (f *fakeTracer) OpenSessions() ([]pgtrace.Session, error) { return f.sessions, nil }
-func (f *fakeTracer) QueryIDs() (map[uint64]int64, error)      { return nil, nil }
+func (f *fakeTracer) OpenSessions() ([]pgtrace.Session, error) { return f.sessions, f.sessErr }
+func (f *fakeTracer) QueryIDs() (map[uint64]int64, error)      { return f.qids, nil }
 func (f *fakeTracer) ForgetText(uint64)                        {}
 func (f *fakeTracer) MarkUnsafe(h uint64)                      { f.unsafe = append(f.unsafe, h) }
 func (f *fakeTracer) Texts() <-chan pgtrace.TextEvent          { return f.texts }

@@ -48,3 +48,13 @@ func TestBreakerResetsOnNormalPoll(t *testing.T) {
 		t.Fatal("non-consecutive over-limit polls must not shed")
 	}
 }
+
+func TestBreakerOffWhenMaxNotPositive(t *testing.T) {
+	b := &breaker{max: 0, cooldown: time.Minute}
+	t0 := time.Unix(0, 0)
+	for i := 0; i < 5; i++ {
+		if b.observe(1e9, t0.Add(time.Duration(i)*5*time.Second)) != actNone || b.shed {
+			t.Fatal("max <= 0 disables the breaker")
+		}
+	}
+}

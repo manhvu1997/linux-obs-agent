@@ -362,3 +362,19 @@ func TestMarkStickyDiskSeeding(t *testing.T) {
 	}
 	t.Fatal("disk digest not found in exported")
 }
+
+// An Auxiliary delta (parallel worker) must not keep the digest's command
+// when a non-auxiliary delta without calls (an in-flight credit) follows.
+func TestAuxiliaryDeltaDoesNotNameDigest(t *testing.T) {
+	a := New(Config{})
+	now := time.Unix(1_800_000_000, 0)
+	d := sqldigest.Digest{ID: "x", Text: "select 1"}
+	a.AddDeltas([]Delta{
+		{PID: 1, Command: "parallel", Digest: d, CPUNs: 9e9, Auxiliary: true},
+		{PID: 1, Command: "client", Digest: d, CPUNs: 1e9},
+	}, now)
+	s := a.Snapshot(now)
+	if len(s.TopByCPU) != 1 || s.TopByCPU[0].Command != "client" {
+		t.Fatalf("%+v", s.TopByCPU)
+	}
+}

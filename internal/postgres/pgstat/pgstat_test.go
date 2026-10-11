@@ -3,6 +3,7 @@ package pgstat
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -95,5 +96,49 @@ func TestSettingsHelpers(t *testing.T) {
 	}
 	if Classify(errors.New("x")) != "error: x" {
 		t.Fatal("classify")
+	}
+}
+
+// Poll after Close must not reopen a connection, and overlapping Polls of one
+// cluster are serialised (run under -race).
+func TestPollAfterCloseAndConcurrent(t *testing.T) {
+	var mu sync.Mutex
+	dials := 0
+	e := NewEnricher(func(context.Context, int) (Conn, error) {
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		return &fakeConn{s: Settings{VersionNum: 170002, ComputeQueryID: "auto"}}, nil
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			e.Poll(context.Background(), 5432, []int64{1}, time.Unix(int64(i), 0))
+			e.Snapshot(5432)
+		}(i)
+	}
+	wg.Wait()
+	e.Close()
+	before := dials
+	e.Poll(context.Background(), 5432, []int64{1}, time.Unix(100, 0))
+	e.Forget(5432)
+	if dials != before || e.Snapshot(5432).Status != StatusNotConfigured {
+		t.Fatalf("Poll after Close reconnected: dials %d -> %d", before, dials)
+	}
+}
+
+func TestPollAfterForgetDoesNotReconnect(t *testing.T) {
+	dials := 0
+	e := NewEnricher(func(context.Context, int) (Conn, error) {
+		dials++
+		return &fakeConn{s: Settings{VersionNum: 170002, ComputeQueryID: "auto"}}, nil
+	})
+	e.Poll(context.Background(), 5432, nil, time.Unix(0, 0))
+	e.Forget(5432)
+	e.Poll(context.Background(), 5432, nil, time.Unix(1, 0)) // a fresh state: allowed
+	if dials != 2 {
+		t.Fatalf("dials %d", dials)
 	}
 }

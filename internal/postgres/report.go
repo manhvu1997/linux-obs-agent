@@ -9,6 +9,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/overload"
 	"github.com/manhvu1997/linux-obs-agent/internal/postgres/pgtrace"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
+	"github.com/manhvu1997/linux-obs-agent/internal/textcache"
 )
 
 // Commands (querystats command / Prometheus label).
@@ -45,6 +46,22 @@ func commandFor(kind uint32, digestText string) string {
 		return CommandReplication
 	}
 	return CommandClient
+}
+
+// commandOf names an interval from its cache entry: the entry's class was
+// derived from the raw statement before catalog folding, so a folded digest
+// never turns an autovacuum or replication statement into a client one.
+func commandOf(kind uint32, e textcache.Entry) string {
+	switch kind {
+	case pgtrace.KindParallel:
+		return CommandParallel
+	case pgtrace.KindFastpath:
+		return CommandFastpath
+	}
+	if e.Class == CommandAutovacuum || e.Class == CommandReplication {
+		return e.Class
+	}
+	return commandFor(kind, e.Digest.Text)
 }
 
 // queryCommand: digests that may be a query culprit (client statements and

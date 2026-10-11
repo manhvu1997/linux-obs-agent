@@ -76,3 +76,23 @@ func TestNoSessionsNoCredit(t *testing.T) {
 		t.Fatal("entries untouched without owed")
 	}
 }
+
+// A closed interval that arrives as a command event carries full sums: what
+// was credited while it ran is subtracted, whether or not the creditor has
+// already noticed the session is gone.
+func TestSettleCmdSubtractsCredit(t *testing.T) {
+	for _, noticed := range []bool{false, true} {
+		cur := procCounters{CPU: 5e9}
+		c := newCreditor(5e9, func(uint32) (procCounters, error) { return cur, nil })
+		s := pgtrace.Session{TID: 7, Postmaster: 100, Kind: pgtrace.KindClient, Hash: 42, OpenTS: 1e9}
+		c.Credit([]pgtrace.Session{s}, 7e9, allKnown)
+		if noticed {
+			c.Credit(nil, 8e9, allKnown)
+		}
+		p := procCounters{CPU: 9e9}
+		c.SettleCmd(aggKey{100, pgtrace.KindClient, 42}, 7, &p)
+		if p.CPU != 4e9 || len(c.credited) != 0 || len(c.owed) != 0 && c.owed[aggKey{100, pgtrace.KindClient, 42}].c.CPU != 0 {
+			t.Fatalf("noticed=%v: cpu %d credited %v owed %v", noticed, p.CPU, c.credited, c.owed)
+		}
+	}
+}

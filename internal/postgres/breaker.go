@@ -31,7 +31,7 @@ func (b *breaker) observe(rate float64, now time.Time) breakerAction {
 		b.shed, b.over = false, 0
 		return actResume
 	}
-	if rate <= b.max {
+	if b.max <= 0 || rate <= b.max { // max <= 0: breaker off
 		b.over = 0
 		return actNone
 	}

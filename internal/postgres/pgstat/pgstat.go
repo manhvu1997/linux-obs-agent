@@ -74,6 +74,8 @@ var (
 )
 
 type clusterState struct {
+	poll     sync.Mutex // serialises Poll, Forget and Close for this cluster; guards conn
+	dead     bool       // forgotten or closed: Poll must not reconnect
 	conn     Conn
 	settings Settings
 	prev     map[int64]Row
@@ -92,6 +94,7 @@ type Enricher struct {
 	maxFails int
 	mu       sync.Mutex
 	clusters map[int]*clusterState
+	closed   bool
 }
 
 // NewEnricher: after maxFails (3) consecutive errors a cluster's connection
@@ -104,13 +107,19 @@ func NewEnricher(dial Dialer) *Enricher {
 // read the counters of ids and keep the delta since the previous poll.
 func (e *Enricher) Poll(ctx context.Context, port int, ids []int64, now time.Time) {
 	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return
+	}
 	st := e.clusters[port]
 	if st == nil {
 		st = &clusterState{status: StatusNotConfigured}
 		e.clusters[port] = st
 	}
 	e.mu.Unlock()
-	if now.Before(st.retryAt) {
+	st.poll.Lock()
+	defer st.poll.Unlock()
+	if st.dead || now.Before(st.retryAt) {
 		return
 	}
 	if st.conn == nil {
@@ -195,25 +204,41 @@ func (e *Enricher) Snapshot(port int) View {
 	return v
 }
 
-// Forget closes and drops a cluster that is gone.
+// Forget closes and drops a cluster that is gone. It waits for a Poll of
+// that cluster still running, and a late Poll never reconnects it.
 func (e *Enricher) Forget(port int) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if st := e.clusters[port]; st != nil && st.conn != nil {
-		st.conn.Close()
-	}
+	st := e.clusters[port]
 	delete(e.clusters, port)
+	e.mu.Unlock()
+	e.kill(st)
 }
 
-// Close closes every connection.
+func (e *Enricher) kill(st *clusterState) {
+	if st == nil {
+		return
+	}
+	st.poll.Lock()
+	defer st.poll.Unlock()
+	st.dead = true
+	if st.conn != nil {
+		st.conn.Close()
+		st.conn = nil
+	}
+}
+
+// Close closes every connection; Poll is a no-op afterwards.
 func (e *Enricher) Close() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.closed = true
+	cs := make([]*clusterState, 0, len(e.clusters))
 	for port, st := range e.clusters {
-		if st.conn != nil {
-			st.conn.Close()
-		}
+		cs = append(cs, st)
 		delete(e.clusters, port)
+	}
+	e.mu.Unlock()
+	for _, st := range cs {
+		e.kill(st)
 	}
 }
 

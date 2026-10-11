@@ -190,13 +190,16 @@ type acc struct {
 	diskRead, diskWrite    uint64
 	ioWait, redoWait       uint64
 	replicaWait            uint64
+	auxNamed               bool // command came from an Auxiliary delta; a later non-auxiliary one replaces it
 }
 
 func (x *acc) add(d Delta) {
 	// The command comes from the first delta that has calls: a zero-call
 	// delta (in-flight credit, parallel worker) must not name the digest.
 	if x.calls == 0 && d.Calls > 0 {
-		x.command = d.Command
+		x.command, x.auxNamed = d.Command, false
+	} else if x.calls == 0 && x.auxNamed && !d.Auxiliary {
+		x.command, x.auxNamed = d.Command, false
 	}
 	x.calls += d.Calls
 	x.cpu += d.CPUNs
@@ -217,7 +220,9 @@ func (x *acc) add(d Delta) {
 
 func (x *acc) merge(y *acc) {
 	if x.calls == 0 && y.calls > 0 {
-		x.command = y.command
+		x.command, x.auxNamed = y.command, false
+	} else if x.calls == 0 && x.auxNamed && !y.auxNamed {
+		x.command, x.auxNamed = y.command, false
 	}
 	x.calls += y.calls
 	x.cpu += y.cpu
@@ -313,7 +318,7 @@ func (a *Aggregator) addDeltaLocked(d Delta, at time.Time) {
 				b.m[k] = x
 			}
 		} else {
-			x = &acc{command: d.Command, text: d.Digest.Text, normalized: d.Digest.Normalized}
+			x = &acc{command: d.Command, text: d.Digest.Text, normalized: d.Digest.Normalized, auxNamed: d.Auxiliary}
 			b.m[k] = x
 		}
 	}

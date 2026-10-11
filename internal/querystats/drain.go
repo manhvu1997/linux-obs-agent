@@ -88,7 +88,7 @@ func (a *Aggregator) addDrain(d Delta) {
 				a.drain[k] = x
 			}
 		} else {
-			x = &acc{command: d.Command, text: d.Digest.Text, normalized: d.Digest.Normalized}
+			x = &acc{command: d.Command, text: d.Digest.Text, normalized: d.Digest.Normalized, auxNamed: d.Auxiliary}
 			a.drain[k] = x
 		}
 	}

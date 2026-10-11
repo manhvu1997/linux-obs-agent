@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"sort"
 	"sync"
@@ -89,7 +90,9 @@ type binary struct {
 }
 
 type cluster struct {
-	pm      Postmaster
+	pid     uint32 // postmaster PID (immutable; the clusters map key)
+	pmMu    sync.RWMutex
+	pm      Postmaster // refreshed by discover; read through post()
 	name    string
 	version pgsym.Version
 	consts  pgtrace.ClusterConst
@@ -101,6 +104,18 @@ type cluster struct {
 	recent     []model.PGSlowQuery
 	slow       drain.Buffer[model.PGSlowQuery]
 	enrichSent time.Time // enrichment deltas already exported to ClickHouse
+}
+
+func (c *cluster) post() Postmaster {
+	c.pmMu.RLock()
+	defer c.pmMu.RUnlock()
+	return c.pm
+}
+
+func (c *cluster) setPost(pm Postmaster) {
+	c.pmMu.Lock()
+	c.pm = pm
+	c.pmMu.Unlock()
 }
 
 // ClusterView is one cluster's latest state for the exporters.
@@ -139,7 +154,8 @@ type Analyzer struct {
 	views         atomic.Pointer[[]ClusterView]
 	state         atomic.Value // string
 	overCap       atomic.Bool
-	started       atomic.Bool
+	enriching     atomic.Bool // single-flight guard of the SQL poll
+	wg            sync.WaitGroup
 	shedTotal     atomic.Uint64
 	creditDropped atomic.Uint64
 	rediscover    chan struct{} // enrichment asks the main loop to re-run discovery
@@ -187,7 +203,7 @@ func NewAnalyzer(o Options, d Deps) *Analyzer {
 	a.text = textcache.New(32768, textcache.Hooks{
 		Forget:     func(_ uint32, h uint64) { d.Tracer.ForgetText(h) },
 		MarkUnsafe: func(_ uint32, h uint64) { d.Tracer.MarkUnsafe(h) },
-		Command:    func(e textcache.Entry, s textcache.Sums) string { return commandFor(s.Kind, e.Digest.Text) },
+		Command:    func(e textcache.Entry, s textcache.Sums) string { return commandOf(s.Kind, e) },
 	})
 	a.state.Store(StateActive)
 	return a
@@ -208,6 +224,12 @@ func (a *Analyzer) Start(ctx context.Context) error {
 		return err
 	}
 	defer a.d.Tracer.Stop()
+	defer func() { // join the goroutines first: none may use the tracer or enricher afterwards
+		a.wg.Wait()
+		if a.d.Enricher != nil {
+			a.d.Enricher.Close()
+		}
+	}()
 	if a.opts.EnableDelayAcct {
 		if on, err := procinfo.DelayAcctEnabled(); err == nil && !on {
 			if err := procinfo.EnableDelayAcct(); err != nil {
@@ -217,9 +239,11 @@ func (a *Analyzer) Start(ctx context.Context) error {
 	}
 	a.primeNode()
 	a.discover(time.Now())
-	a.started.Store(true)
-	defer a.started.Store(false)
-	go a.consume(ctx)
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.consume(ctx)
+	}()
 
 	poll := time.NewTicker(a.opts.PollInterval)
 	disc := time.NewTicker(a.opts.DiscoverInterval)
@@ -229,9 +253,8 @@ func (a *Analyzer) Start(ctx context.Context) error {
 	if a.d.Enricher != nil {
 		t := time.NewTicker(a.opts.SQLPollInterval)
 		defer t.Stop()
-		defer a.d.Enricher.Close()
 		sql = t.C
-		go a.enrich(ctx, time.Now())
+		a.startEnrich(ctx, time.Now())
 	}
 	for {
 		select {
@@ -242,11 +265,26 @@ func (a *Analyzer) Start(ctx context.Context) error {
 		case now := <-disc.C:
 			a.discover(now)
 		case now := <-sql:
-			go a.enrich(ctx, now)
+			a.startEnrich(ctx, now)
 		case <-a.rediscover:
 			a.discover(time.Now())
 		}
 	}
+}
+
+// startEnrich runs one SQL poll in the background unless the previous one is
+// still running (single-flight); it reports whether one was started.
+func (a *Analyzer) startEnrich(ctx context.Context, now time.Time) bool {
+	if !a.enriching.CompareAndSwap(false, true) {
+		return false
+	}
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		defer a.enriching.Store(false)
+		a.enrich(ctx, now)
+	}()
+	return true
 }
 
 func (a *Analyzer) consume(ctx context.Context) {
@@ -278,6 +316,9 @@ var (
 
 func (a *Analyzer) classify(text string, truncated bool) textcache.Entry {
 	d := sqldigest.NormalizeDialect(text, sqldigest.Postgres)
+	// The command is named from the raw statement, before catalog folding: an
+	// "autovacuum: VACUUM … pg_catalog.x" must stay autovacuum, never client.
+	class := commandFor(pgtrace.KindClient, d.Text)
 	sample := text
 	if a.opts.FoldSystemCatalogs && sqldigest.ReferencesSystemCatalog(d.Text) {
 		d, sample, truncated = systemCatalogDigest, "", false
@@ -285,7 +326,7 @@ func (a *Analyzer) classify(text string, truncated bool) textcache.Entry {
 	if !a.opts.SampleQueries {
 		sample = ""
 	}
-	return textcache.Entry{Class: CommandClient, Digest: d, Sample: sample, Truncated: truncated}
+	return textcache.Entry{Class: class, Digest: d, Sample: sample, Truncated: truncated}
 }
 
 func byKind(kind uint32) textcache.Entry {
@@ -342,6 +383,7 @@ func (a *Analyzer) resolve(entries []pgtrace.AggEntry, credits []credit) (map[ui
 	var calls uint64
 	add := func(d querystats.Delta, ok bool) {
 		if ok {
+			d.Auxiliary = d.Command == CommandParallel
 			out[d.PID] = append(out[d.PID], d)
 		}
 	}
@@ -360,7 +402,7 @@ func (a *Analyzer) resolve(entries []pgtrace.AggEntry, credits []credit) (map[ui
 		add(a.text.Resolve(cacheKey(c.Kind, c.Hash), s, byKind))
 	}
 	for _, d := range a.text.EndTick(func(uint32) textcache.Entry { return byKind(pgtrace.KindClient) }) {
-		out[d.PID] = append(out[d.PID], d)
+		add(d, true)
 	}
 	return out, calls
 }
@@ -371,31 +413,36 @@ func (a *Analyzer) cluster(pm uint32) *cluster {
 	return a.clusters[pm]
 }
 
-// recordCmd handles an interval the kernel could not aggregate.
+// recordCmd handles an interval the kernel could not aggregate. Credit already
+// given to the interval while it ran is subtracted (the event carries the full
+// sums), and a hash whose text has not arrived yet is parked until it does
+// (or, after a tick, shown as unavailable) exactly like an aggregated entry.
 func (a *Analyzer) recordCmd(ev pgtrace.CmdEvent, now time.Time) {
 	c := a.cluster(ev.Postmaster)
 	if c == nil {
 		return
 	}
-	var e textcache.Entry
-	switch {
-	case ev.Text != "":
-		e = a.classify(ev.Text, len(ev.Text) >= pghash.MaxText)
-	case ev.Hash == 0:
-		e = byKind(ev.Kind)
-	default:
+	p := procCounters{CPU: ev.CPUNs, Runq: ev.RunqNs, Read: ev.DiskReadBytes, Write: ev.DiskWriteBytes, Blkio: ev.IOWaitNs}
+	a.cred.SettleCmd(aggKey{ev.Postmaster, ev.Kind, ev.Hash}, ev.PID, &p)
+	s := textcache.Sums{PID: ev.Postmaster, Kind: ev.Kind, Calls: ev.Calls, WallNs: ev.WallNs, WallMaxNs: ev.WallNs, CPUNs: p.CPU,
+		RunqNs: p.Runq, DiskReadBytes: p.Read, DiskWriteBytes: p.Write, IOWaitNs: p.Blkio,
+		RedoWaitNs: ev.WALWaitNs, ReplicaWaitNs: ev.SyncRepWaitNs}
+	zeroParallel(&s)
+	var d querystats.Delta
+	if ev.Text != "" {
+		e := a.classify(ev.Text, len(ev.Text) >= pghash.MaxText)
+		d = querystats.Delta{PID: s.PID, Command: commandOf(ev.Kind, e), Digest: e.Digest, SampleQuery: e.Sample, Truncated: e.Truncated,
+			Calls: s.Calls, WallNs: s.WallNs, WallMaxNs: s.WallMaxNs, CPUNs: s.CPUNs, RunqNs: s.RunqNs,
+			DiskReadBytes: s.DiskReadBytes, DiskWriteBytes: s.DiskWriteBytes, IOWaitNs: s.IOWaitNs,
+			RedoWaitNs: s.RedoWaitNs, ReplicaWaitNs: s.ReplicaWaitNs}
+	} else {
 		var ok bool
-		if e, ok = a.text.Lookup(textcache.Key{Hash: ev.Hash}); !ok {
-			e = byKind(pgtrace.KindClient)
+		if d, ok = a.text.Resolve(cacheKey(ev.Kind, ev.Hash), s, byKind); !ok {
+			return // parked: poll's EndTick emits it once the text arrives
 		}
 	}
-	s := textcache.Sums{Kind: ev.Kind, Calls: ev.Calls, WallNs: ev.WallNs, WallMaxNs: ev.WallNs, RunqNs: ev.RunqNs,
-		IOWaitNs: ev.IOWaitNs, RedoWaitNs: ev.WALWaitNs, ReplicaWaitNs: ev.SyncRepWaitNs}
-	zeroParallel(&s)
-	c.agg.AddDeltas([]querystats.Delta{{PID: ev.Postmaster, Command: commandFor(ev.Kind, e.Digest.Text), Digest: e.Digest,
-		SampleQuery: e.Sample, Truncated: e.Truncated, Calls: s.Calls, WallNs: s.WallNs, WallMaxNs: s.WallMaxNs, CPUNs: ev.CPUNs,
-		RunqNs: s.RunqNs, DiskReadBytes: ev.DiskReadBytes, DiskWriteBytes: ev.DiskWriteBytes, IOWaitNs: s.IOWaitNs,
-		RedoWaitNs: s.RedoWaitNs, ReplicaWaitNs: s.ReplicaWaitNs}}, now)
+	d.Auxiliary = d.Command == CommandParallel
+	c.agg.AddDeltas([]querystats.Delta{d}, now)
 }
 
 // recordSlow keeps slow client statements (not autovacuum or replication).
@@ -408,7 +455,7 @@ func (a *Analyzer) recordSlow(ev pgtrace.SlowEvent) {
 	if ev.Hash == 0 || !ok {
 		e = byKind(pgtrace.KindClient)
 	}
-	if commandFor(pgtrace.KindClient, e.Digest.Text) != CommandClient {
+	if commandOf(pgtrace.KindClient, e) != CommandClient {
 		return
 	}
 	q := model.PGSlowQuery{PID: ev.PID, DigestID: e.Digest.ID, DigestText: e.Digest.Text, SampleQuery: e.Sample,
@@ -442,7 +489,7 @@ func (a *Analyzer) newCluster(pm Postmaster, name string, b *binary) *cluster {
 		agg.EnableDrain(a.drainKeys)
 		agg.EnableHostDrain()
 	}
-	c := &cluster{pm: pm, name: name, version: b.hooks.Version, key: pm.Key, agg: agg,
+	c := &cluster{pid: pm.PID, pm: pm, name: name, version: b.hooks.Version, key: pm.Key, agg: agg,
 		consts: pgtrace.ClusterConst{Running: b.hooks.States.Running, Fastpath: b.hooks.States.Fastpath},
 		cpu: &clusterCPU{cgroupRead: cgroupCPUReader(a.d.SysFS, pm.Cgroup, pm.Unit),
 			pids: func() []uint32 { return a.d.Children(pm.PID) }, pidCPU: a.d.PIDCPU, prevPID: map[uint32]uint64{}}}
@@ -453,12 +500,14 @@ func (a *Analyzer) newCluster(pm Postmaster, name string, b *binary) *cluster {
 	return c
 }
 
+// dropClusterLocked forgets a cluster that vanished or restarted. Limit: data
+// it accumulated since the last ClickHouse drain is discarded with it.
 func (a *Analyzer) dropClusterLocked(pid uint32) {
 	c := a.clusters[pid]
 	delete(a.clusters, pid)
 	a.back.Forget(pid)
 	if a.d.Enricher != nil && c != nil {
-		a.d.Enricher.Forget(c.pm.Port)
+		a.d.Enricher.Forget(c.post().Port)
 	}
 }
 
@@ -508,7 +557,7 @@ func (a *Analyzer) discover(now time.Time) {
 			continue
 		}
 		if c, ok := a.clusters[pm.PID]; ok {
-			c.pm = pm
+			c.setPost(pm)
 			continue
 		}
 		name := ClusterName(pm, b.hooks.Version.Major)
@@ -526,10 +575,12 @@ func (a *Analyzer) discover(now time.Time) {
 		}
 	}
 	consts := map[uint32]pgtrace.ClusterConst{}
-	used := map[pgtrace.BinaryKey]int{} // key → a port using it
+	used := map[pgtrace.BinaryKey]bool{}
+	syncReps := map[pgtrace.BinaryKey]bool{} // OR over every cluster sharing the binary: order-independent
 	for pid, c := range a.clusters {
 		consts[pid] = c.consts
-		used[c.key] = c.pm.Port
+		used[c.key] = true
+		syncReps[c.key] = syncReps[c.key] || a.wantSyncRep(c.post().Port)
 	}
 	if err := a.d.Tracer.SetClusters(consts); err != nil {
 		slog.Warn("postgres: clusters map", "err", err)
@@ -541,15 +592,14 @@ func (a *Analyzer) discover(now time.Time) {
 		return
 	}
 	for key, b := range a.binaries {
-		port, inUse := used[key]
-		if !inUse || b.err != nil {
+		if !used[key] || b.err != nil {
 			if b.attached {
 				a.d.Tracer.Detach(key)
 				b.attached = false
 			}
 			continue
 		}
-		syncRep, queryID := a.wantSyncRep(port), a.d.Enricher != nil
+		syncRep, queryID := syncReps[key], a.d.Enricher != nil
 		if b.attached && b.syncRep == syncRep && b.queryID == queryID {
 			continue
 		}
@@ -664,7 +714,7 @@ func (a *Analyzer) async(c *cluster) bool {
 		return false
 	}
 	if a.d.Enricher != nil {
-		if v := a.d.Enricher.Snapshot(c.pm.Port); v.Known {
+		if v := a.d.Enricher.Snapshot(c.post().Port); v.Known {
 			return v.Settings.IOMethod != "sync"
 		}
 	}
@@ -705,19 +755,33 @@ func (a *Analyzer) poll(now time.Time) {
 		a.state.Store(StateActive)
 		slog.Info("postgres: circuit breaker cooldown over; re-attaching probes")
 		a.discover(now)
+		// Nothing was sampled during the cooldown: re-baseline everything so
+		// the first poll after it is not booked as one huge valid interval,
+		// and drop credit for sessions the detached probes can no longer close.
+		a.primeNode()
+		a.mu.Lock()
+		for _, c := range a.clusters {
+			c.cpu.sample()
+		}
+		a.mu.Unlock()
+		a.cred.Reset()
 	}
 	entries, err := a.d.Tracer.DrainAgg()
 	if err != nil {
 		slog.Warn("postgres: draining kernel aggregation", "err", err)
 	}
 	sessions, err := a.d.Tracer.OpenSessions()
+	var credits []credit
 	if err != nil {
+		// An unreadable session map is not "no sessions": crediting nothing
+		// is safe, settling (which would age and drop owed credit) is not.
 		slog.Debug("postgres: reading sessions", "err", err)
+	} else {
+		known := func(h uint64) bool { _, ok := a.text.Lookup(textcache.Key{Hash: h}); return ok }
+		credits = a.cred.Credit(sessions, a.d.Mono(), known)
+		entries = a.cred.Settle(entries)
 	}
-	known := func(h uint64) bool { _, ok := a.text.Lookup(textcache.Key{Hash: h}); return ok }
-	credits := a.cred.Credit(sessions, a.d.Mono(), known)
-	entries = a.cred.Settle(entries)
-	a.creditDropped.Store(a.cred.dropped)
+	a.creditDropped.Store(a.cred.Dropped())
 	byPM, calls := a.resolve(entries, credits)
 	if a.brk.observe(float64(calls)/a.opts.PollInterval.Seconds(), now) == actShed {
 		slog.Warn("postgres: statement rate above postgres.max_statements_per_sec for two polls; probes detached",
@@ -751,7 +815,7 @@ func (a *Analyzer) poll(now time.Time) {
 	views := make([]ClusterView, 0, len(cs))
 	for _, it := range cs {
 		c := it.c
-		c.agg.AddDeltas(byPM[c.pm.PID], now)
+		c.agg.AddDeltas(byPM[c.pid], now)
 		h := node
 		h.MysqldCPUNs, h.MysqldPartial = c.cpu.sample()
 		a.setReasons(c, it.res, &h)
@@ -770,7 +834,7 @@ func (a *Analyzer) digestEnrichment(c *cluster) (map[string]enrichment, pgstat.V
 	if a.d.Enricher == nil {
 		return nil, pgstat.View{Status: pgstat.StatusNotConfigured}
 	}
-	v := a.d.Enricher.Snapshot(c.pm.Port)
+	v := a.d.Enricher.Snapshot(c.post().Port)
 	qids, err := a.d.Tracer.QueryIDs()
 	if err != nil || len(v.Deltas) == 0 {
 		return nil, v
@@ -800,7 +864,7 @@ func (a *Analyzer) digestEnrichment(c *cluster) (map[string]enrichment, pgstat.V
 
 func (a *Analyzer) view(c *cluster, snap *querystats.Snapshot) ClusterView {
 	enr, ev := a.digestEnrichment(c)
-	cores, reads, _ := a.back.Window(c.pm.PID)
+	cores, reads, _ := a.back.Window(c.pid)
 	top := append([]model.QueryDigestStats(nil), snap.TopByCPU...)
 	byDisk := snap.TopByDiskRead
 	estimated := false
@@ -821,26 +885,27 @@ func (a *Analyzer) view(c *cluster, snap *querystats.Snapshot) ClusterView {
 		WindowSeconds: snap.WindowSeconds, Node: snap.Node, QueryCPUCoveragePercent: snap.QueryCPUCoveragePercent,
 		QueryDiskReadCoveragePercent: snap.QueryDiskReadCoveragePercent, Thresholds: &snap.Thresholds,
 		TopDigests: overloadDigests(top), TopDigestsByDiskRead: overloadDigests(byDisk),
-		Victims: pgVictims(snap.Victims), Accounting: acct, Cluster: c.name, ServerPID: c.pm.PID,
+		Victims: pgVictims(snap.Victims), Accounting: maps.Clone(acct), Cluster: c.name, ServerPID: c.pid,
 		DiskEstimated: estimated, Backends: backendUsage(cores, reads),
 	}
-	return ClusterView{Name: c.name, PostmasterPID: c.pm.PID, Snapshot: snap, Overload: rep,
-		Backends: a.back.Life(c.pm.PID), Accounting: acct, EnrichmentUp: ev.Status == pgstat.StatusOK}
+	return ClusterView{Name: c.name, PostmasterPID: c.pid, Snapshot: snap, Overload: rep,
+		Backends: a.back.Life(c.pid), Accounting: acct, EnrichmentUp: ev.Status == pgstat.StatusOK}
 }
 
 func (a *Analyzer) clusterJSON(v ClusterView) model.PostgresCluster {
 	c := a.cluster(v.PostmasterPID)
 	s := v.Snapshot
-	pc := model.PostgresCluster{Cluster: v.Name, PostmasterPID: v.PostmasterPID, Accounting: v.Accounting,
+	pc := model.PostgresCluster{Cluster: v.Name, PostmasterPID: v.PostmasterPID, Accounting: maps.Clone(v.Accounting),
 		QueryCPUCoveragePercent: s.QueryCPUCoveragePercent, QueryDiskReadCoveragePercent: s.QueryDiskReadCoveragePercent,
 		Victims: pgVictims(s.Victims), RecentSlowQueries: []model.PGSlowQuery{}}
 	if c != nil {
-		pc.Version, pc.Port, pc.DataDir = c.version.String(), c.pm.Port, c.pm.DataDir
+		pm := c.post()
+		pc.Version, pc.Port, pc.DataDir = c.version.String(), pm.Port, pm.DataDir
 		c.mu.Lock()
 		pc.RecentSlowQueries = append(pc.RecentSlowQueries, c.recent...)
 		c.mu.Unlock()
 		if a.d.Enricher != nil {
-			pc.IOMethod = a.d.Enricher.Snapshot(c.pm.Port).Settings.IOMethod
+			pc.IOMethod = a.d.Enricher.Snapshot(c.post().Port).Settings.IOMethod
 		}
 	}
 	if cores, reads, ok := a.back.Window(v.PostmasterPID); ok {
@@ -895,7 +960,7 @@ func (a *Analyzer) report(views []ClusterView, now time.Time) *model.PostgresAna
 		}
 		if a.d.Enricher != nil {
 			if c := a.cluster(v.PostmasterPID); c != nil {
-				st := a.d.Enricher.Snapshot(c.pm.Port).Status
+				st := a.d.Enricher.Snapshot(c.post().Port).Status
 				if enrichment == pgstat.StatusNotConfigured || enrichment == pgstat.StatusOK {
 					enrichment = st
 				}
@@ -916,10 +981,18 @@ func (a *Analyzer) Latest() *model.PostgresAnalysis { return a.latest.Load() }
 
 // Views returns the latest per-cluster state (nil before the first poll).
 func (a *Analyzer) Views() []ClusterView {
-	if v := a.views.Load(); v != nil {
-		return *v
+	p := a.views.Load()
+	if p == nil {
+		return nil
 	}
-	return nil
+	out := make([]ClusterView, len(*p))
+	for i, v := range *p {
+		v.Accounting = maps.Clone(v.Accounting)
+		v.Overload.Accounting = maps.Clone(v.Overload.Accounting)
+		v.Backends = maps.Clone(v.Backends)
+		out[i] = v
+	}
+	return out
 }
 
 // Assess builds overload_cause over every cluster for one diagnose call.
@@ -960,7 +1033,7 @@ func (a *Analyzer) enrich(ctx context.Context, now time.Time) {
 	qids, _ := a.d.Tracer.QueryIDs()
 	for _, v := range a.Views() {
 		c := a.cluster(v.PostmasterPID)
-		if c == nil || c.pm.Port == 0 {
+		if c == nil || c.post().Port == 0 {
 			continue
 		}
 		want := map[string]bool{}
@@ -973,14 +1046,14 @@ func (a *Analyzer) enrich(ctx context.Context, now time.Time) {
 				ids = append(ids, id)
 			}
 		}
-		a.d.Enricher.Poll(ctx, c.pm.Port, ids, now)
+		a.d.Enricher.Poll(ctx, c.post().Port, ids, now)
 	}
 	if len(a.Views()) == 0 { // first run: connect so settings (sync rep, io_method) are known early
 		a.mu.Lock()
 		var ports []int
 		for _, c := range a.clusters {
-			if c.pm.Port > 0 {
-				ports = append(ports, c.pm.Port)
+			if c.post().Port > 0 {
+				ports = append(ports, c.post().Port)
 			}
 		}
 		a.mu.Unlock()
@@ -996,55 +1069,62 @@ func (a *Analyzer) enrich(ctx context.Context, now time.Time) {
 
 // ─── ClickHouse drain ────────────────────────────────────────────────────────
 
-// EnableDrain turns on the per-flush accumulators for the ClickHouse sink:
-// digests (capped at maxDigestKeys per interval), host windows, slow queries
-// (capped at maxSlow) and backend-type totals. Call before Start.
+// EnableDrain turns on the ClickHouse drains (cmd/agent, before Start).
 func (a *Analyzer) EnableDrain(maxDigestKeys, maxSlow int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.drainKeys, a.drainSlow = maxDigestKeys, maxSlow
+	a.drainKeys, a.drainSlow = max(maxDigestKeys, 1), max(maxSlow, 1)
 	for _, c := range a.clusters {
-		c.agg.EnableDrain(maxDigestKeys)
+		c.agg.EnableDrain(a.drainKeys)
 		c.agg.EnableHostDrain()
-		c.slow.Enable(maxSlow)
+		c.slow.Enable(a.drainSlow)
 	}
 	a.back.EnableDrain()
 }
 
-// Drain returns everything since the previous call.
+// Drain returns everything since the previous call for ClickHouse. The host
+// window is drained before the digests (see the MySQL sink): a poll landing
+// between the two lands in the digests of this window and the host of the
+// next, never the reverse.
 func (a *Analyzer) Drain() pgdrain.Drain {
 	a.mu.Lock()
 	cs := make([]*cluster, 0, len(a.clusters))
-	for _, c := range a.clusters {
+	names := map[uint32]string{}
+	for pid, c := range a.clusters {
 		cs = append(cs, c)
+		names[pid] = c.name
 	}
 	a.mu.Unlock()
 	sort.Slice(cs, func(i, j int) bool { return cs[i].name < cs[j].name })
+	estimated := map[uint32]bool{}
+	for _, v := range a.Views() {
+		estimated[v.PostmasterPID] = v.Overload.DiskEstimated
+	}
 	var out pgdrain.Drain
-	names := map[uint32]string{}
 	for _, c := range cs {
-		names[c.pm.PID] = c.name
-		dc := pgdrain.Cluster{Cluster: c.name, PostmasterPID: c.pm.PID}
-		dc.Digests, dc.Folded = c.agg.DrainDigests()
-		dc.Host = c.agg.DrainHost()
-		dc.Slow, dc.SlowDropped = c.slow.Drain()
-		dc.DiskEstimated = a.async(c) && a.d.Enricher != nil
-		if enr, v := a.digestEnrichment(c); len(enr) > 0 && v.At.After(c.enrichSent) {
-			dc.Enrich = make(map[string]pgdrain.Enrich, len(enr))
-			for id, e := range enr {
-				dc.Enrich[id] = pgdrain.Enrich{SharedHit: e.SharedHit, SharedRead: e.SharedRead, TempWritten: e.TempWrite}
+		d := pgdrain.Cluster{Cluster: c.name, PostmasterPID: c.pid}
+		d.Host = c.agg.DrainHost()
+		d.Digests, d.Folded = c.agg.DrainDigests()
+		d.Slow, d.SlowDropped = c.slow.Drain()
+		if enr, v := a.digestEnrichment(c); len(enr) > 0 {
+			c.mu.Lock()
+			if v.At.After(c.enrichSent) {
+				c.enrichSent = v.At
+				d.Enrich = map[string]pgdrain.Enrich{}
+				for id, e := range enr {
+					d.Enrich[id] = pgdrain.Enrich{SharedHit: e.SharedHit, SharedRead: e.SharedRead, TempWritten: e.TempWrite}
+				}
 			}
-			c.enrichSent = v.At
+			c.mu.Unlock()
 		}
-		out.Clusters = append(out.Clusters, dc)
+		d.DiskEstimated = estimated[c.pid]
+		out.Clusters = append(out.Clusters, d)
 	}
 	for _, b := range a.back.DrainBackends() {
-		name, ok := names[b.Postmaster]
-		if !ok {
-			continue
+		if name, ok := names[b.Postmaster]; ok {
+			out.Backends = append(out.Backends, pgdrain.Backend{Cluster: name, Type: b.Type, CPUNs: b.CPUNs,
+				ReadBytes: b.ReadBytes, WriteBytes: b.WriteBytes, IOMeasured: b.IOMeasured, ProcessesMax: uint32(b.ProcessesMax)})
 		}
-		out.Backends = append(out.Backends, pgdrain.Backend{Cluster: name, Type: b.Type, CPUNs: b.CPUNs,
-			ReadBytes: b.ReadBytes, WriteBytes: b.WriteBytes, IOMeasured: b.IOMeasured, ProcessesMax: uint32(b.ProcessesMax)})
 	}
 	return out
 }

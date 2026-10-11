@@ -33,6 +33,9 @@ type Delta struct {
 	// ReplicaWaitNs: sync-replication wait (PostgreSQL SyncRepWaitForLSN);
 	// counted only with Config.ReplicaWait.
 	ReplicaWaitNs uint64
+	// Auxiliary: the delta must not name its digest while another delta can
+	// (PostgreSQL parallel workers, whose command is not the statement's own).
+	Auxiliary bool
 }
 
 // DeltaFromEvent converts one measured call.

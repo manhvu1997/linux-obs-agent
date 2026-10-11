@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/postgres/pgtrace"
 )
@@ -57,6 +58,7 @@ type credit struct {
 // credited once their full sums arrive through the aggregation map, so
 // window sums stay exact and a running culprit is visible after one poll.
 type creditor struct {
+	mu       sync.Mutex // Credit/Settle run on the poll goroutine, SettleCmd on the consumer
 	readProc func(tid uint32) (procCounters, error)
 	minAgeNs uint64
 	credited map[sessKey]*creditedSess
@@ -72,6 +74,8 @@ func newCreditor(minAgeNs uint64, read func(uint32) (procCounters, error)) *cred
 // text is known (known(hash); hash 0 is always known), and moves the credit
 // of intervals that closed since the last call to the owed ledger.
 func (c *creditor) Credit(sessions []pgtrace.Session, nowMono uint64, known func(uint64) bool) []credit {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	open := make(map[sessKey]bool, len(sessions))
 	var out []credit
 	for _, s := range sessions {
@@ -117,6 +121,8 @@ func (c *creditor) Credit(sessions []pgtrace.Session, nowMono uint64, known func
 // what is still owed: an amount unmatched after two more drains is dropped
 // and counted.
 func (c *creditor) Settle(entries []pgtrace.AggEntry) []pgtrace.AggEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	take := func(v *uint64, o *uint64) {
 		n := min(*v, *o)
 		*v -= n
@@ -182,4 +188,53 @@ func readThread(tid uint32) (procCounters, error) {
 		}
 	}
 	return c, nil
+}
+
+// SettleCmd subtracts what was already credited for an interval that closed
+// as a command event (unsafe hash or full aggregation map) instead of through
+// the aggregation map: the event carries the full sums, so crediting them
+// again would double count. The still-open credit of the backend tid is
+// consumed first, then the owed ledger (the session was already noticed as
+// closed). *cpu, ... are modified in place.
+func (c *creditor) SettleCmd(k aggKey, tid uint32, p *procCounters) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	take := func(v, o *uint64) {
+		n := min(*v, *o)
+		*v -= n
+		*o -= n
+	}
+	pay := func(o *procCounters) {
+		take(&p.CPU, &o.CPU)
+		take(&p.Runq, &o.Runq)
+		take(&p.Read, &o.Read)
+		take(&p.Write, &o.Write)
+		take(&p.Blkio, &o.Blkio)
+	}
+	for sk, cs := range c.credited {
+		if sk.TID == tid && cs.key == k {
+			pay(&cs.total)
+			delete(c.credited, sk)
+			return
+		}
+	}
+	if o := c.owed[k]; o != nil {
+		pay(&o.c)
+	}
+}
+
+// Reset forgets every credit and owed amount (the probes were detached: the
+// sessions they describe can no longer close through the kernel map).
+func (c *creditor) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.credited = map[sessKey]*creditedSess{}
+	c.owed = map[aggKey]*owed{}
+}
+
+// Dropped is the number of owed amounts that were never matched.
+func (c *creditor) Dropped() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dropped
 }
