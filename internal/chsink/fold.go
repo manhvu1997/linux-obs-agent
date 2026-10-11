@@ -55,6 +55,7 @@ func foldMinor(d []querystats.DigestDelta, sharePct float64, slowNs uint64) []qu
 		m.DiskWriteBytes += x.DiskWriteBytes
 		m.IOWaitNs += x.IOWaitNs
 		m.RedoWaitNs += x.RedoWaitNs
+		m.ReplicaWaitNs += x.ReplicaWaitNs
 	}
 	return out
 }

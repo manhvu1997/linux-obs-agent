@@ -30,6 +30,9 @@ type Delta struct {
 	DiskWriteBytes uint64
 	IOWaitNs       uint64
 	RedoWaitNs     uint64
+	// ReplicaWaitNs: sync-replication wait (PostgreSQL SyncRepWaitForLSN);
+	// counted only with Config.ReplicaWait.
+	ReplicaWaitNs uint64
 }
 
 // DeltaFromEvent converts one measured call.
@@ -42,13 +45,14 @@ func DeltaFromEvent(e Event) Delta {
 	}
 }
 
-// AddDeltas records every delta at time at under one lock. Deltas with zero
-// calls are ignored.
+// AddDeltas records every delta at time at under one lock. A delta with zero
+// calls is recorded when it carries CPU, run-queue, disk or I/O-wait time (an
+// in-flight credit or a parallel worker's share); one with nothing is ignored.
 func (a *Aggregator) AddDeltas(ds []Delta, at time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, d := range ds {
-		if d.Calls > 0 {
+		if d.Calls > 0 || d.CPUNs > 0 || d.RunqNs > 0 || d.DiskReadBytes > 0 || d.DiskWriteBytes > 0 || d.IOWaitNs > 0 {
 			a.addDeltaLocked(d, at)
 		}
 	}

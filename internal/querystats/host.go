@@ -24,6 +24,8 @@ type HostDelta struct {
 	QueryDiskReason string // per-statement disk bytes (ioac)
 	IOWaitReason    string // per-statement block-I/O wait (delay accounting)
 	RedoWaitReason  string // per-statement commit wait (log_write_up_to probes)
+	// ReplicaWaitReason: per-statement sync-replication wait (Config.ReplicaWait).
+	ReplicaWaitReason string
 }
 
 // hostAcc is one bucket's host deltas.
@@ -39,6 +41,8 @@ type hostAcc struct {
 	redoWaitReason              string
 	queryDiskBad, ioWaitBad     bool // a poll in the bucket lacked the signal
 	redoBad                     bool
+	replicaWaitReason           string
+	replicaBad                  bool
 }
 
 // AddHost records one poll's host deltas into the bucket of at.
@@ -71,6 +75,9 @@ func (a *Aggregator) AddHost(h HostDelta, at time.Time) {
 	if h.RedoWaitReason != "" {
 		x.redoBad, x.redoWaitReason = true, h.RedoWaitReason
 	}
+	if h.ReplicaWaitReason != "" {
+		x.replicaBad, x.replicaWaitReason = true, h.ReplicaWaitReason
+	}
 	if a.hdrain != nil {
 		a.hdrain.add(h)
 	}
@@ -101,6 +108,7 @@ type hostWindow struct {
 	numCPUEpoch int64
 	// Epochs of the buckets the reasons came from: the newest reason wins.
 	queryDiskEpoch, ioWaitEpoch, redoEpoch int64
+	replicaEpoch                           int64
 }
 
 func (a *Aggregator) hostTotals(bs []*bucket) hostWindow {
@@ -127,6 +135,9 @@ func (a *Aggregator) hostTotals(bs []*bucket) hostWindow {
 		}
 		if x.redoBad && (!w.redoBad || b.epoch > w.redoEpoch) {
 			w.redoBad, w.redoWaitReason, w.redoEpoch = true, x.redoWaitReason, b.epoch
+		}
+		if x.replicaBad && (!w.replicaBad || b.epoch > w.replicaEpoch) {
+			w.replicaBad, w.replicaWaitReason, w.replicaEpoch = true, x.replicaWaitReason, b.epoch
 		}
 	}
 	return w

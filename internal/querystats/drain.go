@@ -22,6 +22,7 @@ type DigestDelta struct {
 	DiskWriteBytes uint64
 	IOWaitNs       uint64
 	RedoWaitNs     uint64
+	ReplicaWaitNs  uint64
 }
 
 // EnableDrain starts accumulating per-(pid, digest) deltas for DrainDigests.
@@ -60,6 +61,7 @@ func (a *Aggregator) DrainDigests() (out []DigestDelta, folded uint64) {
 			PID: k.pid, DigestID: k.id, Command: x.command, Text: x.text, Sample: x.sample,
 			Calls: x.calls, CPUNs: x.cpu, RunqNs: x.runq, WallNs: x.wall, WallMaxNs: x.wallMax,
 			BytesOut: x.out, DiskReadBytes: x.diskRead, DiskWriteBytes: x.diskWrite, IOWaitNs: x.ioWait, RedoWaitNs: x.redoWait,
+			ReplicaWaitNs: x.replicaWait,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

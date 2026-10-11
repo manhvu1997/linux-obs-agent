@@ -71,6 +71,12 @@ type Config struct {
 	// … while the node reads ≥ this many MB/s over the window (5).
 	IOCulpritMinNodeDiskReadMBPerSec float64
 	TopNDiskRead                     int // 10
+	// PageBytes: bytes per database page for disk_read_pages_per_call
+	// (0 → InnoDBPageBytes; PostgreSQL uses 8192).
+	PageBytes int
+	// ReplicaWait enables a fourth optional wait (PostgreSQL sync
+	// replication). Off: no replica part, victim kind or accounting key.
+	ReplicaWait bool
 }
 
 func (c Config) withDefaults() Config {
@@ -115,6 +121,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.TopNDiskRead <= 0 {
 		c.TopNDiskRead = 10
+	}
+	if c.PageBytes <= 0 {
+		c.PageBytes = InnoDBPageBytes
 	}
 	return c
 }
@@ -180,9 +189,15 @@ type acc struct {
 	wallMax, out           uint64
 	diskRead, diskWrite    uint64
 	ioWait, redoWait       uint64
+	replicaWait            uint64
 }
 
 func (x *acc) add(d Delta) {
+	// The command comes from the first delta that has calls: a zero-call
+	// delta (in-flight credit, parallel worker) must not name the digest.
+	if x.calls == 0 && d.Calls > 0 {
+		x.command = d.Command
+	}
 	x.calls += d.Calls
 	x.cpu += d.CPUNs
 	x.runq += d.RunqNs
@@ -192,6 +207,7 @@ func (x *acc) add(d Delta) {
 	x.diskWrite += d.DiskWriteBytes
 	x.ioWait += d.IOWaitNs
 	x.redoWait += d.RedoWaitNs
+	x.replicaWait += d.ReplicaWaitNs
 	x.wallMax = max(x.wallMax, d.WallMaxNs)
 	x.truncated = x.truncated || d.Truncated
 	if x.sample == "" {
@@ -200,6 +216,9 @@ func (x *acc) add(d Delta) {
 }
 
 func (x *acc) merge(y *acc) {
+	if x.calls == 0 && y.calls > 0 {
+		x.command = y.command
+	}
 	x.calls += y.calls
 	x.cpu += y.cpu
 	x.runq += y.runq
@@ -209,6 +228,7 @@ func (x *acc) merge(y *acc) {
 	x.diskWrite += y.diskWrite
 	x.ioWait += y.ioWait
 	x.redoWait += y.redoWait
+	x.replicaWait += y.replicaWait
 	x.wallMax = max(x.wallMax, y.wallMax)
 	x.truncated = x.truncated || y.truncated
 	if x.sample == "" {
@@ -271,6 +291,7 @@ func addCounters(c *model.QueryCounters, d Delta) {
 	c.DiskWriteBytes += d.DiskWriteBytes
 	c.IOWaitNs += d.IOWaitNs
 	c.RedoWaitNs += d.RedoWaitNs
+	c.ReplicaWaitNs += d.ReplicaWaitNs
 }
 
 // Add records one call; equivalent to AddDeltas with DeltaFromEvent(e).
@@ -405,6 +426,7 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		diskBytes: hw.accounting(hw.queryDiskBad, hw.queryDiskReason) == AccountingOK,
 		ioWait:    hw.accounting(hw.ioWaitBad, hw.ioWaitReason) == AccountingOK,
 		redo:      hw.accounting(hw.redoBad, hw.redoWaitReason) == AccountingOK,
+		replica:   a.cfg.ReplicaWait && hw.accounting(hw.replicaBad, hw.replicaWaitReason) == AccountingOK,
 	}
 	var dd *diskDenom
 	if rd, _, ok := hw.nodeDisk(); ok && av.diskBytes {
@@ -416,7 +438,7 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 	for _, v := range []struct {
 		ok   bool
 		kind string
-	}{{av.runq, VictimCPU}, {av.ioWait, VictimDisk}, {av.redo, VictimCommit}} {
+	}{{av.runq, VictimCPU}, {av.ioWait, VictimDisk}, {av.redo, VictimCommit}, {av.replica, VictimReplica}} {
 		if v.ok {
 			victims[v.kind] = 0 // a measured zero survives omitempty; unavailable kinds stay absent
 		}
@@ -479,6 +501,16 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 		diskCoverage = &v
 	}
 
+	accounting := map[string]string{
+		AccountingKeyCPUWait:    acct,
+		AccountingKeyDiskBytes:  hw.accounting(hw.queryDiskBad, hw.queryDiskReason),
+		AccountingKeyDiskWait:   hw.accounting(hw.ioWaitBad, hw.ioWaitReason),
+		AccountingKeyCommitWait: hw.accounting(hw.redoBad, hw.redoWaitReason),
+	}
+	if a.cfg.ReplicaWait {
+		accounting[AccountingKeyReplicaWait] = hw.accounting(hw.replicaBad, hw.replicaWaitReason)
+	}
+
 	return Snapshot{
 		WindowSeconds:   int(a.cfg.Window / time.Second),
 		QueryCPUMsTotal: float64(cpuAll) / 1e6,
@@ -490,21 +522,16 @@ func (a *Aggregator) Snapshot(now time.Time) Snapshot {
 			IOCulpritPercentOfDiskRead:       a.cfg.IOCulpritPercentOfDiskRead,
 			IOCulpritMinNodeDiskReadMBPerSec: a.cfg.IOCulpritMinNodeDiskReadMBPerSec,
 		},
-		TopByCPU:                byCPU,
-		TopByBytesOut:           byOut,
-		Exported:                exported,
-		Commands:                cmds,
-		Node:                    node,
-		QueryCPUCoveragePercent: coverage,
-		TopByWait:               byWait,
-		TopByDiskRead:           byDisk,
-		Victims:                 victims,
-		Accounting: map[string]string{
-			AccountingKeyCPUWait:    acct,
-			AccountingKeyDiskBytes:  hw.accounting(hw.queryDiskBad, hw.queryDiskReason),
-			AccountingKeyDiskWait:   hw.accounting(hw.ioWaitBad, hw.ioWaitReason),
-			AccountingKeyCommitWait: hw.accounting(hw.redoBad, hw.redoWaitReason),
-		},
+		TopByCPU:                     byCPU,
+		TopByBytesOut:                byOut,
+		Exported:                     exported,
+		Commands:                     cmds,
+		Node:                         node,
+		QueryCPUCoveragePercent:      coverage,
+		TopByWait:                    byWait,
+		TopByDiskRead:                byDisk,
+		Victims:                      victims,
+		Accounting:                   accounting,
 		QueryDiskReadCoveragePercent: diskCoverage,
 	}
 }

@@ -1054,6 +1054,9 @@ type QueryCounters struct {
 	DiskWriteBytes uint64 `json:"disk_write_bytes"`
 	IOWaitNs       uint64 `json:"io_wait_ns"`
 	RedoWaitNs     uint64 `json:"redo_wait_ns"`
+	// ReplicaWaitNs: sync-replication wait (PostgreSQL); omitted when 0 so
+	// MySQL JSON is unchanged.
+	ReplicaWaitNs uint64 `json:"replica_wait_ns,omitempty"`
 }
 
 // QueryDigestStats is one digest's aggregate over the report window.
@@ -1114,6 +1117,7 @@ type QueryDigestStats struct {
 	DiskWriteBytes uint64 `json:"-"`
 	IOWaitNs       uint64 `json:"-"`
 	RedoWaitNs     uint64 `json:"-"`
+	ReplicaWaitNs  uint64 `json:"-"`
 }
 
 // TimeBreakdown splits a digest's wall time in percent (sums to 100):
@@ -1127,7 +1131,9 @@ type TimeBreakdown struct {
 	DiskWait *float64 `json:"disk_wait,omitempty"`
 	// CommitWait: redo-log wait inside log_write_up_to.
 	CommitWait *float64 `json:"commit_wait,omitempty"`
-	Other      float64  `json:"other"`
+	// ReplicaWait: sync-replication wait (PostgreSQL, querystats.Config.ReplicaWait).
+	ReplicaWait *float64 `json:"replica_wait,omitempty"`
+	Other       float64  `json:"other"`
 }
 
 // QueryRoleThresholds echoes the culprit/victim cut-offs into the report.

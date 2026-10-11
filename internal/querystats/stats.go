@@ -13,6 +13,8 @@ const (
 	VictimCPU    = "cpu"
 	VictimDisk   = "disk"
 	VictimCommit = "commit"
+	// VictimReplica: largest wait is sync replication (Config.ReplicaWait).
+	VictimReplica = "replica"
 	// InnoDBPageBytes is the default InnoDB page size (disk_read_pages_per_call).
 	InnoDBPageBytes = 16384
 	// AccountingKeyCPUWait is the accounting entry for run-queue time.
@@ -23,6 +25,8 @@ const (
 	AccountingKeyDiskBytes  = "disk_bytes"
 	AccountingKeyDiskWait   = "disk_wait"
 	AccountingKeyCommitWait = "commit_wait"
+	// AccountingKeyReplicaWait: present only with Config.ReplicaWait.
+	AccountingKeyReplicaWait = "replica_wait"
 	// accountingUnknown: no host sample in the window says whether a signal is available.
 	accountingUnknown = "unknown"
 )
@@ -34,7 +38,7 @@ type nodeDenom struct {
 }
 
 // avail: which per-statement signals every poll in the window measured.
-type avail struct{ runq, diskBytes, ioWait, redo bool }
+type avail struct{ runq, diskBytes, ioWait, redo, replica bool }
 
 // diskDenom is the node's physical-disk reads over the same polls.
 type diskDenom struct {
@@ -49,18 +53,24 @@ func (a *Aggregator) addNewStats(s *model.QueryDigestStats, k key, x *acc, av av
 	s.CPUNs, s.RunqNs, s.WallNs, s.BytesOut = x.cpu, x.runq, x.wall, x.out
 	s.CallsPerSec = calls / w.Seconds()
 	s.CPUCores = float64(x.cpu) / float64(w.Nanoseconds())
-	s.LatencyMsAvg = float64(x.wall) / calls / 1e6
+	if x.calls > 0 { // a digest with only credits / parallel shares has no per-call values
+		s.LatencyMsAvg = float64(x.wall) / calls / 1e6
+		s.BytesOutPerCall = float64(x.out) / calls
+	}
 	s.LatencyMsMax = float64(x.wallMax) / 1e6
-	s.BytesOutPerCall = float64(x.out) / calls
 	if nd != nil {
 		p := 100 * float64(x.cpu) / float64(nd.usedNs)
 		s.PercentOfNodeCPUUsed = &p
 	}
 	s.DiskReadBytes, s.DiskWriteBytes, s.IOWaitNs, s.RedoWaitNs = x.diskRead, x.diskWrite, x.ioWait, x.redoWait
+	s.ReplicaWaitNs = x.replicaWait
 	if av.diskBytes {
 		r, wr := mbPerSec(x.diskRead, w), mbPerSec(x.diskWrite, w)
-		pages := float64(x.diskRead) / calls / InnoDBPageBytes
-		s.DiskReadMBPerSec, s.DiskWriteMBPerSec, s.DiskReadPagesPerCall = &r, &wr, &pages
+		s.DiskReadMBPerSec, s.DiskWriteMBPerSec = &r, &wr
+		if x.calls > 0 {
+			pages := float64(x.diskRead) / calls / float64(a.cfg.PageBytes)
+			s.DiskReadPagesPerCall = &pages
+		}
 		if dd != nil && dd.readBytes > 0 {
 			p := 100 * float64(x.diskRead) / float64(dd.readBytes)
 			s.PercentOfDiskRead = &p
@@ -99,6 +109,9 @@ func breakdown(x *acc, av avail) *model.TimeBreakdown {
 	if av.redo {
 		parts += float64(x.redoWait)
 	}
+	if av.replica {
+		parts += float64(x.replicaWait)
+	}
 	den := math.Max(float64(x.wall), parts)
 	pct := func(v uint64) *float64 { p := 100 * float64(v) / den; return &p }
 	tb := &model.TimeBreakdown{CPU: 100 * float64(x.cpu) / den, Other: 100 * (den - parts) / den}
@@ -110,6 +123,9 @@ func breakdown(x *acc, av avail) *model.TimeBreakdown {
 	}
 	if av.redo {
 		tb.CommitWait = pct(x.redoWait)
+	}
+	if av.replica {
+		tb.ReplicaWait = pct(x.replicaWait)
 	}
 	return tb
 }
@@ -124,7 +140,7 @@ func victimOf(tb *model.TimeBreakdown, slow bool, minPct float64) string {
 	for _, w := range []struct {
 		v    *float64
 		kind string
-	}{{tb.CPUWait, VictimCPU}, {tb.DiskWait, VictimDisk}, {tb.CommitWait, VictimCommit}} {
+	}{{tb.CPUWait, VictimCPU}, {tb.DiskWait, VictimDisk}, {tb.CommitWait, VictimCommit}, {tb.ReplicaWait, VictimReplica}} {
 		if w.v == nil {
 			continue
 		}
@@ -150,6 +166,9 @@ func waitNs(s model.QueryDigestStats, av avail) uint64 {
 	}
 	if av.redo {
 		n += s.RedoWaitNs
+	}
+	if av.replica {
+		n += s.ReplicaWaitNs
 	}
 	return n
 }
