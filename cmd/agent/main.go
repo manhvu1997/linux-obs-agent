@@ -251,6 +251,11 @@ func main() {
 		}
 		promExp.RegisterCollectors(promcollect.NewFamilyCollector(insp.AllFamilies, netCounters, cfg.Netflow.MaxFamilies))
 		promExp.RegisterCollectors(promcollect.NewNodeCollector(collector.ReadNodeDiskBytes, coll.Latest))
+		hostName := cfg.Agent.NodeName
+		if hostName == "" {
+			hostName, _ = os.Hostname()
+		}
+		promExp.RegisterCollectors(promcollect.NewHostInfoCollector(hostName))
 		if cfg.MySQL.Enabled {
 			promExp.RegisterCollectors(promcollect.NewMySQLCollector(mysqlAnalyzer.DigestSnapshot, promcollect.MySQLHealth{
 				Dropped:        mysqlAnalyzer.Dropped,
