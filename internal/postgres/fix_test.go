@@ -42,7 +42,7 @@ func TestAutovacuumOnCatalogStaysAutovacuum(t *testing.T) {
 	tr.entries = [][]pgtrace.AggEntry{{{Postmaster: 100, Kind: pgtrace.KindClient, Hash: h, Calls: 1, WallNs: 5e9, CPUNs: 4e9}}}
 	a.poll(t0)
 	v := cluster100(t, a)
-	if got := v.Snapshot.TopByCPU[0]; got.Command != CommandAutovacuum || got.DigestText != "<system catalogs>" {
+	if got := v.Snapshot.TopByCPU[0]; got.Command != CommandAutovacuum || got.DigestText == "<system catalogs>" {
 		t.Fatalf("digest %+v", got)
 	}
 	if len(v.Overload.TopDigests) != 0 {
@@ -340,5 +340,55 @@ func TestDrainWindowsSlowCapAndEnrich(t *testing.T) {
 	a.d.Enricher.Poll(context.Background(), 5432, []int64{77}, t0.Add(2*time.Minute))
 	if d3 := find(a.Drain().Clusters); len(d3.Enrich) != 1 {
 		t.Fatalf("a newer SQL poll must be exported: %+v", d3.Enrich)
+	}
+}
+
+// N1: client catalog CPU and autovacuum CPU in one bucket stay separate digests.
+func TestCatalogClientAndAutovacuumDoNotMerge(t *testing.T) {
+	a, tr := testAnalyzer(t, hostProcs())
+	a.discover(time.Unix(0, 0))
+	av := learn(a, "autovacuum: VACUUM ANALYZE pg_catalog.pg_attribute")
+	cl := learn(a, "select * from pg_catalog.pg_class where oid = 1")
+	tr.entries = [][]pgtrace.AggEntry{{
+		{Postmaster: 100, Kind: pgtrace.KindClient, Hash: av, Calls: 1, WallNs: 5e9, CPUNs: 4e9},
+		{Postmaster: 100, Kind: pgtrace.KindClient, Hash: cl, Calls: 1, WallNs: 5e9, CPUNs: 3e9},
+	}}
+	a.poll(t0)
+	v := cluster100(t, a)
+	if len(v.Snapshot.TopByCPU) != 2 {
+		t.Fatalf("want two digests: %+v", v.Snapshot.TopByCPU)
+	}
+	if len(v.Overload.TopDigests) != 1 || v.Overload.TopDigests[0].Command != CommandClient || v.Overload.TopDigests[0].CPUCores < 3.0/60-1e-9 {
+		t.Fatalf("client catalog CPU must remain the only candidate: %+v", v.Overload.TopDigests)
+	}
+}
+
+// N2/N4: a dropped cluster's SQL state is forgotten after the lock is released,
+// and by enrich when the cluster vanished during its Poll.
+func TestEnricherForgetOnDrop(t *testing.T) {
+	p := hostProcs()
+	a, _ := testAnalyzer(t, p)
+	a.d.Enricher = pgstat.NewEnricher(func(context.Context, int) (pgstat.Conn, error) {
+		return &fakeSQL{s: pgstat.Settings{VersionNum: 170002, ComputeQueryID: "on"}}, nil
+	})
+	a.discover(time.Unix(0, 0))
+	a.d.Enricher.Poll(context.Background(), 5432, nil, t0)
+	delete(p.comm, 100)
+	a.discover(time.Unix(30, 0))
+	if a.d.Enricher.Snapshot(5432).Status != pgstat.StatusNotConfigured {
+		t.Fatal("discover must forget the dropped cluster's SQL state")
+	}
+	// vanished during the poll: the dialer removes the cluster behind enrich's back
+	a2, _ := testAnalyzer(t, hostProcs())
+	a2.d.Enricher = pgstat.NewEnricher(func(context.Context, int) (pgstat.Conn, error) {
+		a2.mu.Lock()
+		delete(a2.clusters, 100)
+		a2.mu.Unlock()
+		return &fakeSQL{s: pgstat.Settings{VersionNum: 170002, ComputeQueryID: "on"}}, nil
+	})
+	a2.discover(time.Unix(0, 0))
+	a2.enrich(context.Background(), t0)
+	if a2.d.Enricher.Snapshot(5432).Status != pgstat.StatusNotConfigured {
+		t.Fatal("enrich must forget a cluster dropped while it polled")
 	}
 }

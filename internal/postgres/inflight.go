@@ -63,11 +63,12 @@ type creditor struct {
 	minAgeNs uint64
 	credited map[sessKey]*creditedSess
 	owed     map[aggKey]*owed
-	dropped  uint64 // owed amounts never matched (counted, then forgotten)
+	tomb     map[sessKey]bool // sessions settled by SettleCmd; a stale session list must not re-credit them
+	dropped  uint64           // owed amounts never matched (counted, then forgotten)
 }
 
 func newCreditor(minAgeNs uint64, read func(uint32) (procCounters, error)) *creditor {
-	return &creditor{readProc: read, minAgeNs: minAgeNs, credited: map[sessKey]*creditedSess{}, owed: map[aggKey]*owed{}}
+	return &creditor{readProc: read, minAgeNs: minAgeNs, credited: map[sessKey]*creditedSess{}, owed: map[aggKey]*owed{}, tomb: map[sessKey]bool{}}
 }
 
 // Credit returns the progress of every interval open longer than minAge whose
@@ -81,6 +82,9 @@ func (c *creditor) Credit(sessions []pgtrace.Session, nowMono uint64, known func
 	for _, s := range sessions {
 		k := sessKey{s.TID, s.OpenTS}
 		open[k] = true
+		if c.tomb[k] {
+			continue
+		}
 		if nowMono < s.OpenTS || nowMono-s.OpenTS < c.minAgeNs || (s.Hash != 0 && !known(s.Hash)) {
 			continue
 		}
@@ -99,6 +103,11 @@ func (c *creditor) Credit(sessions []pgtrace.Session, nowMono uint64, known func
 			out = append(out, credit{cs.key, inc})
 			cs.total = procCounters{max(cs.total.CPU, total.CPU), max(cs.total.Runq, total.Runq),
 				max(cs.total.Read, total.Read), max(cs.total.Write, total.Write), max(cs.total.Blkio, total.Blkio)}
+		}
+	}
+	for k := range c.tomb {
+		if !open[k] {
+			delete(c.tomb, k) // gone from a fresh list: no stale list can resurrect it
 		}
 	}
 	for k, cs := range c.credited {
@@ -215,6 +224,9 @@ func (c *creditor) SettleCmd(k aggKey, tid uint32, p *procCounters) {
 		if sk.TID == tid && cs.key == k {
 			pay(&cs.total)
 			delete(c.credited, sk)
+			// Limit: a session never credited has no tombstone (the event has no
+			// open timestamp), so a stale list can still credit it once.
+			c.tomb[sk] = true
 			return
 		}
 	}
@@ -230,6 +242,7 @@ func (c *creditor) Reset() {
 	defer c.mu.Unlock()
 	c.credited = map[sessKey]*creditedSess{}
 	c.owed = map[aggKey]*owed{}
+	c.tomb = map[sessKey]bool{}
 }
 
 // Dropped is the number of owed amounts that were never matched.

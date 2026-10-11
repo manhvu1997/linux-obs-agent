@@ -143,6 +143,7 @@ type Analyzer struct {
 	binaries  map[pgtrace.BinaryKey]*binary
 	drainKeys int // 0: ClickHouse digest drain off
 	drainSlow int
+	toForget  []int // enricher ports of dropped clusters, forgotten after a.mu is released
 
 	// poll goroutine only
 	prevNode collector.NodeCPUTimes
@@ -320,7 +321,9 @@ func (a *Analyzer) classify(text string, truncated bool) textcache.Entry {
 	// "autovacuum: VACUUM … pg_catalog.x" must stay autovacuum, never client.
 	class := commandFor(pgtrace.KindClient, d.Text)
 	sample := text
-	if a.opts.FoldSystemCatalogs && sqldigest.ReferencesSystemCatalog(d.Text) {
+	// Only client statements fold: an autovacuum or walsender digest is per-table and
+	// must not share an id (and thus a command) with client catalog queries.
+	if a.opts.FoldSystemCatalogs && class == CommandClient && sqldigest.ReferencesSystemCatalog(d.Text) {
 		d, sample, truncated = systemCatalogDigest, "", false
 	}
 	if !a.opts.SampleQueries {
@@ -507,7 +510,7 @@ func (a *Analyzer) dropClusterLocked(pid uint32) {
 	delete(a.clusters, pid)
 	a.back.Forget(pid)
 	if a.d.Enricher != nil && c != nil {
-		a.d.Enricher.Forget(c.post().Port)
+		a.toForget = append(a.toForget, c.post().Port)
 	}
 }
 
@@ -525,6 +528,18 @@ func (a *Analyzer) wantSyncRep(port int) bool {
 
 // discover reconciles postmasters, the clusters map and the attached binaries.
 func (a *Analyzer) discover(now time.Time) {
+	a.discoverLocked(now)
+	// Forget can wait for an in-flight SQL poll: never under a.mu.
+	a.mu.Lock()
+	ports := a.toForget
+	a.toForget = nil
+	a.mu.Unlock()
+	for _, p := range ports {
+		a.d.Enricher.Forget(p)
+	}
+}
+
+func (a *Analyzer) discoverLocked(now time.Time) {
 	pms, err := Discover(a.d.Proc)
 	if err != nil {
 		slog.Warn("postgres: discovery", "err", err)
@@ -1029,6 +1044,14 @@ func (a *Analyzer) AggOverflow() uint64    { return a.d.Tracer.AggOverflow() }
 
 // enrich runs one SQL poll for every cluster (ids: the reported digests'
 // queryids), then re-checks whether sync replication needs its hook.
+// forgetIfGone closes a cluster's SQL state when the cluster was dropped while
+// its Poll ran (the Poll would otherwise have recreated it after discover forgot it).
+func (a *Analyzer) forgetIfGone(pid uint32, port int) {
+	if a.cluster(pid) == nil {
+		a.d.Enricher.Forget(port)
+	}
+}
+
 func (a *Analyzer) enrich(ctx context.Context, now time.Time) {
 	qids, _ := a.d.Tracer.QueryIDs()
 	for _, v := range a.Views() {
@@ -1047,18 +1070,26 @@ func (a *Analyzer) enrich(ctx context.Context, now time.Time) {
 			}
 		}
 		a.d.Enricher.Poll(ctx, c.post().Port, ids, now)
+		a.forgetIfGone(v.PostmasterPID, c.post().Port)
 	}
 	if len(a.Views()) == 0 { // first run: connect so settings (sync rep, io_method) are known early
 		a.mu.Lock()
-		var ports []int
+		var ports []struct {
+			pid  uint32
+			port int
+		}
 		for _, c := range a.clusters {
 			if c.post().Port > 0 {
-				ports = append(ports, c.post().Port)
+				ports = append(ports, struct {
+					pid  uint32
+					port int
+				}{c.pid, c.post().Port})
 			}
 		}
 		a.mu.Unlock()
 		for _, p := range ports {
-			a.d.Enricher.Poll(ctx, p, nil, now)
+			a.d.Enricher.Poll(ctx, p.port, nil, now)
+			a.forgetIfGone(p.pid, p.port)
 		}
 	}
 	select { // settings may change the optional hooks (sync replication)

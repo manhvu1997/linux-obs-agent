@@ -96,3 +96,23 @@ func TestSettleCmdSubtractsCredit(t *testing.T) {
 		}
 	}
 }
+
+// N3: a session list read before SettleCmd must not re-credit the session
+// SettleCmd just settled.
+func TestStaleSessionListAfterSettleCmd(t *testing.T) {
+	cur := procCounters{CPU: 5e9}
+	c := newCreditor(5e9, func(uint32) (procCounters, error) { return cur, nil })
+	s := pgtrace.Session{TID: 7, Postmaster: 100, Kind: pgtrace.KindClient, Hash: 42, OpenTS: 1e9}
+	list := []pgtrace.Session{s}
+	c.Credit(list, 7e9, allKnown)
+	p := procCounters{CPU: 9e9}
+	c.SettleCmd(aggKey{100, pgtrace.KindClient, 42}, 7, &p)
+	cur.CPU = 6e9
+	if cr := c.Credit(list, 8e9, allKnown); len(cr) != 0 || len(c.credited) != 0 {
+		t.Fatalf("stale list re-credited a settled session: %+v %v", cr, c.credited)
+	}
+	c.Credit(nil, 9e9, allKnown) // the session is gone from a fresh list: tombstone pruned
+	if len(c.tomb) != 0 {
+		t.Fatalf("tombstones must be pruned: %v", c.tomb)
+	}
+}
