@@ -34,6 +34,7 @@ package overload
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
@@ -73,7 +74,6 @@ type Inputs struct {
 
 const (
 	checkNode    = "node_saturated"
-	checkMySQLd  = "mysqld_top_consumer"
 	checkDigest  = "dominant_digest"
 	checkVictims = "victims"
 	resourceCPU  = "cpu"
@@ -87,22 +87,7 @@ func Assess(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 	if in.MySQL == nil {
 		return nil
 	}
-	cpu := assessCPU(in, th, now)
-	disk := assessDisk(in, now)
-	cpuSat, diskSat := cpu.Checks[0].Passed, disk.Checks[0].Passed
-	switch {
-	case cpuSat && diskSat:
-		primary, secondary := cpu, disk
-		if preferDisk(cpu, disk) {
-			primary, secondary = disk, cpu
-		}
-		primary.Secondary = secondary
-		return primary
-	case diskSat:
-		return disk
-	default:
-		return cpu
-	}
+	return AssessEngine(MySQLEngine, fromMySQL(in.MySQL), in, th, 0, now)
 }
 
 func isOverload(v model.OverloadVerdict) bool {
@@ -130,15 +115,18 @@ func share(d *model.OverloadDigest, disk bool) float64 {
 	return -1
 }
 
-// assessCPU assesses the CPU; in.MySQL is non-nil.
-func assessCPU(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
+// assessCPU assesses the CPU of one engine report.
+func assessCPU(e Engine, my *Report, in Inputs, th Thresholds, bgPct float64, now time.Time) *model.QueryOverload {
 	th = th.withDefaults()
-	my, m := in.MySQL, in.Metrics
-	r := &model.QueryOverload{Type: "query_overload", Timestamp: now, Resource: resourceCPU,
+	m := in.Metrics
+	r := &model.QueryOverload{Type: "query_overload", Timestamp: now, Resource: resourceCPU, Cluster: my.Cluster,
 		Thresholds: model.OverloadThresholds{NodeCPUPercent: th.NodeCPUPercent, NodeLoad: th.NodeLoad}}
 	if t := my.Thresholds; t != nil {
 		r.Thresholds.CPUCulpritPercentOfNodeCPUUsed = t.CPUCulpritPercentOfNodeCPUUsed
 		r.Thresholds.CPUCulpritMinNodeCPUUsedPercent = t.CPUCulpritMinNodeCPUUsedPercent
+	}
+	if e.Background {
+		r.Thresholds.BackgroundDominantPercent = bgPct
 	}
 	ev := &r.Evidence
 	ev.WindowSeconds = my.WindowSeconds
@@ -180,15 +168,31 @@ func assessCPU(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 	r.Checks = append(r.Checks, model.OverloadCheck{Name: checkNode, Passed: nodeOK, Detail: nodeDetail})
 
 	vc := cpuVictimsCheck(cpuWait)
+	bgType, bgVal, bgTotal, bgOK := dominantBackground(e, my, false, bgPct)
 	d, found := candidate(my.TopDigests)
 	if !found {
+		// PostgreSQL: autovacuum or checkpoints can saturate a node with no
+		// statement running at all.
+		if bgOK && nodeOK {
+			if fam, famCPU, top, known := familyCPU(in, my.ServerPID); known && top.Family == fam {
+				ev.TopFamily, ev.TopFamilyCPUPercent = top.Family, floatp(top.CPUPercent)
+				e.SetCPUFamily(ev, fam, famCPU)
+				r.Checks = append(r.Checks,
+					model.OverloadCheck{Name: e.CheckProcess, Passed: true, Detail: fmt.Sprintf("%s (pid %d) family %s uses %.1f%% of node CPU; top family is %s at %.1f%%",
+						e.Process, my.ServerPID, fam, famCPU, top.Family, top.CPUPercent)},
+					model.OverloadCheck{Name: checkDigest, Detail: "no digest data"},
+					vc)
+				backgroundVerdict(e, r, saturatedText(used, load), fam, bgType, bgVal, bgTotal, false)
+				return r
+			}
+		}
 		r.Checks = append(r.Checks,
-			model.OverloadCheck{Name: checkMySQLd, Detail: "no digest data"},
+			model.OverloadCheck{Name: e.CheckProcess, Detail: "no digest data"},
 			model.OverloadCheck{Name: checkDigest, Detail: "no digest data"},
 			vc)
 		r.Verdict, r.Confidence = model.OverloadNoData, model.ConfidenceLow
 		r.Missing = append(r.Missing, "query_digests")
-		r.Summary = "No query digest statistics in the window (mysql.emit_all_queries off, or no queries yet)."
+		r.Summary = "No query digest statistics in the window (" + e.NoDigestsHint + ")."
 		return r
 	}
 	r.Digest = &model.OverloadDigest{PID: d.PID, DigestID: d.DigestID, DigestText: d.DigestText, Command: d.Command,
@@ -198,24 +202,20 @@ func assessCPU(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 	// 2. process
 	mysqldKnown, mysqldOK := false, false
 	mysqldDetail := "process families unavailable"
-	if fam := in.PIDFamilies[d.PID]; fam != "" && len(in.Families) > 0 {
+	var engFam string
+	var engFamCPU float64
+	if fam, famCPU, top, known := familyCPU(in, d.PID); known {
 		mysqldKnown = true
-		top := in.Families[0]
-		var famCPU float64
-		for _, f := range in.Families {
-			if f.Family == fam {
-				famCPU = f.CPUPercent
-				break
-			}
-		}
-		ev.TopFamily, ev.TopFamilyCPUPercent, ev.MySQLFamily, ev.MySQLFamilyCPUPercent = top.Family, floatp(top.CPUPercent), fam, floatp(famCPU)
+		engFam, engFamCPU = fam, famCPU
+		ev.TopFamily, ev.TopFamilyCPUPercent = top.Family, floatp(top.CPUPercent)
+		e.SetCPUFamily(ev, fam, famCPU)
 		mysqldOK = top.Family == fam
-		mysqldDetail = fmt.Sprintf("mysqld (pid %d) family %s uses %.1f%% of node CPU; top family is %s at %.1f%%",
-			d.PID, fam, famCPU, top.Family, top.CPUPercent)
+		mysqldDetail = fmt.Sprintf("%s (pid %d) family %s uses %.1f%% of node CPU; top family is %s at %.1f%%",
+			e.Process, d.PID, fam, famCPU, top.Family, top.CPUPercent)
 	} else {
 		r.Missing = append(r.Missing, "process_families")
 	}
-	r.Checks = append(r.Checks, model.OverloadCheck{Name: checkMySQLd, Passed: mysqldOK, Detail: mysqldDetail})
+	r.Checks = append(r.Checks, model.OverloadCheck{Name: e.CheckProcess, Passed: mysqldOK, Detail: mysqldDetail})
 
 	// 3. query
 	pct := pctText(d.PercentOfNodeCPUUsed)
@@ -233,9 +233,11 @@ func assessCPU(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 		r.Summary = fmt.Sprintf("Node CPU is not saturated (%.1f%% used, load/cpu %.2f). The top digest did %s of the CPU work; it may dominate MySQL but does not overload the server.",
 			used, load, pct)
 	case mysqldKnown && !mysqldOK:
-		r.Verdict, r.Confidence = model.OverloadNotMySQL, model.ConfidenceHigh
-		r.Summary = fmt.Sprintf("%s but the top CPU family is %s (%.1f%%), not mysqld's %s (%.1f%%). Look at process_report.top_families_cpu.",
-			saturatedText(used, load), ev.TopFamily, *ev.TopFamilyCPUPercent, ev.MySQLFamily, *ev.MySQLFamilyCPUPercent)
+		r.Verdict, r.Confidence = e.NotEngine, model.ConfidenceHigh
+		r.Summary = fmt.Sprintf("%s but the top CPU family is %s (%.1f%%), not %s's %s (%.1f%%). Look at process_report.top_families_cpu.",
+			saturatedText(used, load), ev.TopFamily, *ev.TopFamilyCPUPercent, e.Process, engFam, engFamCPU)
+	case !digestOK && mysqldKnown && bgOK:
+		backgroundVerdict(e, r, saturatedText(used, load), engFam, bgType, bgVal, bgTotal, false)
 	case !digestOK:
 		r.Verdict = model.OverloadNoDominantQuery
 		// A culprit needs percent_of_node_cpu_used (so a node window) and the
@@ -245,8 +247,8 @@ func assessCPU(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 		switch {
 		case d.PercentOfNodeCPUUsed == nil:
 			r.Confidence = model.ConfidenceLow
-			r.Summary = fmt.Sprintf("%s but the digests' share of node CPU is unavailable (mysql_report.node missing for a poll in the window), so no digest can be judged a CPU culprit%s.",
-				saturatedText(used, load), coverageClause(ev.QueryCPUCoveragePercent))
+			r.Summary = fmt.Sprintf("%s but the digests' share of node CPU is unavailable (%s.node missing for a poll in the window), so no digest can be judged a CPU culprit%s.",
+				saturatedText(used, load), e.Report, coverageClause(e, ev.QueryCPUCoveragePercent))
 		case used < minUsed:
 			r.Confidence = model.ConfidenceLow
 			if load >= th.NodeLoad {
@@ -262,7 +264,7 @@ func assessCPU(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 				r.Confidence = model.ConfidenceLow
 			}
 			r.Summary = fmt.Sprintf("%s but no single digest dominates it: the top digest did %s of the CPU work. The load is spread over many queries or is outside query execution%s.",
-				saturatedText(used, load), pct, coverageClause(ev.QueryCPUCoveragePercent))
+				saturatedText(used, load), pct, coverageClause(e, ev.QueryCPUCoveragePercent))
 		}
 	default:
 		r.Verdict = model.OverloadQueryCPU
@@ -272,7 +274,7 @@ func assessCPU(in Inputs, th Thresholds, now time.Time) *model.QueryOverload {
 			victims = fmt.Sprintf("victims could not be measured (accounting.cpu_wait = %s)", cpuWait.reason)
 		}
 		r.Summary = fmt.Sprintf("digest %s did %s of all CPU work (%.2f cores of %s used); %s is the top CPU consumer%s; %s",
-			d.DigestID, pct, d.CPUCores, usedCoresText(ev), familyOrUnknown(ev.MySQLFamily), coverageClause(ev.QueryCPUCoveragePercent), victims)
+			d.DigestID, pct, d.CPUCores, usedCoresText(ev), familyOrUnknown(e, engFam), coverageClause(e, ev.QueryCPUCoveragePercent), victims)
 	}
 	return r
 }
@@ -298,28 +300,42 @@ var diskSaturated = map[model.IOVerdict]bool{
 
 const resourceDisk = "disk"
 
-func assessDisk(in Inputs, now time.Time) *model.QueryOverload {
-	my := in.MySQL
-	r := &model.QueryOverload{Type: "query_overload", Timestamp: now, Resource: resourceDisk}
+func assessDisk(e Engine, my *Report, in Inputs, bgPct float64, now time.Time) *model.QueryOverload {
+	r := &model.QueryOverload{Type: "query_overload", Timestamp: now, Resource: resourceDisk, Cluster: my.Cluster}
 	if t := my.Thresholds; t != nil {
 		r.Thresholds.IOCulpritPercentOfDiskRead = t.IOCulpritPercentOfDiskRead
 		r.Thresholds.IOCulpritMinNodeDiskReadMBPerSec = t.IOCulpritMinNodeDiskReadMBPerSec
+	}
+	if e.Background {
+		r.Thresholds.BackgroundDominantPercent = bgPct
 	}
 	ev := &r.Evidence
 	ev.WindowSeconds = my.WindowSeconds
 	ev.IOVerdict = string(in.IOVerdict)
 	ev.QueryDiskReadCoveragePercent = my.QueryDiskReadCoveragePercent
 	diskWait := measure(my, querystats.AccountingKeyDiskWait, querystats.VictimDisk)
-	commitWait := measure(my, querystats.AccountingKeyCommitWait, querystats.VictimCommit)
 	if diskWait.measured {
 		ev.DiskVictims = intp(diskWait.n)
 	} else {
 		r.Missing = append(r.Missing, querystats.AccountingKeyDiskWait)
 	}
-	if commitWait.measured {
-		ev.CommitVictims = intp(commitWait.n)
-	} else {
-		r.Missing = append(r.Missing, querystats.AccountingKeyCommitWait)
+	var commits []namedWait
+	commitMeasured := false
+	for _, w := range e.CommitWaits {
+		wc := measure(my, w.Key, w.Victim)
+		if w.Optional && wc.reason == "not_attached" {
+			continue
+		}
+		if wc.measured {
+			w.SetCount(ev, wc.n)
+			commitMeasured = true
+		} else {
+			r.Missing = append(r.Missing, w.Key)
+		}
+		commits = append(commits, namedWait{w, wc})
+	}
+	if my.DiskEstimated {
+		ev.DiskEstimated = boolp(true)
 	}
 	if my.Node != nil {
 		ev.NodeDiskReadMBPerSec = my.Node.DiskReadMBPerSec
@@ -338,15 +354,29 @@ func assessDisk(in Inputs, now time.Time) *model.QueryOverload {
 	r.Checks = append(r.Checks, model.OverloadCheck{Name: checkNode, Passed: nodeOK, Detail: nodeDetail})
 
 	d, found := candidate(my.TopDigestsByDiskRead)
-	vc := diskVictimsCheck(diskWait, commitWait)
+	vc := diskVictimsCheck(diskWait, commits)
+	bgType, bgVal, bgTotal, bgOK := dominantBackground(e, my, true, bgPct)
 	if !found {
+		if bgOK && nodeOK {
+			if fam, famRead, top, topRead, known := familyDisk(in, my.ServerPID); known && top.Family == fam {
+				ev.TopDiskFamily, ev.TopDiskFamilyReadMBPerSec = top.Family, floatp(topRead)
+				e.SetDiskFamily(ev, fam, famRead)
+				r.Checks = append(r.Checks,
+					model.OverloadCheck{Name: e.CheckProcess, Passed: true, Detail: fmt.Sprintf("%s (pid %d) family %s reads %.1f MB/s; top disk-reading family is %s at %.1f MB/s",
+						e.Process, my.ServerPID, fam, famRead, top.Family, topRead)},
+					model.OverloadCheck{Name: checkDigest, Detail: "no per-statement disk reads"},
+					vc)
+				backgroundVerdict(e, r, fmt.Sprintf("The disk is saturated (%s)", in.IOVerdict), fam, bgType, bgVal, bgTotal, true)
+				return r
+			}
+		}
 		r.Checks = append(r.Checks,
-			model.OverloadCheck{Name: checkMySQLd, Detail: "no per-statement disk reads"},
+			model.OverloadCheck{Name: e.CheckProcess, Detail: "no per-statement disk reads"},
 			model.OverloadCheck{Name: checkDigest, Detail: "no per-statement disk reads"},
 			vc)
 		r.Verdict, r.Confidence = model.OverloadNoData, model.ConfidenceLow
 		r.Missing = append(r.Missing, "query_disk_reads")
-		r.Summary = "No per-statement disk reads in the window (no statement read from disk, or disk accounting unavailable — see mysql_report.accounting.disk_bytes)."
+		r.Summary = "No per-statement disk reads in the window (no statement read from disk, or disk accounting unavailable — see " + e.Report + ".accounting.disk_bytes)."
 		if !nodeOK {
 			r.Verdict, r.Confidence = model.OverloadNodeNotSaturated, model.ConfidenceHigh
 		}
@@ -360,31 +390,21 @@ func assessDisk(in Inputs, now time.Time) *model.QueryOverload {
 	// are only measured with process.include_io: all zero means unmeasured.
 	mysqldKnown, mysqldOK := false, false
 	mysqldDetail := "process families or their I/O unavailable (process.include_io)"
-	if fam := in.PIDFamilies[d.PID]; fam != "" {
-		var top model.FamilyStats
-		var famRead float64
-		for _, f := range in.Families {
-			if f.ReadBytesPerSec > top.ReadBytesPerSec {
-				top = f
-			}
-			if f.Family == fam {
-				famRead = f.ReadBytesPerSec / (1 << 20)
-			}
-		}
-		if top.ReadBytesPerSec > 0 {
-			mysqldKnown = true
-			topRead := top.ReadBytesPerSec / (1 << 20)
-			ev.TopDiskFamily, ev.TopDiskFamilyReadMBPerSec = top.Family, floatp(topRead)
-			ev.MySQLFamily, ev.MySQLFamilyDiskReadMBPerSec = fam, floatp(famRead)
-			mysqldOK = top.Family == fam
-			mysqldDetail = fmt.Sprintf("mysqld (pid %d) family %s reads %.1f MB/s; top disk-reading family is %s at %.1f MB/s",
-				d.PID, fam, famRead, top.Family, topRead)
-		}
+	var engFam string
+	var engFamRead float64
+	if fam, famRead, top, topRead, known := familyDisk(in, d.PID); known {
+		mysqldKnown = true
+		engFam, engFamRead = fam, famRead
+		ev.TopDiskFamily, ev.TopDiskFamilyReadMBPerSec = top.Family, floatp(topRead)
+		e.SetDiskFamily(ev, fam, famRead)
+		mysqldOK = top.Family == fam
+		mysqldDetail = fmt.Sprintf("%s (pid %d) family %s reads %.1f MB/s; top disk-reading family is %s at %.1f MB/s",
+			e.Process, d.PID, fam, famRead, top.Family, topRead)
 	}
 	if !mysqldKnown {
 		r.Missing = append(r.Missing, "family_disk_io")
 	}
-	r.Checks = append(r.Checks, model.OverloadCheck{Name: checkMySQLd, Passed: mysqldOK, Detail: mysqldDetail})
+	r.Checks = append(r.Checks, model.OverloadCheck{Name: e.CheckProcess, Passed: mysqldOK, Detail: mysqldDetail})
 
 	// 3. query
 	pct := pctText(d.PercentOfDiskRead)
@@ -401,23 +421,28 @@ func assessDisk(in Inputs, now time.Time) *model.QueryOverload {
 		r.Verdict, r.Confidence = model.OverloadNodeNotSaturated, model.ConfidenceHigh
 		r.Summary = fmt.Sprintf("The disk is not saturated (io_diagnosis %s). The top digest read %s of the disk's reads.", orNone(string(in.IOVerdict)), pct)
 	case mysqldKnown && !mysqldOK:
-		r.Verdict, r.Confidence = model.OverloadNotMySQL, model.ConfidenceHigh
-		r.Summary = fmt.Sprintf("The disk is saturated (%s) but the top disk-reading family is %s (%.1f MB/s), not mysqld's %s (%.1f MB/s). Look at process_report.",
-			in.IOVerdict, ev.TopDiskFamily, *ev.TopDiskFamilyReadMBPerSec, ev.MySQLFamily, *ev.MySQLFamilyDiskReadMBPerSec)
+		r.Verdict, r.Confidence = e.NotEngine, model.ConfidenceHigh
+		r.Summary = fmt.Sprintf("The disk is saturated (%s) but the top disk-reading family is %s (%.1f MB/s), not %s's %s (%.1f MB/s). Look at process_report.",
+			in.IOVerdict, ev.TopDiskFamily, *ev.TopDiskFamilyReadMBPerSec, e.Process, engFam, engFamRead)
+	case !digestOK && mysqldKnown && bgOK:
+		backgroundVerdict(e, r, fmt.Sprintf("The disk is saturated (%s)", in.IOVerdict), engFam, bgType, bgVal, bgTotal, true)
 	case !digestOK:
 		r.Verdict = model.OverloadNoDominantQuery
 		r.Confidence = model.ConfidenceHigh
 		if !mysqldKnown || d.PercentOfDiskRead == nil {
 			r.Confidence = model.ConfidenceLow
 		}
-		r.Summary = fmt.Sprintf("The disk is saturated (%s) but no single digest dominates its reads: the top digest read %s. The reads are spread over many queries, or come from InnoDB background work or writes%s.",
-			in.IOVerdict, pct, diskCoverageClause(ev.QueryDiskReadCoveragePercent))
+		r.Summary = fmt.Sprintf("The disk is saturated (%s) but no single digest dominates its reads: the top digest read %s. The reads are spread over many queries, or come from %s%s.",
+			in.IOVerdict, pct, e.DiskBackgroundText, diskCoverageClause(ev.QueryDiskReadCoveragePercent))
 	default:
 		r.Verdict = model.OverloadQueryDisk
-		r.Confidence = overloadConfidence(mysqldKnown, diskWait.measured || commitWait.measured, vc.Passed)
+		r.Confidence = overloadConfidence(mysqldKnown, diskWait.measured || commitMeasured, vc.Passed)
+		if my.DiskEstimated && r.Confidence == model.ConfidenceHigh {
+			r.Confidence = model.ConfidenceMedium // the per-digest reads are an estimate
+		}
 		r.Summary = fmt.Sprintf("digest %s read %s of the disk's reads (%s, %s)%s; %s is the top disk reader; %s",
-			d.DigestID, pct, mbText(d.DiskReadMBPerSec), pagesText(d.DiskReadPagesPerCall), pagesAdvice(d.DiskReadPagesPerCall),
-			familyOrUnknown(ev.MySQLFamily), diskVictimsSummary(diskWait, commitWait))
+			d.DigestID, pct, mbText(d.DiskReadMBPerSec), pagesText(d.DiskReadPagesPerCall), e.PagesAdvice(d.DiskReadPagesPerCall),
+			familyOrUnknown(e, engFam), diskVictimsSummary(diskWait, commits))
 	}
 	return r
 }
@@ -430,7 +455,13 @@ type waitCount struct {
 	n        int
 }
 
-func measure(my *model.MySQLAnalysis, accountingKey, victimKind string) waitCount {
+// namedWait is one commit-like wait with its count.
+type namedWait struct {
+	w  Wait
+	wc waitCount
+}
+
+func measure(my *Report, accountingKey, victimKind string) waitCount {
 	reason := my.Accounting[accountingKey]
 	if reason == "" {
 		reason = "missing"
@@ -450,6 +481,7 @@ func saturatedText(used, load float64) string {
 }
 
 func floatp(v float64) *float64 { return &v }
+func boolp(v bool) *bool        { return &v }
 func intp(v int) *int           { return &v }
 
 func usedCoresText(ev *model.OverloadEvidence) string {
@@ -466,16 +498,16 @@ func pctText(p *float64) string {
 	return fmt.Sprintf("%.0f%%", *p)
 }
 
-func coverageClause(c *float64) string {
+func coverageClause(e Engine, c *float64) string {
 	if c == nil {
 		return ""
 	}
-	return fmt.Sprintf("; queries explain %.0f%% of mysqld CPU", *c)
+	return fmt.Sprintf("; queries explain %.0f%% of %s CPU", *c, e.Process)
 }
 
-func familyOrUnknown(f string) string {
+func familyOrUnknown(e Engine, f string) string {
 	if f == "" {
-		return "mysqld (family unknown)"
+		return e.Process + " (family unknown)"
 	}
 	return f
 }
@@ -520,19 +552,6 @@ func pagesText(v *float64) string {
 	return fmt.Sprintf("%.0f pages per call", *v)
 }
 
-// pagesAdvice reads disk_read_pages_per_call (16 KiB pages).
-func pagesAdvice(v *float64) string {
-	switch {
-	case v == nil:
-		return ""
-	case *v <= 4:
-		return ": reads look like buffer-pool misses — consider a larger innodb_buffer_pool_size"
-	case *v >= 100:
-		return ": reads look like a scan — EXPLAIN it, add an index or a LIMIT"
-	}
-	return ""
-}
-
 func diskCoverageClause(c *float64) string {
 	if c == nil {
 		return ""
@@ -540,56 +559,112 @@ func diskCoverageClause(c *float64) string {
 	return fmt.Sprintf("; statements explain %.0f%% of the disk's reads", *c)
 }
 
-// diskVictimsCheck passes when a measured disk or commit wait has victims;
-// an unmeasured wait is named in the detail, never counted as 0.
-func diskVictimsCheck(disk, commit waitCount) model.OverloadCheck {
-	part := func(w waitCount, name string) string {
+// diskVictimsCheck passes when a measured disk or commit-like wait has
+// victims; an unmeasured wait is named in the detail, never counted as 0.
+func diskVictimsCheck(disk waitCount, commits []namedWait) model.OverloadCheck {
+	part := func(w waitCount, key, name string) string {
 		if !w.measured {
-			return fmt.Sprintf("%s waits not measured (accounting.%s_wait = %s)", name, name, w.reason)
+			return fmt.Sprintf("%s waits not measured (accounting.%s = %s)", name, key, w.reason)
 		}
 		return fmt.Sprintf("%d digest(s) with victim_of %s", w.n, name)
 	}
-	detail := part(disk, "disk") + "; " + part(commit, "commit")
-	if disk.measured || commit.measured {
-		detail += " (largest wait is disk / commit; waits >= victim_wait_percent of their time and slow)"
+	parts := []string{part(disk, querystats.AccountingKeyDiskWait, querystats.VictimDisk)}
+	names := []string{querystats.VictimDisk}
+	measured, passed := disk.measured, disk.measured && disk.n > 0
+	for _, c := range commits {
+		parts = append(parts, part(c.wc, c.w.Key, c.w.Victim))
+		names = append(names, c.w.Victim)
+		measured = measured || c.wc.measured
+		passed = passed || (c.wc.measured && c.wc.n > 0)
 	}
-	return model.OverloadCheck{Name: checkVictims, Detail: detail,
-		Passed: (disk.measured && disk.n > 0) || (commit.measured && commit.n > 0)}
+	detail := strings.Join(parts, "; ")
+	if measured {
+		detail += fmt.Sprintf(" (largest wait is %s; waits >= victim_wait_percent of their time and slow)", strings.Join(names, " / "))
+	}
+	return model.OverloadCheck{Name: checkVictims, Detail: detail, Passed: passed}
 }
 
-func diskVictimsSummary(disk, commit waitCount) string {
-	switch {
-	case disk.measured && commit.measured:
-		return fmt.Sprintf("%d digest(s) are victims whose largest wait is disk and %d whose largest wait is commit", disk.n, commit.n)
-	case disk.measured:
-		return fmt.Sprintf("%d digest(s) are victims whose largest wait is disk (commit waits not measured: accounting.commit_wait = %s)", disk.n, commit.reason)
-	case commit.measured:
-		return fmt.Sprintf("%d digest(s) are victims whose largest wait is commit (disk waits not measured: accounting.disk_wait = %s)", commit.n, disk.reason)
+// diskVictimsSummary names the measured victim counts, then the unmeasured
+// waits with their accounting values.
+func diskVictimsSummary(disk waitCount, commits []namedWait) string {
+	type item struct {
+		wc        waitCount
+		key, name string
 	}
-	return fmt.Sprintf("victims could not be measured (accounting.disk_wait = %s, accounting.commit_wait = %s)", disk.reason, commit.reason)
+	all := []item{{disk, querystats.AccountingKeyDiskWait, querystats.VictimDisk}}
+	for _, c := range commits {
+		all = append(all, item{c.wc, c.w.Key, c.w.Victim})
+	}
+	var measured, missing []item
+	for _, it := range all {
+		if it.wc.measured {
+			measured = append(measured, it)
+		} else {
+			missing = append(missing, it)
+		}
+	}
+	if len(measured) == 0 {
+		var reasons []string
+		for _, it := range missing {
+			reasons = append(reasons, fmt.Sprintf("accounting.%s = %s", it.key, it.wc.reason))
+		}
+		return "victims could not be measured (" + strings.Join(reasons, ", ") + ")"
+	}
+	s := fmt.Sprintf("%d digest(s) are victims whose largest wait is %s", measured[0].wc.n, measured[0].name)
+	for _, it := range measured[1:] {
+		s += fmt.Sprintf(" and %d whose largest wait is %s", it.wc.n, it.name)
+	}
+	if len(missing) > 0 {
+		var notes []string
+		for _, it := range missing {
+			notes = append(notes, fmt.Sprintf("%s waits not measured: accounting.%s = %s", it.name, it.key, it.wc.reason))
+		}
+		s += " (" + strings.Join(notes, "; ") + ")"
+	}
+	return s
 }
 
 // AnnotateIODiagnosis returns io_diagnosis with a first next step pointing at
 // overload_cause when the verdict, or its secondary assessment, is a query
 // disk overload; otherwise d unchanged. d is never mutated (it may be shared).
 func AnnotateIODiagnosis(d *model.IODiagnosis, oc *model.QueryOverload) *model.IODiagnosis {
+	return AnnotateIODiagnosisFor(d, oc, MySQLEngine.Report)
+}
+
+// AnnotateIODiagnosisFor is AnnotateIODiagnosis for the report named report
+// ("mysql_report" | "postgres_report"); it also points at a disk
+// background_overload.
+func AnnotateIODiagnosisFor(d *model.IODiagnosis, oc *model.QueryOverload, report string) *model.IODiagnosis {
 	if d == nil || oc == nil {
 		return d
 	}
-	where, disk := "mysql_report.overload_cause", oc
+	where, disk := report+".overload_cause", oc
 	if !isDiskOverload(disk) {
-		where, disk = "mysql_report.overload_cause.secondary", oc.Secondary
+		where, disk = report+".overload_cause.secondary", oc.Secondary
 	}
 	if !isDiskOverload(disk) {
 		return d
 	}
+	step := fmt.Sprintf("%s names the query behind this disk load: digest %s (verdict query_disk_overload).", where, diskDigestID(disk))
+	if disk.Verdict == model.OverloadBackground {
+		step = fmt.Sprintf("%s names the background work behind this disk load: %s backends (verdict background_overload).", where, disk.Evidence.BackgroundType)
+	}
 	cp := *d
-	cp.NextSteps = append([]string{fmt.Sprintf(
-		"%s names the query behind this disk load: digest %s (verdict query_disk_overload).", where, disk.Digest.DigestID)},
-		d.NextSteps...)
+	cp.NextSteps = append([]string{step}, d.NextSteps...)
 	return &cp
 }
 
+func diskDigestID(oc *model.QueryOverload) string {
+	if oc.Digest == nil {
+		return ""
+	}
+	return oc.Digest.DigestID
+}
+
 func isDiskOverload(oc *model.QueryOverload) bool {
-	return oc != nil && oc.Verdict == model.OverloadQueryDisk && oc.Digest != nil
+	if oc == nil {
+		return false
+	}
+	return (oc.Verdict == model.OverloadQueryDisk && oc.Digest != nil) ||
+		(oc.Verdict == model.OverloadBackground && oc.Resource == resourceDisk)
 }
