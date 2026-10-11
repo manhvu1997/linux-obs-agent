@@ -1,11 +1,11 @@
-package mysql_query
+package kfeat
 
 import "github.com/cilium/ebpf/btf"
 
-// structHas reports whether the member path (each element a member of the
+// StructHas reports whether the member path (each element a member of the
 // previous member's struct type) exists in t. Typedefs and qualifiers are
 // looked through; a pointer member ends the path (it exists).
-func structHas(t btf.Type, path ...string) bool {
+func StructHas(t btf.Type, path ...string) bool {
 	for _, name := range path {
 		s, ok := btf.UnderlyingType(t).(*btf.Struct)
 		if !ok {
@@ -25,9 +25,9 @@ func structHas(t btf.Type, path ...string) bool {
 	return true
 }
 
-// kernelTaskFields reports which optional task_struct fields the running
+// TaskFields reports which optional task_struct fields the running
 // kernel has (kernel BTF). Errors read as "absent".
-func kernelTaskFields() (ioac, delays bool) {
+func TaskFields() (ioac, delays bool) {
 	spec, err := btf.LoadKernelSpec()
 	if err != nil {
 		return false, false
@@ -36,5 +36,5 @@ func kernelTaskFields() (ioac, delays bool) {
 	if err != nil {
 		return false, false
 	}
-	return structHas(t, "ioac", "read_bytes") && structHas(t, "ioac", "write_bytes"), structHas(t, "delays")
+	return StructHas(t, "ioac", "read_bytes") && StructHas(t, "ioac", "write_bytes"), StructHas(t, "delays")
 }

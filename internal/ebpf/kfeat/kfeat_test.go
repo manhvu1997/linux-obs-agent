@@ -1,4 +1,4 @@
-package mysql_query
+package kfeat
 
 import (
 	"testing"
@@ -22,8 +22,8 @@ func TestStructHas(t *testing.T) {
 		{[]string{"delays"}, true},
 		{[]string{"sched_info"}, false},
 	} {
-		if got := structHas(task, c.path...); got != c.want {
-			t.Errorf("structHas(task_struct, %v) = %v, want %v", c.path, got, c.want)
+		if got := StructHas(task, c.path...); got != c.want {
+			t.Errorf("StructHas(task_struct, %v) = %v, want %v", c.path, got, c.want)
 		}
 	}
 }

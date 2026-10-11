@@ -62,6 +62,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 
+	"github.com/manhvu1997/linux-obs-agent/internal/ebpf/kfeat"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/mysqldsym"
@@ -318,7 +319,7 @@ func (l *Loader) Start(ctx context.Context) error {
 	}
 	l.textRd = textRd
 
-	ioac, delays := kernelTaskFields()
+	ioac, delays := kfeat.TaskFields()
 	l.acct = Accounting{DiskBytes: ioac, BlkioDelay: delays}
 
 	// Open the mysqld executable for uprobe attachment.
