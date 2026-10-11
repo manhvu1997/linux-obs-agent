@@ -13,6 +13,7 @@
 #   make image-inspector  – build db-inspector Docker image
 #   make test-clickhouse  – ClickHouse round-trip integration test (needs Docker)
 #   make test-mysql-matrix – mysql_query eBPF tests vs MySQL 5.7/8.0/8.4/9 (Linux, root, Docker)
+#   make test-pg-matrix   – pg_query eBPF tests vs PostgreSQL 16/17/18 (Linux, root, Docker)
 # ──────────────────────────────────────────────────────────────────────────────
 
 BINARY          := obs-agent
@@ -38,7 +39,7 @@ GOOS          := linux
 IMAGE_REPO    ?= ghcr.io/youorg/obs-agent
 IMAGE_TAG     ?= latest
 
-.PHONY: all generate build build-inspector clean lint image image-inspector vmlinux deps test-clickhouse test-mysql-matrix
+.PHONY: all generate build build-inspector clean lint image image-inspector vmlinux deps test-clickhouse test-mysql-matrix test-pg-matrix
 
 # ─── Default ──────────────────────────────────────────────────────────────────
 
@@ -160,3 +161,12 @@ test-mysql-matrix:
 		exit 1; \
 	fi
 	GO=$(GO) ./scripts/test-mysql-matrix.sh
+
+# Same rules as test-mysql-matrix: generate as your user, then
+#   sudo GO=$$(command -v go) make test-pg-matrix   (PG_IMAGES="postgres:18 postgres:19" to choose images)
+test-pg-matrix:
+	@if [ ! -f internal/ebpf/pg_query/pgquery_bpfel.go ]; then \
+		echo "test-pg-matrix: generated eBPF code missing; run 'devbox run -- make generate' as your user first (not under sudo)" >&2; \
+		exit 1; \
+	fi
+	GO=$(GO) ./scripts/test-pg-matrix.sh
