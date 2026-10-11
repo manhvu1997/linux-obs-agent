@@ -277,7 +277,7 @@ func main() {
 	// ── ClickHouse export (optional) ────────────────────────────────────────
 	var chDone <-chan struct{}
 	if cfg.ClickHouse.Enabled {
-		chDone = startClickHouse(ctx, cfg, promExp, mysqlAnalyzer, netAcc, insp)
+		chDone = startClickHouse(ctx, cfg, promExp, mysqlAnalyzer, netAcc, insp, pgAnalyzer)
 	}
 
 	// ── eBPF event fan-out loop ─────────────────────────────────────────────

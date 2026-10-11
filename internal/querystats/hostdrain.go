@@ -16,13 +16,14 @@ type HostWindow struct {
 	IOWaitOK       bool // no poll reported a reason it was unavailable
 	RedoWaitOK     bool // no poll reported a reason it was unavailable
 	ReplicaWaitOK  bool // no poll reported a reason it was unavailable
+	DiskBytesOK    bool // no poll reported a per-statement disk-bytes reason
 }
 
 // hostDrain accumulates HostDelta between drains; nil until EnableHostDrain.
 type hostDrain struct {
 	w                                           HostWindow
 	nodeBad, mysqldBad, diskBad, ioBad, redoBad bool
-	replicaBad                                  bool
+	replicaBad, queryDiskBad                    bool
 }
 
 // EnableHostDrain starts accumulating host deltas for DrainHost.
@@ -45,6 +46,7 @@ func (a *Aggregator) DrainHost() HostWindow {
 	w := d.w
 	w.NodeOK, w.MysqldOK, w.DiskOK = !d.nodeBad, !d.mysqldBad, !d.diskBad
 	w.IOWaitOK, w.RedoWaitOK, w.ReplicaWaitOK = !d.ioBad, !d.redoBad, !d.replicaBad
+	w.DiskBytesOK = !d.queryDiskBad
 	*d = hostDrain{}
 	return w
 }
@@ -69,4 +71,5 @@ func (d *hostDrain) add(h HostDelta) {
 	d.ioBad = d.ioBad || h.IOWaitReason != ""
 	d.redoBad = d.redoBad || h.RedoWaitReason != ""
 	d.replicaBad = d.replicaBad || h.ReplicaWaitReason != ""
+	d.queryDiskBad = d.queryDiskBad || h.QueryDiskReason != ""
 }

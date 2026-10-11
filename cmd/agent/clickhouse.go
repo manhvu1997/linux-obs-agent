@@ -12,6 +12,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql"
 	"github.com/manhvu1997/linux-obs-agent/internal/netflow"
+	"github.com/manhvu1997/linux-obs-agent/internal/postgres"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/procinfo"
 )
@@ -20,7 +21,7 @@ import (
 // snapshotter. The returned channel closes when the sink has finished its
 // shutdown flush; it is already closed when the export could not start.
 func startClickHouse(ctx context.Context, cfg *config.Config, promExp *exporter.PrometheusExporter,
-	my *mysql.Analyzer, netAcc *netflow.Accumulator, insp *process.Inspector) <-chan struct{} {
+	my *mysql.Analyzer, netAcc *netflow.Accumulator, insp *process.Inspector, pg *postgres.Analyzer) <-chan struct{} {
 	done := make(chan struct{})
 	ch := &cfg.ClickHouse
 	client, err := chsink.NewClient(ch)
@@ -60,6 +61,16 @@ func startClickHouse(ctx context.Context, cfg *config.Config, promExp *exporter.
 		src.SlowWallNs = cfg.MySQL.SlowQueryThresholdMs * uint64(time.Millisecond)
 	}
 
+	// PostgreSQL rows; raw SQL leaves the host only when both
+	// clickhouse.include_sample_queries and postgres.sample_queries are true.
+	pgSamples := ch.IncludeSampleQueries && cfg.Postgres.SampleQueries
+	if pg != nil {
+		pg.EnableDrain(ch.MaxDigestKeys, ch.MaxSlowQueriesPerFlush)
+		src.Postgres = pg.Drain
+		src.PostgresSlowWallNs = cfg.Postgres.SlowQueryThresholdMs * uint64(time.Millisecond)
+		src.PostgresIncludeSamples = pgSamples
+	}
+
 	// The sink and snapshotter must see the effective flag: raw SQL leaves the
 	// host only when both clickhouse.include_sample_queries and
 	// mysql.sample_queries are true.
@@ -77,7 +88,11 @@ func startClickHouse(ctx context.Context, cfg *config.Config, promExp *exporter.
 		promExp.RegisterCollectors(sink.Collectors()...)
 		if ch.Snapshots.Enabled {
 			build := func() model.DiagnoseReport { return promExp.BuildDiagnoseReport(100, 20) }
-			go chsink.NewSnapshotter(&eff, host, sink, promExp.TriggerState, build).Run(ctx)
+			snap := chsink.NewSnapshotter(&eff, host, sink, promExp.TriggerState, build)
+			if pg != nil {
+				snap.SetPostgres(promExp.PostgresVerdict, pgSamples)
+			}
+			go snap.Run(ctx)
 		}
 	case ch.Snapshots.Enabled:
 		slog.Warn("clickhouse: snapshots need agent.metrics_addr (the /api/diagnose builder); snapshots disabled")

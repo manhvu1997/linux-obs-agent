@@ -22,6 +22,11 @@ const (
 	TableHostStats   = "host_stats"
 	TableSnapshots   = "diagnose_snapshots"
 
+	TablePGDigestStats = "pg_digest_stats"
+	TablePGDigestText  = "pg_digest_text"
+	TablePGSlowQueries = "pg_slow_queries"
+	TablePGBackends    = "pg_backend_stats"
+
 	maxRetentionDays = 3650
 )
 
@@ -68,6 +73,9 @@ var ttlTables = []struct {
 	{TablePeerStats, "window_end", false},
 	{TableFamilyStats, "window_end", false},
 	{TableHostStats, "window_end", false},
+	{TablePGDigestStats, "window_end", false},
+	{TablePGSlowQueries, "toDateTime(ts)", false},
+	{TablePGBackends, "window_end", false},
 	{TableSnapshots, "ts", true},
 }
 
@@ -107,6 +115,8 @@ func MigrateDDL(o SchemaOptions) (string, error) {
 	b.WriteString(r.Replace(migrateTemplate))
 	b.WriteString("\n")
 	b.WriteString(r.Replace(hostStatsTemplate))
+	b.WriteString("\n")
+	b.WriteString(r.Replace(pgTablesTemplate))
 	b.WriteString("\n")
 	for _, t := range ttlTables {
 		days := o.RetentionDays
@@ -251,6 +261,7 @@ TTL window_end + INTERVAL {{ret}} DAY
 SETTINGS ttl_only_drop_parts = 1;
 
 ` + hostStatsTemplate + `
+` + pgTablesTemplate + `
 CREATE TABLE IF NOT EXISTS {{db}}.diagnose_snapshots (
   ts      DateTime('UTC'),
   host    LowCardinality(String),
@@ -280,6 +291,85 @@ CREATE TABLE IF NOT EXISTS {{db}}.host_stats (
 ) ENGINE = MergeTree
 PARTITION BY toDate(window_end)
 ORDER BY (host, window_end)
+TTL window_end + INTERVAL {{ret}} DAY
+SETTINGS ttl_only_drop_parts = 1;
+`
+
+// pgTablesTemplate holds the PostgreSQL tables (CLAUDE.md §23), shared by
+// createTemplate and MigrateDDL. Values are deltas per flush interval; NULL =
+// not measured in every poll of the interval (disk on PostgreSQL 18+ async
+// I/O, a wait whose probe is not attached, enrichment off).
+const pgTablesTemplate = `-- PostgreSQL digests per cluster. The per-digest disk-read estimate on
+-- PostgreSQL 18+ async I/O (disk_estimated = 1) is computed in SQL from
+-- shared_blks_read and pg_backend_stats (backend_type = 'io_worker').
+CREATE TABLE IF NOT EXISTS {{db}}.pg_digest_stats (
+  window_start      DateTime('UTC'),
+  window_end        DateTime('UTC'),
+  host              LowCardinality(String),
+  cluster           LowCardinality(String),
+  postmaster_pid    UInt32,
+  digest_id         String,
+  command           LowCardinality(String),
+  calls             UInt64,
+  cpu_ns            UInt64,
+  runq_ns           UInt64,
+  wall_ns           UInt64,
+  wall_max_ns       UInt64,
+  disk_read_bytes   Nullable(UInt64),
+  disk_write_bytes  Nullable(UInt64),
+  disk_estimated    UInt8,
+  io_wait_ns        Nullable(UInt64),
+  wal_wait_ns       Nullable(UInt64),
+  syncrep_wait_ns   Nullable(UInt64),
+  shared_blks_hit   Nullable(UInt64),
+  shared_blks_read  Nullable(UInt64),
+  temp_blks_written Nullable(UInt64)
+) ENGINE = MergeTree
+PARTITION BY toDate(window_end)
+ORDER BY (host, cluster, digest_id, window_end)
+TTL window_end + INTERVAL {{ret}} DAY
+SETTINGS ttl_only_drop_parts = 1;
+
+-- One row per distinct PostgreSQL digest; no TTL.
+CREATE TABLE IF NOT EXISTS {{db}}.pg_digest_text (
+  digest_id    String,
+  digest_text  String,
+  queryid      Nullable(Int64),
+  sample_query Nullable(String),
+  first_seen   DateTime('UTC')
+) ENGINE = ReplacingMergeTree(first_seen)
+ORDER BY digest_id;
+
+CREATE TABLE IF NOT EXISTS {{db}}.pg_slow_queries (
+  ts         DateTime64(3, 'UTC'),
+  host       LowCardinality(String),
+  cluster    LowCardinality(String),
+  pid        UInt32,
+  latency_ms Float64,
+  cpu_ms     Float64,
+  digest_id  String,
+  query      String
+) ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (host, ts)
+TTL toDateTime(ts) + INTERVAL {{ret}} DAY
+SETTINGS ttl_only_drop_parts = 1;
+
+-- CPU and storage I/O of a cluster's backends by type (autovacuum,
+-- checkpointer, io_worker, client, ...).
+CREATE TABLE IF NOT EXISTS {{db}}.pg_backend_stats (
+  window_start     DateTime('UTC'),
+  window_end       DateTime('UTC'),
+  host             LowCardinality(String),
+  cluster          LowCardinality(String),
+  backend_type     LowCardinality(String),
+  cpu_ns           UInt64,
+  disk_read_bytes  Nullable(UInt64),
+  disk_write_bytes Nullable(UInt64),
+  processes_max    UInt32
+) ENGINE = MergeTree
+PARTITION BY toDate(window_end)
+ORDER BY (host, cluster, backend_type, window_end)
 TTL window_end + INTERVAL {{ret}} DAY
 SETTINGS ttl_only_drop_parts = 1;
 `

@@ -108,6 +108,80 @@ ORDER BY (host, window_end)
 TTL window_end + INTERVAL 30 DAY
 SETTINGS ttl_only_drop_parts = 1;
 
+-- PostgreSQL digests per cluster. The per-digest disk-read estimate on
+-- PostgreSQL 18+ async I/O (disk_estimated = 1) is computed in SQL from
+-- shared_blks_read and pg_backend_stats (backend_type = 'io_worker').
+CREATE TABLE IF NOT EXISTS obs.pg_digest_stats (
+  window_start      DateTime('UTC'),
+  window_end        DateTime('UTC'),
+  host              LowCardinality(String),
+  cluster           LowCardinality(String),
+  postmaster_pid    UInt32,
+  digest_id         String,
+  command           LowCardinality(String),
+  calls             UInt64,
+  cpu_ns            UInt64,
+  runq_ns           UInt64,
+  wall_ns           UInt64,
+  wall_max_ns       UInt64,
+  disk_read_bytes   Nullable(UInt64),
+  disk_write_bytes  Nullable(UInt64),
+  disk_estimated    UInt8,
+  io_wait_ns        Nullable(UInt64),
+  wal_wait_ns       Nullable(UInt64),
+  syncrep_wait_ns   Nullable(UInt64),
+  shared_blks_hit   Nullable(UInt64),
+  shared_blks_read  Nullable(UInt64),
+  temp_blks_written Nullable(UInt64)
+) ENGINE = MergeTree
+PARTITION BY toDate(window_end)
+ORDER BY (host, cluster, digest_id, window_end)
+TTL window_end + INTERVAL 30 DAY
+SETTINGS ttl_only_drop_parts = 1;
+
+-- One row per distinct PostgreSQL digest; no TTL.
+CREATE TABLE IF NOT EXISTS obs.pg_digest_text (
+  digest_id    String,
+  digest_text  String,
+  queryid      Nullable(Int64),
+  sample_query Nullable(String),
+  first_seen   DateTime('UTC')
+) ENGINE = ReplacingMergeTree(first_seen)
+ORDER BY digest_id;
+
+CREATE TABLE IF NOT EXISTS obs.pg_slow_queries (
+  ts         DateTime64(3, 'UTC'),
+  host       LowCardinality(String),
+  cluster    LowCardinality(String),
+  pid        UInt32,
+  latency_ms Float64,
+  cpu_ms     Float64,
+  digest_id  String,
+  query      String
+) ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (host, ts)
+TTL toDateTime(ts) + INTERVAL 30 DAY
+SETTINGS ttl_only_drop_parts = 1;
+
+-- CPU and storage I/O of a cluster's backends by type (autovacuum,
+-- checkpointer, io_worker, client, ...).
+CREATE TABLE IF NOT EXISTS obs.pg_backend_stats (
+  window_start     DateTime('UTC'),
+  window_end       DateTime('UTC'),
+  host             LowCardinality(String),
+  cluster          LowCardinality(String),
+  backend_type     LowCardinality(String),
+  cpu_ns           UInt64,
+  disk_read_bytes  Nullable(UInt64),
+  disk_write_bytes Nullable(UInt64),
+  processes_max    UInt32
+) ENGINE = MergeTree
+PARTITION BY toDate(window_end)
+ORDER BY (host, cluster, backend_type, window_end)
+TTL window_end + INTERVAL 30 DAY
+SETTINGS ttl_only_drop_parts = 1;
+
 CREATE TABLE IF NOT EXISTS obs.diagnose_snapshots (
   ts      DateTime('UTC'),
   host    LowCardinality(String),

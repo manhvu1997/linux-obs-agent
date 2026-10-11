@@ -95,3 +95,41 @@ GROUP BY t, host, family ORDER BY t;
 SELECT host, argMax(ts, ts) AS at, argMax(reason, ts) AS reason,
        JSONExtractString(argMax(report, ts), 'io_diagnosis', 'summary') AS io_summary
 FROM obs.diagnose_snapshots WHERE ts > now() - INTERVAL 1 DAY GROUP BY host;
+
+-- ── PostgreSQL (CLAUDE.md §23) ─────────────────────────────────────────────
+
+-- Top PostgreSQL digests by CPU, with % of node CPU used (same hosts, same range).
+WITH d AS (SELECT host, cluster, digest_id, sum(calls) AS calls, sum(cpu_ns) AS cpu
+           FROM obs.pg_digest_stats WHERE window_end > now() - INTERVAL 1 HOUR
+           GROUP BY host, cluster, digest_id),
+     h AS (SELECT host, sum(node_cpu_used_ns) AS node
+           FROM obs.host_stats WHERE window_end > now() - INTERVAL 1 HOUR GROUP BY host),
+     t AS (SELECT digest_id, any(digest_text) AS digest_text FROM obs.pg_digest_text FINAL GROUP BY digest_id)
+SELECT d.host, d.cluster, d.digest_id, t.digest_text, d.calls, round(d.cpu / 1e9, 1) AS cpu_s,
+       round(100 * d.cpu / nullIf(h.node, 0), 1) AS pct_node_cpu
+FROM d LEFT JOIN h USING (host) LEFT JOIN t USING (digest_id)
+ORDER BY d.cpu DESC LIMIT 30;
+
+-- Who uses the cluster: CPU cores and storage reads per backend type
+-- (autovacuum, checkpointer, io_worker, client, ...), last hour.
+SELECT host, cluster, backend_type, round(sum(cpu_ns) / 1e9 / 3600, 2) AS cores,
+       round(sum(disk_read_bytes) / 3600 / 1048576, 1) AS read_mb_s
+FROM obs.pg_backend_stats WHERE window_end > now() - INTERVAL 1 HOUR
+GROUP BY host, cluster, backend_type ORDER BY cores DESC;
+
+-- PostgreSQL 18+ async I/O (disk_estimated = 1): per-digest disk reads are
+-- estimated as the digest's share of shared_blks_read times the cluster's
+-- I/O-worker reads.
+WITH r AS (SELECT host, cluster, digest_id, sum(shared_blks_read) AS sr FROM obs.pg_digest_stats
+           WHERE disk_estimated = 1 AND window_end > now() - INTERVAL 1 HOUR GROUP BY host, cluster, digest_id),
+     tot AS (SELECT host, cluster, sum(sr) AS total FROM r GROUP BY host, cluster),
+     io AS (SELECT host, cluster, sum(disk_read_bytes) AS io_bytes FROM obs.pg_backend_stats
+            WHERE backend_type = 'io_worker' AND window_end > now() - INTERVAL 1 HOUR GROUP BY host, cluster)
+SELECT r.host, r.cluster, r.digest_id,
+       round(io.io_bytes * r.sr / nullIf(tot.total, 0) / 3600 / 1048576, 2) AS est_read_mb_s
+FROM r JOIN tot USING (host, cluster) JOIN io USING (host, cluster)
+ORDER BY est_read_mb_s DESC LIMIT 20;
+
+-- Slow PostgreSQL statements, last hour.
+SELECT ts, host, cluster, latency_ms, cpu_ms, query FROM obs.pg_slow_queries
+WHERE ts > now() - INTERVAL 1 HOUR ORDER BY latency_ms DESC LIMIT 100;

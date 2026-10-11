@@ -502,6 +502,27 @@ func (p *PrometheusExporter) TriggerState() (active []string, verdict string) {
 	return active, verdict
 }
 
+// PostgresVerdict is the PostgreSQL overload verdict for the latest metrics
+// (ClickHouse snapshot trigger); "" without the analyzer.
+func (p *PrometheusExporter) PostgresVerdict() string {
+	if p.postgresAnalyzer == nil {
+		return ""
+	}
+	in := overload.Inputs{Metrics: p.coll.Latest()}
+	if d := iodiag.Classify(in.Metrics, nil, p.iodiagThresholds()); d != nil {
+		in.IOVerdict = d.Verdict
+	}
+	if p.insp != nil {
+		in.Families = p.insp.AllFamilies()
+		in.PIDFamilies = p.insp.PIDFamilies()
+	}
+	th := overload.Thresholds{NodeCPUPercent: p.postgresCfg.OverloadNodeCPUPercent, NodeLoad: p.postgresCfg.OverloadNodeLoad}
+	if oc := p.postgresAnalyzer.Assess(in, th, time.Now()); oc != nil {
+		return string(oc.Verdict)
+	}
+	return ""
+}
+
 // handleProfile is called by GET /api/profile.
 //
 // It is the click-through target of the ProfileURL carried by every run-queue

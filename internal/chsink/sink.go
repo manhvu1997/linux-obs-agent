@@ -11,6 +11,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/netflow"
+	"github.com/manhvu1997/linux-obs-agent/internal/pgdrain"
 	"github.com/manhvu1997/linux-obs-agent/internal/process"
 	"github.com/manhvu1997/linux-obs-agent/internal/querystats"
 )
@@ -31,6 +32,15 @@ type Sources struct {
 	// SlowWallNs is mysql.slow_query_threshold_ms in ns: minor folding never
 	// folds a slow statement. 0 treats every statement as slow (no folding).
 	SlowWallNs uint64
+
+	// Postgres drains the PostgreSQL analyzer (nil: postgres.enabled off).
+	Postgres func() pgdrain.Drain
+	// PostgresSlowWallNs is postgres.slow_query_threshold_ms in ns (minor
+	// folding never folds a slow statement).
+	PostgresSlowWallNs uint64
+	// PostgresIncludeSamples: raw PostgreSQL SQL leaves the host only when
+	// clickhouse.include_sample_queries AND postgres.sample_queries.
+	PostgresIncludeSamples bool
 }
 
 // Inserter is satisfied by *Client.
@@ -86,6 +96,7 @@ type Sink struct {
 	nextID   uint64
 	lastEnd  time.Time
 	seen     *idSet
+	seenPG   *idSet // pg_digest_text ids, separate from MySQL's
 
 	sendMu     sync.Mutex // serialises send; guards failing, lastReject
 	failing    bool
@@ -95,7 +106,7 @@ type Sink struct {
 func NewSink(cfg *config.ClickHouseConfig, host string, ins Inserter, src Sources, start time.Time) *Sink {
 	s := &Sink{
 		cfg: cfg, host: host, ins: ins, src: src, m: newMetrics(),
-		lastEnd: start.UTC().Truncate(time.Second), seen: newIDSet(digestTextMemory),
+		lastEnd: start.UTC().Truncate(time.Second), seen: newIDSet(digestTextMemory), seenPG: newIDSet(digestTextMemory),
 		lastReject: make(map[string]time.Time),
 	}
 	s.m.hostInfo.WithLabelValues(host).Set(1)
@@ -132,6 +143,7 @@ func (s *Sink) shutdown() {
 	for _, b := range s.buf {
 		s.m.dropped.WithLabelValues(b.table, "shutdown").Add(float64(b.rows))
 		s.seen.forget(b.ids)
+		s.seenPG.forget(b.ids)
 	}
 	s.buf, s.bufBytes = nil, 0
 	s.m.bufferBytes.Set(0)
@@ -192,6 +204,9 @@ func (s *Sink) Flush(ctx context.Context, now time.Time) {
 	if s.src.Families != nil {
 		enqueueRows(s, TableFamilyStats, familyRows(s.host, w, s.src.Families()))
 	}
+	if s.src.Postgres != nil {
+		s.flushPostgres(w, now, s.src.Postgres())
+	}
 	s.send(ctx)
 }
 
@@ -223,6 +238,7 @@ func (s *Sink) enqueue(b batch) {
 	if len(b.body) > s.cfg.MaxBufferBytes { // can never fit: keep older batches
 		s.m.dropped.WithLabelValues(b.table, "buffer_full").Add(float64(b.rows))
 		s.seen.forget(b.ids)
+		s.seenPG.forget(b.ids)
 		return
 	}
 	s.nextID++
@@ -242,6 +258,7 @@ func (s *Sink) enqueue(b batch) {
 		s.bufBytes -= len(ev.body)
 		s.m.dropped.WithLabelValues(ev.table, "buffer_full").Add(float64(ev.rows))
 		s.seen.forget(ev.ids)
+		s.seenPG.forget(ev.ids)
 	}
 	s.m.bufferBytes.Set(float64(s.bufBytes))
 }
@@ -307,6 +324,39 @@ func (s *Sink) forgetIDs(ids []string) {
 		return
 	}
 	s.mu.Lock()
-	s.seen.forget(ids)
+	s.seen.forget(ids)   // a batch's ids are MySQL or PostgreSQL texts; forgetting
+	s.seenPG.forget(ids) // from the other set only costs one resend
 	s.mu.Unlock()
+}
+
+// flushPostgres enqueues one interval of PostgreSQL rows. Without the MySQL
+// host source, the first cluster's host window supplies host_stats (node
+// denominators; mysqld_cpu_ns NULL).
+func (s *Sink) flushPostgres(w flushWindow, now time.Time, d pgdrain.Drain) {
+	var stats []PGDigestStatRow
+	var texts []PGDigestTextRow
+	var slow []PGSlowQueryRow
+	for i, c := range d.Clusters {
+		if i == 0 && s.src.Host == nil {
+			hw := c.Host
+			hw.MysqldCPUNs, hw.MysqldOK = 0, false
+			enqueueRows(s, TableHostStats, hostRows(s.host, w, hw))
+		}
+		s.m.dropped.WithLabelValues(TablePGDigestStats, "drain_cap").Add(float64(c.Folded))
+		digests := foldMinor(c.Digests, s.cfg.MinDigestSharePercent, s.src.PostgresSlowWallNs)
+		stats = append(stats, pgDigestRows(s.host, w, c, digests)...)
+		s.mu.Lock()
+		texts = append(texts, pgTextRows(digests, s.seenPG, s.src.PostgresIncludeSamples, now)...)
+		s.mu.Unlock()
+		s.m.dropped.WithLabelValues(TablePGSlowQueries, "drain_cap").Add(float64(c.SlowDropped))
+		slow = append(slow, pgSlowRows(s.host, c.Cluster, c.Slow, s.src.PostgresIncludeSamples)...)
+	}
+	enqueueRows(s, TablePGDigestStats, stats)
+	ids := make([]string, len(texts))
+	for i, r := range texts {
+		ids[i] = r.DigestID
+	}
+	enqueueRowsIDs(s, TablePGDigestText, texts, ids)
+	enqueueRows(s, TablePGSlowQueries, slow)
+	enqueueRows(s, TablePGBackends, pgBackendRows(s.host, w, d.Backends))
 }
