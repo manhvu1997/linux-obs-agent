@@ -24,6 +24,7 @@ import (
 	"github.com/manhvu1997/linux-obs-agent/internal/config"
 	"github.com/manhvu1997/linux-obs-agent/internal/drain"
 	mysqlq "github.com/manhvu1997/linux-obs-agent/internal/ebpf/mysql_query"
+	"github.com/manhvu1997/linux-obs-agent/internal/inflight"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
 	"github.com/manhvu1997/linux-obs-agent/internal/mysql/sqlhash"
@@ -62,6 +63,15 @@ type Analyzer struct {
 	digests atomic.Pointer[querystats.Snapshot]
 	started atomic.Bool
 
+	// cred credits statements running longer than a poll (CLAUDE.md §20):
+	// Credit / Pay / Age on the poll goroutine, SettleCmd on the command-event
+	// consumer. minAgeNs is the poll interval; readOwner reads a thread's
+	// tgid (the aggregation key's PID) and name.
+	cred      *inflight.Creditor[aggKey]
+	minAgeNs  uint64
+	readOwner func(tid uint32) (tgid uint32, name string, err error)
+	mono      func() uint64
+
 	// latest stores a *model.MySQLAnalysis; updated atomically.
 	latest atomic.Pointer[model.MySQLAnalysis]
 
@@ -80,6 +90,7 @@ type Analyzer struct {
 func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 	thresholdNs := cfg.SlowQueryThresholdMs * uint64(time.Millisecond)
 	loader := mysqlq.NewLoader(thresholdNs, cfg.MysqldPath, cfg.EmitAllQueries, mysqlq.WithCommitWait(cfg.CommitWait))
+	minAge := uint64(defaultPoll(cfg.PollInterval))
 	return &Analyzer{
 		cfg:       cfg,
 		coll:      coll,
@@ -87,6 +98,10 @@ func NewAnalyzer(cfg *config.MySQLConfig, coll *collector.Collector) *Analyzer {
 		acct:      loader.Accounting,
 		delayAcct: procinfo.DelayAcctEnabled,
 		host:      newHostSampler(),
+		cred:      inflight.New[aggKey](minAge, inflight.ReadThread),
+		minAgeNs:  minAge,
+		readOwner: procinfo.ReadThreadOwner,
+		mono:      inflight.MonoNow,
 		agg: querystats.New(querystats.Config{
 			Window:                           cfg.DigestWindow,
 			TopN:                             cfg.TopDigests,
@@ -115,7 +130,7 @@ func (a *Analyzer) Start(ctx context.Context) error {
 	if a.cfg.PollInterval <= 0 {
 		slog.Warn("mysql: poll_interval is zero or negative, defaulting to 5s",
 			"configured", a.cfg.PollInterval)
-		a.cfg.PollInterval = 5 * time.Second
+		a.cfg.PollInterval = defaultPoll(a.cfg.PollInterval)
 	}
 
 	if err := a.loader.Start(ctx); err != nil {
@@ -152,6 +167,14 @@ func (a *Analyzer) Start(ctx context.Context) error {
 			a.poll()
 		}
 	}
+}
+
+// defaultPoll is the poll interval Start uses: the configured one, or 5 s.
+func defaultPoll(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 5 * time.Second
+	}
+	return d
 }
 
 // Latest returns the most recently published MySQLAnalysis snapshot, or nil if
@@ -196,6 +219,7 @@ func (a *Analyzer) drainCmdEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
+			a.settleCmd(&ev, a.loader.LiteralSkip())
 			a.agg.Add(a.toEvent(ev, time.Now(), a.loader.PreparedTextTracking()))
 		}
 	}
@@ -365,7 +389,8 @@ func (a *Analyzer) HashMismatches() uint64 {
 
 // ─── Internal ─────────────────────────────────────────────────────────────────
 
-// poll drains the kernel aggregation and records one tick.
+// poll drains the kernel aggregation, credits the commands still running and
+// records one tick.
 func (a *Analyzer) poll() {
 	now := time.Now()
 	entries, err := a.loader.DrainAgg()
@@ -373,8 +398,125 @@ func (a *Analyzer) poll() {
 		slog.Warn("mysql: draining kernel aggregation", "err", err)
 		entries = nil
 	}
-	a.tick(now, entries, a.loader.PreparedTextTracking())
+	open, err := a.loader.OpenCommands()
+	if err != nil {
+		slog.Debug("mysql: reading running commands", "err", err)
+	}
+	pt := a.loader.PreparedTextTracking()
+	entries = a.creditInFlight(entries, open, err == nil, a.mono(), pt, a.loader.LiteralSkip())
+	a.tick(now, entries, pt)
 }
+
+// aggKey is a kernel aggregation key: the statements of one mysqld (tgid)
+// with the same command and text hash.
+type aggKey struct {
+	PID, Command uint32
+	Hash         uint64
+}
+
+// creditInFlight settles the drained entries against the credit their
+// statements already received, and appends the progress of every command
+// running longer than a poll as a zero-call entry (CPU, run-queue wait, disk
+// bytes and block-I/O wait; never calls or wall). The kernel sums a statement
+// when dispatch_command returns, so without this a 2-hour export lands in one
+// window as thousands of percent of the node's CPU and disk reads, and the
+// two hours before show nothing. ok is false when the running commands could
+// not be read: nothing is credited or aged then (an unreadable map is not
+// "nothing running"), but what is already owed is still paid.
+func (a *Analyzer) creditInFlight(entries []mysqlq.AggEntry, open []mysqlq.OpenCommand, ok bool, nowMono uint64,
+	preparedTracking, literalSkip bool) []mysqlq.AggEntry {
+	var credits []inflight.Credit[aggKey]
+	if ok {
+		credits = a.cred.Credit(a.sessions(open, nowMono, preparedTracking, literalSkip), nowMono, a.creditKnown)
+	}
+	for i := range entries {
+		e := &entries[i]
+		p := inflight.Counters{CPU: e.CPUNs, Runq: e.RunqNs, Read: e.DiskReadBytes, Write: e.DiskWriteBytes, Blkio: e.IOWaitNs}
+		a.cred.Pay(aggKey{e.PID, e.Command, e.Hash}, &p)
+		e.CPUNs, e.RunqNs, e.DiskReadBytes, e.DiskWriteBytes, e.IOWaitNs = p.CPU, p.Runq, p.Read, p.Write, p.Blkio
+	}
+	if ok {
+		a.cred.Age()
+	}
+	for _, c := range credits {
+		entries = append(entries, mysqlq.AggEntry{PID: c.Key.PID, Command: c.Key.Command, Hash: c.Key.Hash,
+			CPUNs: c.CPU, RunqNs: c.Runq, DiskReadBytes: c.Read, DiskWriteBytes: c.Write, IOWaitNs: c.Blkio})
+	}
+	return entries
+}
+
+// sessions turns the running commands into creditor sessions. The thread's
+// owner is read every poll, and only for commands old enough to be credited:
+// its tgid is the key's PID, and its name must still be the one captured at
+// dispatch_command entry — a command that never returned (crashed mysqld,
+// dead thread) leaves a stale mysql_pending entry, and a reused TID must not
+// credit another process's counters to it. A younger command, or one whose
+// owner cannot be read or does not match, keeps PID 0, which creditKnown
+// rejects, and still counts as running. The kernel sends a statement's text
+// only when its first execution returns, so a long statement not seen before
+// (or running when the agent started) is learned from its in-flight copy —
+// the same bytes the kernel hashed.
+func (a *Analyzer) sessions(open []mysqlq.OpenCommand, nowMono uint64, preparedTracking, literalSkip bool) []inflight.Session[aggKey] {
+	out := make([]inflight.Session[aggKey], 0, len(open))
+	for _, c := range open {
+		k := aggKey{Command: c.Command, Hash: c.Hash}
+		if nowMono >= c.OpenTS && nowMono-c.OpenTS >= a.minAgeNs {
+			if tg, name, err := a.readOwner(c.TID); err == nil && name == c.Comm {
+				k.PID = tg
+				if c.Hash != 0 && c.Query != "" {
+					if _, known := a.text.Lookup(textcache.Key{Command: c.Command, Hash: c.Hash}); !known {
+						a.learnText(mysqlq.TextEvent{Command: c.Command, QueryLen: c.QueryLen, Hash: c.Hash, Query: c.Query},
+							preparedTracking, literalSkip)
+					}
+				}
+			}
+		}
+		out = append(out, inflight.Session[aggKey]{TID: c.TID, OpenTS: c.OpenTS, Key: k,
+			Base: inflight.Counters{CPU: c.CPU, Runq: c.Runq, Read: c.ReadBytes, Write: c.WriteBytes, Blkio: c.Blkio}})
+	}
+	return out
+}
+
+// creditKnown: a session is credited only with its tgid and, when it has a
+// text, once the text is classified (a credit for an unknown hash would be
+// parked, then shown as text unavailable).
+func (a *Analyzer) creditKnown(k aggKey) bool {
+	if k.PID == 0 {
+		return false
+	}
+	if k.Hash == 0 {
+		return true
+	}
+	_, ok := a.text.Lookup(textcache.Key{Command: k.Command, Hash: k.Hash})
+	return ok
+}
+
+// settleCmd subtracts the in-flight credit of a command that ended as a
+// fallback event, which carries its full sums. The event has no hash: it is
+// recomputed from the event text with the kernel's rule (the text is the
+// bytes the kernel hashed: the entry capture, or the execute's ps_text). A
+// hash the kernel and Go disagree on (marked unsafe) may not match: that
+// credit is then dropped after two drains and counted in CreditDropped.
+func (a *Analyzer) settleCmd(ev *mysqlq.CmdEvent, literalSkip bool) {
+	if credited, owed := a.cred.Tracked(); credited == 0 && owed == 0 {
+		return // the common case: no long statement in flight, no hashing
+	}
+	var h uint64
+	switch {
+	case ev.Query == "":
+	case literalSkip:
+		h = sqlhash.KernelHash([]byte(ev.Query))
+	default:
+		h = sqlhash.ExactHash([]byte(ev.Query))
+	}
+	p := inflight.Counters{CPU: ev.CPUNs, Runq: ev.RunqNs, Read: ev.DiskReadBytes, Write: ev.DiskWriteBytes, Blkio: ev.IOWaitNs}
+	a.cred.SettleCmd(aggKey{ev.PID, ev.Command, h}, ev.TID, &p)
+	ev.CPUNs, ev.RunqNs, ev.DiskReadBytes, ev.DiskWriteBytes, ev.IOWaitNs = p.CPU, p.Runq, p.Read, p.Write, p.Blkio
+}
+
+// CreditDropped: in-flight credit never matched by the statement's final
+// sums (dropped after two drains).
+func (a *Analyzer) CreditDropped() uint64 { return a.cred.Dropped() }
 
 // tick records one poll — the drained statements and the host CPU over the
 // same interval, in the same bucket — and publishes the digest snapshot and

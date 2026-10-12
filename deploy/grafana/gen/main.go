@@ -295,11 +295,55 @@ const (
 	// are therefore never narrower than the flush_s variable.
 	flushBucketS = "greatest($__interval_s, ${flush_s})"
 	flushBucket  = "toDateTime(intDiv(toUInt32(window_end), " + flushBucketS + ") * " + flushBucketS + ", 'UTC')"
+	// pieceBucket buckets the rows of spreadDigests by their piece end.
+	pieceBucket = "toDateTime(intDiv(toUInt32(pieceEnd), " + flushBucketS + ") * " + flushBucketS + ", 'UTC')"
+
+	// spreadMaxS caps how far back spreadDigests spreads one statement (1 day):
+	// a longer one (a replica's binlog dump) is spread over its last day.
+	spreadMaxS = "86400"
 
 	// alertWin is the rate window of the MySQL alert rules; panels that draw
 	// an alert's threshold use it so the line and the rule agree.
 	alertWin = "5m"
 )
+
+// spreadDigests is obs.mysql_digest_stats of the selected hosts with each long
+// statement's CPU and disk bytes spread back over the windows it ran in.
+//
+// The kernel charges a statement's whole CPU and disk reads to the interval
+// in which it completes, while host_stats accrues poll by poll: a 2-hour
+// full-table SELECT lands as 7 000 % of node CPU in one minute. A row with
+// one call whose wall_max_ns exceeds its window is one statement that ran
+// over (window_end − wall_max, window_end]; its cpu_ns and disk bytes are
+// split, in proportion to time, over pieces one window wide ending at
+// window_end, window_end − w, … — the ends of the host_stats rows of the
+// earlier flushes, so a piece lands in the same bucket as its denominator.
+// Rows with several calls, and calls / wall / waits, stay on the completion
+// interval (they describe completed statements). Agents with in-flight
+// credit (CLAUDE.md §20) already charge long statements while they run: the
+// completion row then holds only that interval's credit and residue, so
+// spreading it smears at most one flush interval of the statement over its
+// run. Output (camelCase: a ClickHouse alias equal
+// to a column name is cyclic): host, digest_id, pid, pieceEnd, pieceS (window
+// seconds), cpuNs, readBytes, writeBytes (spread) and nCalls, runqNs, wallNs,
+// wallMaxNs, ioWaitNs, redoWaitNs (on the completion piece only); pieces
+// outside the dashboard range are dropped.
+func spreadDigests() string {
+	return `(SELECT host, digest_id, pid, pieceEnd, pieceS, cpuNs, readBytes, writeBytes, nCalls, runqNs, wallNs, wallMaxNs, ioWaitNs, redoWaitNs
+ FROM (SELECT host, digest_id, pid,
+              toDateTime(toUInt32(window_end) - k * w, 'UTC') AS pieceEnd, w AS pieceS,
+              (least(span, toFloat64((k + 1) * w)) - k * w) / span AS frac,
+              cpu_ns * frac AS cpuNs, disk_read_bytes * frac AS readBytes, disk_write_bytes * frac AS writeBytes,
+              if(k = 0, calls, 0) AS nCalls, if(k = 0, runq_ns, 0) AS runqNs, if(k = 0, wall_ns, 0) AS wallNs,
+              if(k = 0, wall_max_ns, 0) AS wallMaxNs, if(k = 0, io_wait_ns, NULL) AS ioWaitNs, if(k = 0, redo_wait_ns, NULL) AS redoWaitNs
+       FROM (SELECT host, digest_id, pid, window_end, calls, cpu_ns, runq_ns, wall_ns, wall_max_ns, disk_read_bytes, disk_write_bytes, io_wait_ns, redo_wait_ns,
+                    greatest(dateDiff('second', window_start, window_end), 1) AS w,
+                    if(calls = 1 AND wall_max_ns > w * 1e9, least(wall_max_ns / 1e9, toFloat64(` + spreadMaxS + `)), toFloat64(w)) AS span
+             FROM obs.mysql_digest_stats
+             WHERE window_end >= $__fromTime AND window_end < $__toTime + INTERVAL ` + spreadMaxS + ` SECOND AND ` + hostF + `)
+       ARRAY JOIN range(toUInt32(ceil(span / w))) AS k)
+ WHERE $__timeFilter(pieceEnd))`
+}
 
 // withHost adds the hostname label (obs_agent_host_info) to a per-instance
 // expression, so a table shows the host instead of IP:port.
@@ -546,9 +590,11 @@ func overview() Dashboard {
 	acc := described(prom("Dropped, overflow and hash mismatches", "ops",
 		[2]string{`rate(obs_agent_mysql_events_dropped_total{` + inst + `}[$__rate_interval])`, "{{instance}} events dropped"},
 		[2]string{`rate(obs_agent_mysql_agg_overflow_total{` + inst + `}[$__rate_interval])`, "{{instance}} aggregation overflow"},
-		[2]string{`rate(obs_agent_mysql_hash_mismatch_total{` + inst + `}[$__rate_interval])`, "{{instance}} hash mismatch"}),
-		"per-second rates of the three MySQL accounting counters.",
-		"all should be 0. Dropped events undercount digest totals; overflow keeps totals exact at a higher cost; a hash mismatch falls back to exact processing.")
+		[2]string{`rate(obs_agent_mysql_hash_mismatch_total{` + inst + `}[$__rate_interval])`, "{{instance}} hash mismatch"},
+		[2]string{`rate(obs_agent_mysql_credit_dropped_total{` + inst + `}[$__rate_interval])`, "{{instance}} unmatched in-flight credit"}),
+		"per-second rates of the four MySQL accounting counters.",
+		"all should be 0. Dropped events undercount digest totals; overflow keeps totals exact at a higher cost; a hash mismatch falls back to exact processing; "+
+			"unmatched in-flight credit over-counts one long statement's CPU and disk bytes.")
 	acc.Description += "\nAlert ObsAgentMySQLAccountingDegraded (info) fires when any of them stays above 0 for 10m."
 	b.add(acc, 12)
 	b.add(withAlert(described(prom("Accounting availability", "none",
@@ -613,27 +659,26 @@ func analysis() Dashboard {
 
 	b := &builder{}
 	b.row("MySQL digests")
-	topDigests := chTable("Top digests", `SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.calls) AS callCount,
-  sum(s.cpu_ns) / 1e9 / `+rangeS+` AS cpuCores,
-  max(s.cpu_ns / greatest(dateDiff('second', s.window_start, s.window_end), 1)) / 1e9 AS peakCores,
-  100 * sum(s.cpu_ns) / nullIf(`+hostSum("node_cpu_used_ns")+`, 0) AS pctNodeCpu,
-  sum(s.disk_read_bytes) / `+rangeS+` / 1048576 AS readMBs,
-  100 * sum(s.disk_read_bytes) / nullIf(`+hostSum("disk_read_bytes")+`, 0) AS pctDiskRead,
-  sum(s.disk_read_bytes) / greatest(sum(s.calls), 1) / 16384 AS pagesPerCall,
-  sum(s.disk_write_bytes) / `+rangeS+` / 1048576 AS writeMBs,
-  100 * sum(s.runq_ns) / greatest(sum(s.wall_ns), 1) AS cpuWaitPct,
-  100 * sum(s.io_wait_ns) / nullIf(sumIf(s.wall_ns, s.io_wait_ns IS NOT NULL), 0) AS diskWaitPct,
-  100 * sum(s.redo_wait_ns) / nullIf(sumIf(s.wall_ns, s.redo_wait_ns IS NOT NULL), 0) AS commitWaitPct,
-  sum(s.wall_ns) / greatest(sum(s.calls), 1) / 1e6 AS latencyMsAvg,
-  max(s.wall_max_ns) / 1e6 AS latencyMsMax,
+	topDigests := chTable("Top digests", `SELECT s.digest_id AS digest, any(t.digest_text) AS text, sum(s.nCalls) AS callCount,
+  sum(s.cpuNs) / 1e9 / `+rangeS+` AS cpuCores,
+  max(s.cpuNs / s.pieceS) / 1e9 AS peakCores,
+  100 * sum(s.cpuNs) / nullIf(`+hostSum("node_cpu_used_ns")+`, 0) AS pctNodeCpu,
+  sum(s.readBytes) / `+rangeS+` / 1048576 AS readMBs,
+  100 * sum(s.readBytes) / nullIf(`+hostSum("disk_read_bytes")+`, 0) AS pctDiskRead,
+  sum(s.readBytes) / nullIf(sum(s.nCalls), 0) / 16384 AS pagesPerCall,
+  sum(s.writeBytes) / `+rangeS+` / 1048576 AS writeMBs,
+  100 * sum(s.runqNs) / greatest(sum(s.wallNs), 1) AS cpuWaitPct,
+  100 * sum(s.ioWaitNs) / nullIf(sumIf(s.wallNs, s.ioWaitNs IS NOT NULL), 0) AS diskWaitPct,
+  100 * sum(s.redoWaitNs) / nullIf(sumIf(s.wallNs, s.redoWaitNs IS NOT NULL), 0) AS commitWaitPct,
+  sum(s.wallNs) / nullIf(sum(s.nCalls), 0) / 1e6 AS latencyMsAvg,
+  max(s.wallMaxNs) / 1e6 AS latencyMsMax,
   if(s.digest_id NOT IN ('`+chsink.MinorDigestID+`', '`+querystats.OtherDigestID+`') AND pctNodeCpu >= 20 AND 100 * `+hostSum("node_cpu_used_ns")+` / nullIf(`+nodeCPUCapacityS+` * 1e9, 0) >= 50, 'culprit', '') AS cpuRole,
   if(s.digest_id NOT IN ('`+chsink.MinorDigestID+`', '`+querystats.OtherDigestID+`') AND pctDiskRead >= 20 AND `+hostSum("disk_read_bytes")+` / `+rangeS+` / 1048576 >= 5, 'culprit', '') AS ioRole,
   multiIf(latencyMsAvg < ${slow_ms} OR cpuWaitPct + ifNull(diskWaitPct, 0) + ifNull(commitWaitPct, 0) < 50, '',
           cpuWaitPct >= ifNull(diskWaitPct, 0) AND cpuWaitPct >= ifNull(commitWaitPct, 0), 'cpu',
           ifNull(diskWaitPct, 0) >= ifNull(commitWaitPct, 0), 'disk', 'commit') AS victimOf
-FROM obs.mysql_digest_stats AS s
+FROM `+spreadDigests()+` AS s
 LEFT JOIN (SELECT digest_id, digest_text FROM obs.mysql_digest_text FINAL) AS t ON t.digest_id = s.digest_id
-WHERE $__timeFilter(s.window_end) AND s.`+hostF+`
 GROUP BY s.digest_id ORDER BY cpuCores DESC LIMIT 50`)
 	topDigests.FieldConfig = withColumnUnits(topDigests.FieldConfig, map[string]string{
 		"cpuCores": "short", "peakCores": "short", "pctNodeCpu": "percent", "pctDiskRead": "percent",
@@ -642,7 +687,7 @@ GROUP BY s.digest_id ORDER BY cpuCores DESC LIMIT 50`)
 	})
 	b.add(described(topDigests,
 		"per digest over the selected range and hosts: cpuCores = cpu_ns ÷ range seconds (average cores busy); peakCores = the highest cpu_ns ÷ window of one "+
-			"flush interval on one host; pctNodeCpu = cpu_ns ÷ host_stats node_cpu_used_ns × 100; readMBs / writeMBs = disk bytes ÷ range seconds; "+
+			"flush interval on one host (cpu_ns and disk bytes of a statement longer than its interval are spread over the windows it ran in); pctNodeCpu = cpu_ns ÷ host_stats node_cpu_used_ns × 100; readMBs / writeMBs = disk bytes ÷ range seconds; "+
 			"pctDiskRead = disk_read_bytes ÷ host_stats disk_read_bytes × 100; pagesPerCall = disk_read_bytes per call ÷ 16384; "+
 			"cpuWaitPct = runq_ns ÷ wall_ns × 100; diskWaitPct / commitWaitPct = io_wait_ns / redo_wait_ns ÷ wall_ns of the intervals that measured that wait × 100; latencyMsAvg = wall_ns per call, latencyMsMax = wall_max_ns. "+
 			"cpuRole = culprit when pctNodeCpu ≥ 20 and the node CPU was ≥ 50% used (over the intervals with a node CPU delta); ioRole = culprit when pctDiskRead ≥ 20 and the node read ≥ 5 MiB/s; "+
@@ -650,24 +695,26 @@ GROUP BY s.digest_id ORDER BY cpuCores DESC LIMIT 50`)
 		"cpuCores is averaged over the whole range and dilutes a short burst: sort by peakCores to find bursts. A culprit consumes the resource; a victim only waited "+
 			"for it — fix culprits, not victims. pagesPerCall 1–4 = buffer-pool misses, hundreds = a scan. A NULL wait or % column means not measured "+
 			"(no delay accounting, no redo hooks, or no host_stats rows). slow_ms must equal mysql.slow_query_threshold_ms (dashboard settings → variables)."), 24)
-	// shareTS: the 10 digests with the most col over the range, as a share
-	// of host_stats.hostCol per bucket.
+	// shareTS: the 10 digests with the most col (a spreadDigests column) over
+	// the range, as a share of host_stats.hostCol per bucket.
 	shareTS := func(col, hostCol string) string {
-		return `SELECT d.time AS time, d.digest AS digest, 100 * d.v / nullIf(h.v, 0) AS pct
-FROM (SELECT ` + flushBucket + ` AS time, digest_id AS digest, sum(` + col + `) AS v FROM obs.mysql_digest_stats
-      WHERE $__timeFilter(window_end) AND ` + hostF + `
-        AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND ` + hostF + `
-                          GROUP BY digest_id ORDER BY sum(` + col + `) DESC LIMIT 10)
+		return `WITH spreadRows AS ` + spreadDigests() + `
+SELECT d.time AS time, d.digest AS digest, 100 * d.v / nullIf(h.v, 0) AS pct
+FROM (SELECT ` + pieceBucket + ` AS time, digest_id AS digest, sum(` + col + `) AS v FROM spreadRows
+      WHERE digest_id IN (SELECT digest_id FROM spreadRows GROUP BY digest_id ORDER BY sum(` + col + `) DESC LIMIT 10)
       GROUP BY time, digest) AS d
 INNER JOIN (SELECT ` + flushBucket + ` AS time, sum(` + hostCol + `) AS v
             FROM obs.host_stats WHERE $__timeFilter(window_end) AND ` + hostF + ` GROUP BY time) AS h ON h.time = d.time
 ORDER BY time`
 	}
-	b.add(described(chTS("% of node CPU used — top 10 digests", "percent", shareTS("cpu_ns", "node_cpu_used_ns")),
-		"per bucket (≥ flush interval): digest cpu_ns ÷ host_stats node_cpu_used_ns × 100, for the 10 digests with the most CPU over the range.",
-		"above 20% (and a busy node) a digest is a CPU culprit; a bucket without host_stats rows shows no point."), 12)
-	b.add(described(chTS("% of node disk reads — top 10 digests", "percent", shareTS("disk_read_bytes", "disk_read_bytes")),
-		"per bucket: digest disk_read_bytes ÷ host_stats disk_read_bytes × 100, for the 10 digests with the most disk reads over the range.",
+	b.add(described(chTS("% of node CPU used — top 10 digests", "percent", shareTS("cpuNs", "node_cpu_used_ns")),
+		"per bucket (≥ flush interval): digest cpu_ns ÷ host_stats node_cpu_used_ns × 100, for the 10 digests with the most CPU over the range. "+
+			"A statement that ran longer than its interval (one call, wall_max_ns > window) has its cpu_ns spread evenly over the windows it ran in.",
+		"above 20% (and a busy node) a digest is a CPU culprit; a bucket without host_stats rows shows no point. "+
+			"A flat band over hours = one long statement (a full-table export, a report): check latencyMsMax in Top digests."), 12)
+	b.add(described(chTS("% of node disk reads — top 10 digests", "percent", shareTS("readBytes", "disk_read_bytes")),
+		"per bucket: digest disk_read_bytes ÷ host_stats disk_read_bytes × 100, for the 10 digests with the most disk reads over the range. "+
+			"A statement that ran longer than its interval has its disk_read_bytes spread evenly over the windows it ran in.",
 		"above 20% (and node reads ≥ 5 MiB/s) a digest is a disk culprit; compare pagesPerCall in Top digests to tell misses from scans."), 12)
 	nodeTS := chTS("Node CPU used and disk reads", "percent", `SELECT `+flushBucket+` AS time,
   100 * sum(node_cpu_used_ns) / nullIf(sumIf(cpu_count * dateDiff('second', window_start, window_end), node_cpu_used_ns IS NOT NULL) * 1e9, 0) AS cpuUsedPct,
@@ -679,14 +726,14 @@ GROUP BY time ORDER BY time`)
 	b.add(described(nodeTS,
 		"per bucket over the selected hosts: cpuUsedPct = node_cpu_used_ns ÷ (cpu_count × window seconds × 1e9) × 100 over the intervals with a node CPU delta; diskReadMBs = physical-disk read bytes ÷ bucket seconds ÷ 1048576.",
 		"the context for the shares beside it: a 40% share of an idle node is not an overload. Roles in Top digests use 50% CPU and 5 MiB/s."), 12)
-	b.add(described(chTS("CPU of the top 10 digests (cores)", "short", `SELECT `+flushBucket+` AS time, digest_id AS digest,
-  sum(cpu_ns) / 1e9 / `+flushBucketS+` AS cores
-FROM obs.mysql_digest_stats
-WHERE $__timeFilter(window_end) AND `+hostF+`
-  AND digest_id IN (SELECT digest_id FROM obs.mysql_digest_stats WHERE $__timeFilter(window_end) AND `+hostF+`
-                    GROUP BY digest_id ORDER BY sum(cpu_ns) DESC LIMIT 10)
+	b.add(described(chTS("CPU of the top 10 digests (cores)", "short", `WITH spreadRows AS `+spreadDigests()+`
+SELECT `+pieceBucket+` AS time, digest_id AS digest,
+  sum(cpuNs) / 1e9 / `+flushBucketS+` AS cores
+FROM spreadRows
+WHERE digest_id IN (SELECT digest_id FROM spreadRows GROUP BY digest_id ORDER BY sum(cpuNs) DESC LIMIT 10)
 GROUP BY time, digest ORDER BY time`),
-		"per bucket: digest cpu_ns ÷ 1e9 ÷ bucket seconds (cores), for the 10 digests with the most CPU over the range, summed over the selected hosts.",
+		"per bucket: digest cpu_ns ÷ 1e9 ÷ bucket seconds (cores), for the 10 digests with the most CPU over the range, summed over the selected hosts; "+
+			"a statement longer than its interval is spread over the windows it ran in.",
 		"absolute cores, independent of node size; a digest that jumps here and in '% of node CPU used' is the one to EXPLAIN."), 12)
 	b.add(described(chTable("CPU regression vs 7 days earlier", `SELECT digest_id AS digest,
   sumIf(cpu_ns, $__timeFilter(window_end)) / 1e9 AS cpuSecNow,

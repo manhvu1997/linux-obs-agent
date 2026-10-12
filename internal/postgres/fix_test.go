@@ -79,7 +79,11 @@ func TestResumeRebaselines(t *testing.T) {
 	}
 	a.Drain()
 	cpu = 500e9 // the cooldown
-	a.cred.credited[sessKey{1, 1}] = &creditedSess{}
+	a.cred.readProc = func(uint32) (procCounters, error) { return procCounters{CPU: 1}, nil }
+	a.cred.Credit([]pgtrace.Session{{TID: 1, OpenTS: 1}}, 1e12, func(uint64) bool { return true })
+	if n, _ := a.cred.c.Tracked(); n != 1 {
+		t.Fatal("setup: expected one credited session")
+	}
 	a.poll(t0.Add(2 * time.Minute))
 	if a.State() != StateActive {
 		t.Fatal("expected resume")
@@ -89,7 +93,7 @@ func TestResumeRebaselines(t *testing.T) {
 			t.Fatalf("cluster %d booked the cooldown's CPU into one poll: %d", c.PostmasterPID, c.Host.MysqldCPUNs)
 		}
 	}
-	if len(a.cred.credited) != 0 {
+	if n, _ := a.cred.c.Tracked(); n != 0 {
 		t.Fatal("credit must be reset on resume")
 	}
 }
@@ -229,8 +233,8 @@ func TestSessionsErrorSkipsCredit(t *testing.T) {
 	a.poll(t0)
 	tr.sessions, tr.sessErr = nil, errors.New("map read")
 	a.poll(t0.Add(5 * time.Second))
-	if len(a.cred.credited) != 1 || len(a.cred.owed) != 0 {
-		t.Fatalf("credited %d owed %d: the failed read must change nothing", len(a.cred.credited), len(a.cred.owed))
+	if credited, owed := a.cred.c.Tracked(); credited != 1 || owed != 0 {
+		t.Fatalf("credited %d owed %d: the failed read must change nothing", credited, owed)
 	}
 }
 

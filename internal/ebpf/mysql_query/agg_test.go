@@ -175,3 +175,40 @@ func TestCommitWaitOption(t *testing.T) {
 		t.Fatalf("WithCommitWait(true): %+v", a)
 	}
 }
+
+// openCommand keys a running command exactly as the uretprobe will: the
+// entry hash for COM_QUERY, the recovered ps_text hash for COM_STMT_EXECUTE
+// (0 without one), and carries the entry baselines.
+func TestOpenCommand(t *testing.T) {
+	text := func(s string) (b [512]uint8) { copy(b[:], s); return }
+	noExec := func(uint32) (MysqlQueryPsTextT, bool) {
+		t.Fatal("ps_text must be read only for an execute")
+		return MysqlQueryPsTextT{}, false
+	}
+
+	q := MysqlQueryMysqlPendingT{StartTs: 5, CpuStart: 1, RqStart: 2, RdStart: 3, WrStart: 4, BlkioStart: 6,
+		Command: 3, Hash: 0xabc, QueryLen: 22, Query: text("select * from `tickets`"), Comm: [16]uint8{'c', 'o', 'n', 'n'}}
+	got := openCommand(9, &q, noExec)
+	want := OpenCommand{TID: 9, Command: 3, QueryLen: 22, Hash: 0xabc, OpenTS: 5, CPU: 1, Runq: 2, ReadBytes: 3, WriteBytes: 4, Blkio: 6,
+		Query: "select * from `tickets`", Comm: "conn"}
+	if got != want {
+		t.Fatalf("COM_QUERY: got %+v, want %+v", got, want)
+	}
+
+	ex := MysqlQueryMysqlPendingT{StartTs: 5, Command: 23, Hash: 0}
+	got = openCommand(9, &ex, func(tid uint32) (MysqlQueryPsTextT, bool) {
+		return MysqlQueryPsTextT{Len: 8, Hash: 0xdef, Text: text("select ?")}, tid == 9
+	})
+	if got.Hash != 0xdef || got.Query != "select ?" || got.QueryLen != 8 {
+		t.Fatalf("COM_STMT_EXECUTE with recovered text: %+v", got)
+	}
+	got = openCommand(9, &ex, func(uint32) (MysqlQueryPsTextT, bool) { return MysqlQueryPsTextT{}, false })
+	if got.Hash != 0 || got.Query != "" {
+		t.Fatalf("COM_STMT_EXECUTE without text must key hash 0: %+v", got)
+	}
+
+	dump := MysqlQueryMysqlPendingT{StartTs: 5, Command: 30} // COM_BINLOG_DUMP_GTID: no text
+	if got = openCommand(9, &dump, noExec); got.Hash != 0 || got.Command != 30 || got.Query != "" {
+		t.Fatalf("command without text: %+v", got)
+	}
+}

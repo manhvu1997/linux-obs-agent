@@ -1630,6 +1630,15 @@
           },
           "expr": "rate(obs_agent_mysql_hash_mismatch_total{instance=~\"$instance\"}[$__rate_interval])",
           "legendFormat": "{{instance}} hash mismatch"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prometheus}"
+          },
+          "expr": "rate(obs_agent_mysql_credit_dropped_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} unmatched in-flight credit"
         }
       ],
       "fieldConfig": {
@@ -1638,7 +1647,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: per-second rates of the three MySQL accounting counters.\nReading: all should be 0. Dropped events undercount digest totals; overflow keeps totals exact at a higher cost; a hash mismatch falls back to exact processing.\nAlert ObsAgentMySQLAccountingDegraded (info) fires when any of them stays above 0 for 10m."
+      "description": "Formula: per-second rates of the four MySQL accounting counters.\nReading: all should be 0. Dropped events undercount digest totals; overflow keeps totals exact at a higher cost; a hash mismatch falls back to exact processing; unmatched in-flight credit over-counts one long statement's CPU and disk bytes.\nAlert ObsAgentMySQLAccountingDegraded (info) fires when any of them stays above 0 for 10m."
     },
     {
       "id": 38,

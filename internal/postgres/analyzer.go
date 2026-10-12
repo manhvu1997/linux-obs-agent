@@ -12,10 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/manhvu1997/linux-obs-agent/internal/collector"
 	"github.com/manhvu1997/linux-obs-agent/internal/drain"
+	"github.com/manhvu1997/linux-obs-agent/internal/inflight"
 	"github.com/manhvu1997/linux-obs-agent/internal/model"
 	"github.com/manhvu1997/linux-obs-agent/internal/overload"
 	"github.com/manhvu1997/linux-obs-agent/internal/pgdrain"
@@ -218,7 +217,7 @@ func NewAnalyzer(o Options, d Deps) *Analyzer {
 		d.DelayAcct = procinfo.DelayAcctEnabled
 	}
 	if d.Mono == nil {
-		d.Mono = monoNow
+		d.Mono = inflight.MonoNow
 	}
 	if d.SysFS == "" {
 		d.SysFS = "/sys"
@@ -243,14 +242,6 @@ func NewAnalyzer(o Options, d Deps) *Analyzer {
 	})
 	a.state.Store(StateActive)
 	return a
-}
-
-func monoNow() uint64 {
-	var ts unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
-		return 0
-	}
-	return uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 }
 
 // Start loads the tracer, discovers clusters and polls until ctx is done.
@@ -443,10 +434,10 @@ func (a *Analyzer) resolve(entries []pgtrace.AggEntry, credits []credit) (map[ui
 		add(a.text.Resolve(cacheKey(en.Kind, en.Hash), s, byKind))
 	}
 	for _, c := range credits {
-		s := textcache.Sums{PID: c.Postmaster, Kind: c.Kind, CPUNs: c.CPU, RunqNs: c.Runq,
+		s := textcache.Sums{PID: c.Key.Postmaster, Kind: c.Key.Kind, CPUNs: c.CPU, RunqNs: c.Runq,
 			DiskReadBytes: c.Read, DiskWriteBytes: c.Write, IOWaitNs: c.Blkio}
 		zeroParallel(&s)
-		add(a.text.Resolve(cacheKey(c.Kind, c.Hash), s, byKind))
+		add(a.text.Resolve(cacheKey(c.Key.Kind, c.Key.Hash), s, byKind))
 	}
 	for _, d := range a.text.EndTick(func(uint32) textcache.Entry { return byKind(pgtrace.KindClient) }) {
 		add(d, true)

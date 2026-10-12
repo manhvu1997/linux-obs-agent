@@ -62,6 +62,8 @@ var (
 		"Commands that bypassed in-kernel aggregation because the map was full (processed as full events; totals stay exact).", nil, nil)
 	myHashMismatchDesc = prometheus.NewDesc("obs_agent_mysql_hash_mismatch_total",
 		"Kernel text hashes found inconsistent: a verification sample or resend whose digest differed from the cached one, or a first-sight text whose kernel hash differed from the Go reference; the hash is switched to exact per-event processing.", nil, nil)
+	myCreditDroppedDesc = prometheus.NewDesc("obs_agent_mysql_credit_dropped_total",
+		"In-flight credit of a long statement never matched by its final sums (dropped after two drains): that statement's CPU and disk bytes are over-counted by the credit.", nil, nil)
 )
 
 // myDigests are MySQL's per-digest descriptors (no WAL wait).
@@ -74,6 +76,7 @@ type MySQLHealth struct {
 	TextDropped    func() uint64 // text events dropped, re-requested (…_text_events_dropped_total)
 	AggOverflow    func() uint64 // commands that bypassed kernel aggregation (map full)
 	HashMismatches func() uint64 // kernel text hash disagreed with the digest
+	CreditDropped  func() uint64 // in-flight credit never matched by the statement's final sums
 }
 
 func (h MySQLHealth) read(f func() uint64) float64 {
@@ -102,7 +105,7 @@ func NewMySQLCollector(snap func() *querystats.Snapshot, health MySQLHealth, mod
 func (c *MySQLCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{myQueriesDesc, myCPUDesc, myRunqDesc, myWallDesc, myBytesDesc,
 		myDigestCPUDesc, myDigestCallsDesc, myDigestOutDesc, myDigestRunqDesc, myDigestInfoDesc, myCoverageDesc, myDroppedDesc,
-		myTextDroppedDesc, myAggOverflowDesc, myHashMismatchDesc,
+		myTextDroppedDesc, myAggOverflowDesc, myHashMismatchDesc, myCreditDroppedDesc,
 		myDiskReadDesc, myDiskWriteDesc, myIOWaitDesc, myRedoWaitDesc, myDigestDiskReadDesc, myDigestIOWaitDesc,
 		myQueryCoverageDesc, myIOAvailDesc, myRedoAvailDesc} {
 		ch <- d
@@ -146,6 +149,7 @@ func (c *MySQLCollector) Collect(ch chan<- prometheus.Metric) {
 	emit(ch, myTextDroppedDesc, prometheus.CounterValue, h.read(h.TextDropped))
 	emit(ch, myAggOverflowDesc, prometheus.CounterValue, h.read(h.AggOverflow))
 	emit(ch, myHashMismatchDesc, prometheus.CounterValue, h.read(h.HashMismatches))
+	emit(ch, myCreditDroppedDesc, prometheus.CounterValue, h.read(h.CreditDropped))
 }
 
 // digestDescs are one engine's per-digest descriptors; a nil descriptor is

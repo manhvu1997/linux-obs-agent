@@ -149,7 +149,7 @@ var sqlWords = map[string]bool{
 	"by": true, "order": true, "desc": true, "asc": true, "limit": true, "having": true,
 	"interval": true, "day": true, "hour": true, "final": true, "using": true, "between": true,
 	"sum": true, "avg": true, "max": true, "min": true, "count": true, "greatest": true,
-	"length": true, "any": true, "if": true,
+	"length": true, "any": true, "if": true, "least": true, "ceil": true, "range": true,
 }
 
 // parseSchema maps table -> column set from the CREATE TABLE statements.
@@ -865,7 +865,8 @@ func TestNodeDiskReadDenominatorGuarded(t *testing.T) {
 // counts the unmeasured intervals as 0 and understates the share. The
 // denominator must count only the rows where the numerator was measured.
 var (
-	nullableWaitDivRe = regexp.MustCompile(`\bsum\((?:\w+\.)?(io_wait_ns|redo_wait_ns)\)\s*/\s*`)
+	// spreadDigests renames the columns (ioWaitNs, redoWaitNs, wallNs).
+	nullableWaitDivRe = regexp.MustCompile(`\bsum\((?:\w+\.)?(io_wait_ns|redo_wait_ns|ioWaitNs|redoWaitNs)\)\s*/\s*`)
 	capacitySumRe     = regexp.MustCompile(`\b(sum|sumIf)\(cpu_count\b`)
 )
 
@@ -873,7 +874,7 @@ func nullableDenominatorViolations(sql string) []string {
 	var v []string
 	for _, loc := range nullableWaitDivRe.FindAllStringSubmatchIndex(sql, -1) {
 		col := sql[loc[2]:loc[3]]
-		want := regexp.MustCompile(`^nullIf\(sumIf\((?:\w+\.)?wall_ns, (?:\w+\.)?` + col + ` IS NOT NULL\), 0\)`)
+		want := regexp.MustCompile(`^nullIf\(sumIf\((?:\w+\.)?(?:wall_ns|wallNs), (?:\w+\.)?` + col + ` IS NOT NULL\), 0\)`)
 		if !want.MatchString(sql[loc[1]:]) {
 			v = append(v, "sum("+col+") divided by a wall total that includes unmeasured rows: "+sql[loc[0]:min(len(sql), loc[1]+40)])
 		}
@@ -1058,6 +1059,30 @@ func TestPostgresPanelsExplainThemselves(t *testing.T) {
 					t.Errorf("%s: panel %q has an empty %q", name, p.Title, part)
 				}
 			}
+		}
+	}
+}
+
+// The kernel charges a statement's whole CPU and disk reads to the interval
+// in which it completes: a 2-hour export read as 7 000 % of node CPU in one
+// minute. The panels that show per-bucket or peak rates of digests must read
+// the spread rows (spreadDigests), not obs.mysql_digest_stats directly.
+func TestDigestRatePanelsSpreadLongStatements(t *testing.T) {
+	want := map[string]bool{"Top digests": false, "% of node CPU used — top 10 digests": false,
+		"% of node disk reads — top 10 digests": false, "CPU of the top 10 digests (cores)": false}
+	for _, p := range dashboards()["obs-agent-analysis.json"].Panels {
+		if _, ok := want[p.Title]; !ok {
+			continue
+		}
+		sql := p.Targets[0].RawSQL
+		if !strings.Contains(sql, "ARRAY JOIN range(") || !strings.Contains(sql, "$__timeFilter(pieceEnd)") {
+			t.Errorf("panel %q does not spread long statements", p.Title)
+		}
+		want[p.Title] = true
+	}
+	for title, seen := range want {
+		if !seen {
+			t.Errorf("panel %q not found", title)
 		}
 	}
 }

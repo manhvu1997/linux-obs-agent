@@ -262,6 +262,7 @@ func main() {
 				TextDropped:    mysqlAnalyzer.TextDropped,
 				AggOverflow:    mysqlAnalyzer.AggOverflow,
 				HashMismatches: mysqlAnalyzer.HashMismatches,
+				CreditDropped:  mysqlAnalyzer.CreditDropped,
 			}, cfg.MySQL.PrometheusDigests, cfg.MySQL.PrometheusMinimalTopN))
 		}
 		if pgAnalyzer != nil {

@@ -117,12 +117,13 @@ groups:
           rate(obs_agent_mysql_events_dropped_total[10m]) > 0
           or rate(obs_agent_mysql_agg_overflow_total[10m]) > 0
           or increase(obs_agent_mysql_hash_mismatch_total[10m]) > 0
+          or increase(obs_agent_mysql_credit_dropped_total[10m]) > 0
         for: 10m
         labels:
           severity: info
         annotations:
           summary: "obs-agent MySQL accounting is degraded on {{ $labels.instance }}"
-          description: "1. events_dropped > 0: digest totals undercount — check agent CPU throttling. 2. agg_overflow > 0: more distinct statements per poll than the kernel map holds; totals stay exact but cost more. 3. hash_mismatch > 0: a kernel/Go text-hash disagreement; affected statements fall back to exact processing — report it with the agent log."
+          description: "1. events_dropped > 0: digest totals undercount — check agent CPU throttling. 2. agg_overflow > 0: more distinct statements per poll than the kernel map holds; totals stay exact but cost more. 3. hash_mismatch > 0: a kernel/Go text-hash disagreement; affected statements fall back to exact processing — report it with the agent log. 4. credit_dropped > 0: a long statement's in-flight credit never met its final sums (its CPU and disk bytes are over-counted by that credit) — rare; report it with the agent log."
           diagnose: "http://{{ $labels.instance }}/api/diagnose"
 
   # PostgreSQL attribution (CLAUDE.md §23). Same policy as MySQL: page on

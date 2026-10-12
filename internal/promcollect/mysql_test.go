@@ -391,6 +391,7 @@ func TestMySQLCollectorHealthCounters(t *testing.T) {
 		TextDropped:    func() uint64 { return 3 },
 		AggOverflow:    func() uint64 { return 7 },
 		HashMismatches: func() uint64 { return 2 },
+		CreditDropped:  func() uint64 { return 4 },
 	}, "full", 20)
 	want := `
 # HELP obs_agent_mysql_events_dropped_total Commands lost before reaching the digest aggregator (fallback ring buffer full or consumer behind); digest totals undercount when this rises. Text events are counted separately.
@@ -405,10 +406,13 @@ obs_agent_mysql_agg_overflow_total 7
 # HELP obs_agent_mysql_hash_mismatch_total Kernel text hashes found inconsistent: a verification sample or resend whose digest differed from the cached one, or a first-sight text whose kernel hash differed from the Go reference; the hash is switched to exact per-event processing.
 # TYPE obs_agent_mysql_hash_mismatch_total counter
 obs_agent_mysql_hash_mismatch_total 2
+# HELP obs_agent_mysql_credit_dropped_total In-flight credit of a long statement never matched by its final sums (dropped after two drains): that statement's CPU and disk bytes are over-counted by the credit.
+# TYPE obs_agent_mysql_credit_dropped_total counter
+obs_agent_mysql_credit_dropped_total 4
 `
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want),
 		"obs_agent_mysql_events_dropped_total", "obs_agent_mysql_text_events_dropped_total",
-		"obs_agent_mysql_agg_overflow_total", "obs_agent_mysql_hash_mismatch_total"); err != nil {
+		"obs_agent_mysql_agg_overflow_total", "obs_agent_mysql_hash_mismatch_total", "obs_agent_mysql_credit_dropped_total"); err != nil {
 		t.Fatal(err)
 	}
 }

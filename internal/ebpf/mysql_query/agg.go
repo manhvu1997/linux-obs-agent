@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+
+	"github.com/manhvu1997/linux-obs-agent/internal/mysql/cmdmap"
 )
 
 // AggEntry is one kernel aggregation entry: the sums of every command with
@@ -133,6 +135,75 @@ func drainRows(
 		out = nil
 	}
 	return out, firstErr
+}
+
+// OpenCommand is one dispatch_command still running: the aggregation key its
+// sums will arrive under (with the thread's tgid, which the caller resolves)
+// and the thread's counters at entry, the baselines of those sums.
+type OpenCommand struct {
+	TID, Command, QueryLen                  uint32
+	Hash                                    uint64 // 0: no text (other commands, execute without text)
+	OpenTS                                  uint64 // bpf_ktime_get_ns at entry (CLOCK_MONOTONIC)
+	CPU, Runq, ReadBytes, WriteBytes, Blkio uint64
+	Query                                   string // the text Hash was computed over; "" when Hash is 0
+	Comm                                    string // the thread's name at entry (bpf_get_current_comm)
+}
+
+// OpenCommands returns the commands running inside dispatch_command, for
+// in-flight credit. A COM_STMT_EXECUTE takes the hash and text of the
+// Prepared_statement it runs, as the uretprobe will when it returns. Nil with
+// emit_all_queries off: nothing is aggregated, so nothing can be credited.
+// Not safe for concurrent use with itself; call it from the poll goroutine.
+func (l *Loader) OpenCommands() ([]OpenCommand, error) {
+	if !l.emitAll {
+		return nil, nil
+	}
+	if l.objs.MysqlPending == nil || l.objs.PsExec == nil || l.objs.PsText == nil {
+		return nil, errors.New("mysql_query: OpenCommands called before Start")
+	}
+	var (
+		tid uint32
+		p   MysqlQueryMysqlPendingT
+		out []OpenCommand
+	)
+	it := l.objs.MysqlPending.Iterate()
+	for it.Next(&tid, &p) {
+		out = append(out, openCommand(tid, &p, l.execText))
+	}
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("mysql_query: iterating mysql_pending: %w", err)
+	}
+	return out, nil
+}
+
+// execText returns the ps_text entry of the Prepared_statement thread tid
+// executes (ps_exec), the same lookup the dispatch_command uretprobe does.
+func (l *Loader) execText(tid uint32) (MysqlQueryPsTextT, bool) {
+	var (
+		ptr uint64
+		t   MysqlQueryPsTextT
+	)
+	if l.objs.PsExec.Lookup(&tid, &ptr) != nil || l.objs.PsText.Lookup(&ptr, &t) != nil {
+		return t, false
+	}
+	return t, true
+}
+
+// openCommand decodes one mysql_pending entry. The key mirrors the
+// uretprobe: COM_STMT_EXECUTE uses the hash of its recovered text (0 without
+// one), every other command the hash taken at entry.
+func openCommand(tid uint32, p *MysqlQueryMysqlPendingT, execText func(uint32) (MysqlQueryPsTextT, bool)) OpenCommand {
+	c := OpenCommand{TID: tid, Command: p.Command, OpenTS: p.StartTs, Comm: nullTermU8(p.Comm[:]),
+		CPU: p.CpuStart, Runq: p.RqStart, ReadBytes: p.RdStart, WriteBytes: p.WrStart, Blkio: p.BlkioStart}
+	switch {
+	case p.Command == cmdmap.ComStmtExecute:
+		if t, ok := execText(tid); ok && t.Hash != 0 {
+			c.Hash, c.QueryLen, c.Query = t.Hash, t.Len, nullTermU8(t.Text[:])
+		}
+	case p.Hash != 0:
+		c.Hash, c.QueryLen, c.Query = p.Hash, p.QueryLen, nullTermU8(p.Query[:])
+	}
+	return c
 }
 
 // ForgetText makes the kernel resend the text of (command, hash).

@@ -279,7 +279,7 @@ tests:
           - exp_labels: { severity: info, instance: "db1:9200" }
             exp_annotations:
               summary: "obs-agent MySQL accounting is degraded on db1:9200"
-              description: "1. events_dropped > 0: digest totals undercount — check agent CPU throttling. 2. agg_overflow > 0: more distinct statements per poll than the kernel map holds; totals stay exact but cost more. 3. hash_mismatch > 0: a kernel/Go text-hash disagreement; affected statements fall back to exact processing — report it with the agent log."
+              description: "1. events_dropped > 0: digest totals undercount — check agent CPU throttling. 2. agg_overflow > 0: more distinct statements per poll than the kernel map holds; totals stay exact but cost more. 3. hash_mismatch > 0: a kernel/Go text-hash disagreement; affected statements fall back to exact processing — report it with the agent log. 4. credit_dropped > 0: a long statement's in-flight credit never met its final sums (its CPU and disk bytes are over-counted by that credit) — rare; report it with the agent log."
               diagnose: "http://db1:9200/api/diagnose"
 
   # All three counters flat (non-zero, but not increasing): healthy.
@@ -291,10 +291,27 @@ tests:
         values: '5x20'
       - series: 'obs_agent_mysql_hash_mismatch_total{instance="db1:9200"}'
         values: '3x20'
+      - series: 'obs_agent_mysql_credit_dropped_total{instance="db1:9200"}'
+        values: '2x20'
     alert_rule_test:
       - eval_time: 15m
         alertname: ObsAgentMySQLAccountingDegraded
         exp_alerts: []
+
+  # Unmatched in-flight credit alone fires it.
+  - interval: 1m
+    input_series:
+      - series: 'obs_agent_mysql_credit_dropped_total{instance="db1:9200"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ObsAgentMySQLAccountingDegraded
+        exp_alerts:
+          - exp_labels: { severity: info, instance: "db1:9200" }
+            exp_annotations:
+              summary: "obs-agent MySQL accounting is degraded on db1:9200"
+              description: "1. events_dropped > 0: digest totals undercount — check agent CPU throttling. 2. agg_overflow > 0: more distinct statements per poll than the kernel map holds; totals stay exact but cost more. 3. hash_mismatch > 0: a kernel/Go text-hash disagreement; affected statements fall back to exact processing — report it with the agent log. 4. credit_dropped > 0: a long statement's in-flight credit never met its final sums (its CPU and disk bytes are over-counted by that credit) — rare; report it with the agent log."
+              diagnose: "http://db1:9200/api/diagnose"
 
   - interval: 1m
     input_series:
