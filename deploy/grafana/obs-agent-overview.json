@@ -371,8 +371,8 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * topk(10, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"}))",
-          "legendFormat": "{{instance}} {{digest_id}}"
+          "expr": "100 * sum by (digest_id) (rate(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on () group_left () sum((avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"})) and on (digest_id) topk(10, sum by (digest_id) (increase(obs_agent_mysql_digest_cpu_seconds_total{instance=~\"$instance\",digest_id!=\"other\"}[$__range] @ end())))",
+          "legendFormat": "{{digest_id}}"
         }
       ],
       "fieldConfig": {
@@ -399,7 +399,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: per digest: on-CPU seconds per second ÷ node CPU cores in use (avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m (the alert's window); top 10.\nReading: a line above the dashed 20% line is a statement doing a fifth of all CPU work on the server; the alert also needs node CPU ≥ 85%. Digest text: obs_agent_mysql_digest_info or the Top digests table.\nAlert: MySQLDigestCPUHog (warning) fires above 20 (> 0.2)."
+      "description": "Formula: for the 10 digests with the most CPU over the dashboard range: digest on-CPU seconds per second summed over the selected hosts ÷ their node CPU cores in use (Σ avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m (the alert's window) — the Analysis dashboard's '% of node CPU used — top 10 digests'.\nReading: a line above the dashed 20% line is a statement doing a fifth of all CPU work on the selected hosts; the alert is per instance and also needs node CPU ≥ 85%: select one Hostname to read a line against it. Digest text: the Top digests table.\nAlert: MySQLDigestCPUHog (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 9,
@@ -422,8 +422,8 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * topk(10, sum by (instance, digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0))",
-          "legendFormat": "{{instance}} {{digest_id}}"
+          "expr": "100 * sum by (digest_id) (rate(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[5m])) / on () group_left () sum(rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0) and on (digest_id) topk(10, sum by (digest_id) (increase(obs_agent_mysql_digest_disk_read_bytes_total{instance=~\"$instance\",digest_id!=\"other\"}[$__range] @ end())))",
+          "legendFormat": "{{digest_id}}"
         }
       ],
       "fieldConfig": {
@@ -450,7 +450,7 @@
         },
         "overrides": []
       },
-      "description": "Formula: per digest: disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m (the alert's window); top 10.\nReading: a line above the dashed 20% line is a statement causing a fifth of the disk's reads; the alert also needs node disk reads > 5 MiB/s.\nAlert: MySQLDigestDiskReadHog (warning) fires above 20 (> 0.2)."
+      "description": "Formula: for the 10 digests with the most disk reads over the dashboard range: digest disk-read bytes per second summed over the selected hosts ÷ their physical-disk read bytes per second × 100, over 5m (the alert's window) — the Analysis dashboard's '% of node disk reads — top 10 digests'.\nReading: a line above the dashed 20% line is a statement causing a fifth of the disk's reads; the alert is per instance and also needs node disk reads > 5 MiB/s: select one Hostname to read a line against it. A statement that ran longer than 5m lands when it completes (agents without in-flight credit), unlike Analysis, which spreads it over its run.\nAlert: MySQLDigestDiskReadHog (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 10,

@@ -434,16 +434,29 @@ func overview() Dashboard {
 		"2. Check **Query CPU vs mysqld CPU**: if mysqld's CPU is far above query CPU, the load is outside statements.\n"+
 		"3. **Top digests** shows cores, shares and pages per call: 1–4 pages = buffer-pool misses, hundreds = a scan.\n"+
 		"4. Confirm in /api/diagnose → mysql_report.overload_cause, which also says whether the node is saturated at all."), 24, 4)
+	// The share time series match the Analysis dashboard's "top 10 digests"
+	// panels: the 10 digests with the most of the signal over the whole
+	// dashboard range (not a topk per step, which plots a different ten at
+	// every point), each digest summed over the selected hosts and divided by
+	// the selected hosts' summed node total.
+	pooled := func(m, nodeTotal string) string {
+		return `100 * sum by (digest_id) (rate(` + m + `{` + inst + `,digest_id!="other"}[` + alertWin + `])) / on () group_left () ` + nodeTotal +
+			` and on (digest_id) topk(10, sum by (digest_id) (increase(` + m + `{` + inst + `,digest_id!="other"}[$__range] @ end())))`
+	}
 	b.add(withAlert(described(prom("% of node CPU used by top digests", "percent",
-		[2]string{`100 * topk(10, ` + perDigest(digCPU, alertWin) + ` / on (instance) group_left () ` + nodeCores(alertWin) + `)`, "{{instance}} {{digest_id}}"}),
-		"per digest: on-CPU seconds per second ÷ node CPU cores in use (avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m (the alert's window); top 10.",
-		"a line above the dashed 20% line is a statement doing a fifth of all CPU work on the server; the alert also needs node CPU ≥ 85%. "+
-			"Digest text: obs_agent_mysql_digest_info or the Top digests table."),
+		[2]string{pooled(digCPU, `sum(`+nodeCores(alertWin)+`)`), "{{digest_id}}"}),
+		"for the 10 digests with the most CPU over the dashboard range: digest on-CPU seconds per second summed over the selected hosts ÷ their node CPU cores in use "+
+			"(Σ avg cpu_usage_percent / 100 × cpu_count) × 100, over 5m (the alert's window) — the Analysis dashboard's '% of node CPU used — top 10 digests'.",
+		"a line above the dashed 20% line is a statement doing a fifth of all CPU work on the selected hosts; the alert is per instance and also needs node CPU ≥ 85%: "+
+			"select one Hostname to read a line against it. Digest text: the Top digests table."),
 		rule("MySQLDigestCPUHog")), 12)
 	b.add(withAlert(described(prom("% of node disk reads by top digests", "percent",
-		[2]string{`100 * topk(10, ` + perDigest(digRead, alertWin) + ` / on (instance) group_left () ` + nodeRead(alertWin) + `)`, "{{instance}} {{digest_id}}"}),
-		"per digest: disk-read bytes per second ÷ the node's physical-disk read bytes per second × 100, over 5m (the alert's window); top 10.",
-		"a line above the dashed 20% line is a statement causing a fifth of the disk's reads; the alert also needs node disk reads > 5 MiB/s."),
+		[2]string{pooled(digRead, `sum`+nodeRead(alertWin)), "{{digest_id}}"}),
+		"for the 10 digests with the most disk reads over the dashboard range: digest disk-read bytes per second summed over the selected hosts ÷ their physical-disk "+
+			"read bytes per second × 100, over 5m (the alert's window) — the Analysis dashboard's '% of node disk reads — top 10 digests'.",
+		"a line above the dashed 20% line is a statement causing a fifth of the disk's reads; the alert is per instance and also needs node disk reads > 5 MiB/s: "+
+			"select one Hostname to read a line against it. A statement that ran longer than 5m lands when it completes "+
+			"(agents without in-flight credit), unlike Analysis, which spreads it over its run."),
 		rule("MySQLDigestDiskReadHog")), 12)
 	b.add(described(prom("MySQL query CPU vs mysqld CPU (cores)", "short",
 		[2]string{`sum by (instance) (rate(obs_agent_mysql_query_cpu_seconds_total{` + inst + `}[$__rate_interval]))`, "{{instance}} query CPU (attributed to digests)"},

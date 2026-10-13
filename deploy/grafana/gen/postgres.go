@@ -100,9 +100,6 @@ func pgOverview() Dashboard {
 			` / sum by (instance, cluster) (rate(` + den + `{` + pgInst + `,command="client"}[` + alertWin + `]))`
 	}
 	nodeCores := `(avg_over_time(obs_agent_cpu_usage_percent{instance=~"$instance"}[` + alertWin + `]) / 100 * obs_agent_cpu_count{instance=~"$instance"})`
-	perDigest := func(m string) string {
-		return `sum by (instance, cluster, digest_id) (rate(` + m + `{` + pgInst + `,digest_id!="other"}[` + alertWin + `]))`
-	}
 	const wall = "obs_agent_postgres_query_wall_seconds_total"
 
 	b := &builder{}
@@ -181,19 +178,28 @@ func pgOverview() Dashboard {
 
 	b.row("4. Which query?")
 	b.addH(textPanel("Question 4", "A line above the dashed line is one query shape doing a fifth of all the server's CPU work or disk reads: that is the culprit to fix."), 24, 2)
-	withText := ` * on (instance, cluster, digest_id) group_left (digest_text) obs_agent_postgres_digest_info{` + pgInst + `}`
+	// As the MySQL Overview: the 10 digests with the most of the signal over
+	// the whole dashboard range (not a topk per step, which plots a different
+	// ten at every point), each summed over the selected hosts and clusters and
+	// divided by the selected hosts' summed node total.
+	pooled := func(m, nodeTotal string) string {
+		return `100 * sum by (digest_id) (rate(` + m + `{` + pgInst + `,digest_id!="other"}[` + alertWin + `])) / on () group_left () ` + nodeTotal +
+			` * on (digest_id) group_left (digest_text) max by (digest_id, digest_text) (obs_agent_postgres_digest_info{` + pgInst + `})` +
+			` and on (digest_id) topk(10, sum by (digest_id) (increase(` + m + `{` + pgInst + `,digest_id!="other"}[$__range] @ end())))`
+	}
 	b.add(withAlert(explained(prom("% of node CPU used by top digests", "percent",
-		[2]string{`100 * topk(10, ` + perDigest("obs_agent_postgres_digest_cpu_seconds_total") + ` / on (instance) group_left () ` + nodeCores + `)` + withText, "{{instance}} {{digest_text}}"}),
-		"for the ten heaviest query shapes, their share of all CPU work on the server.",
-		"no line above the dashed 20% line is normal; one above it is a CPU culprit (the alert also needs the node ≥ 85% busy).",
+		[2]string{pooled("obs_agent_postgres_digest_cpu_seconds_total", `sum`+nodeCores), "{{digest_text}}"}),
+		"for the ten query shapes with the most CPU over the dashboard range, their share of all CPU work on the selected servers.",
+		"no line above the dashed 20% line is normal; one above it is a CPU culprit (the alert is per server and also needs the node ≥ 85% busy: pick one Hostname to compare).",
 		"run EXPLAIN (ANALYZE, BUFFERS) on it, add an index or cache, or slow its caller down.",
-		"rate(digest_cpu_seconds_total) ÷ node CPU cores in use × 100, over 5m."), pgRule("PostgresDigestCPUHog")), 12)
+		"Σ hosts rate(digest_cpu_seconds_total) ÷ Σ hosts node CPU cores in use × 100, over 5m; top 10 by CPU over the range."), pgRule("PostgresDigestCPUHog")), 12)
 	b.add(withAlert(explained(prom("% of node disk reads by top digests", "percent",
-		[2]string{`100 * topk(10, ` + perDigest("obs_agent_postgres_digest_disk_read_bytes_total") + ` / on (instance) group_left () (rate(obs_agent_node_disk_read_bytes_total{instance=~"$instance"}[` + alertWin + `]) > 0))` + withText, "{{instance}} {{digest_text}}"}),
-		"for the ten heaviest query shapes, their share of the disk's reads.",
-		"no line above 20% is normal; one above it reads a fifth of the disk (alert needs > 5 MiB/s). Empty on PostgreSQL 18+ async I/O.",
+		[2]string{pooled("obs_agent_postgres_digest_disk_read_bytes_total",
+			`sum(rate(obs_agent_node_disk_read_bytes_total{instance=~"$instance"}[`+alertWin+`]) > 0)`), "{{digest_text}}"}),
+		"for the ten query shapes with the most disk reads over the dashboard range, their share of the selected servers' disk reads.",
+		"no line above 20% is normal; one above it reads a fifth of the disk (the alert is per server and needs > 5 MiB/s). Empty on PostgreSQL 18+ async I/O.",
 		"1–4 pages per call: add RAM / shared_buffers; hundreds: a scan — add an index or a LIMIT.",
-		"rate(digest_disk_read_bytes_total) ÷ rate(node_disk_read_bytes_total) × 100, over 5m."), pgRule("PostgresDigestDiskReadHog")), 12)
+		"Σ hosts rate(digest_disk_read_bytes_total) ÷ Σ hosts rate(node_disk_read_bytes_total) × 100, over 5m; top 10 by reads over the range."), pgRule("PostgresDigestDiskReadHog")), 12)
 	dig := func(m string) string {
 		return `sum by (instance, cluster, digest_id) (rate(` + m + `{` + pgInst + `,digest_id!="other"}[5m]))`
 	}

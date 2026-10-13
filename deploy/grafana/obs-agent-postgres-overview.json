@@ -809,8 +809,8 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * topk(10, sum by (instance, cluster, digest_id) (rate(obs_agent_postgres_digest_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"})) * on (instance, cluster, digest_id) group_left (digest_text) obs_agent_postgres_digest_info{instance=~\"$instance\",cluster=~\"$cluster\"}",
-          "legendFormat": "{{instance}} {{digest_text}}"
+          "expr": "100 * sum by (digest_id) (rate(obs_agent_postgres_digest_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m])) / on () group_left () sum(avg_over_time(obs_agent_cpu_usage_percent{instance=~\"$instance\"}[5m]) / 100 * obs_agent_cpu_count{instance=~\"$instance\"}) * on (digest_id) group_left (digest_text) max by (digest_id, digest_text) (obs_agent_postgres_digest_info{instance=~\"$instance\",cluster=~\"$cluster\"}) and on (digest_id) topk(10, sum by (digest_id) (increase(obs_agent_postgres_digest_cpu_seconds_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[$__range] @ end())))",
+          "legendFormat": "{{digest_text}}"
         }
       ],
       "fieldConfig": {
@@ -837,7 +837,7 @@
         },
         "overrides": []
       },
-      "description": "What: for the ten heaviest query shapes, their share of all CPU work on the server.\nGood / bad: no line above the dashed 20% line is normal; one above it is a CPU culprit (the alert also needs the node ≥ 85% busy).\nIf bad: run EXPLAIN (ANALYZE, BUFFERS) on it, add an index or cache, or slow its caller down.\nFormula: rate(digest_cpu_seconds_total) ÷ node CPU cores in use × 100, over 5m.\nAlert: PostgresDigestCPUHog (warning) fires above 20 (> 0.2)."
+      "description": "What: for the ten query shapes with the most CPU over the dashboard range, their share of all CPU work on the selected servers.\nGood / bad: no line above the dashed 20% line is normal; one above it is a CPU culprit (the alert is per server and also needs the node ≥ 85% busy: pick one Hostname to compare).\nIf bad: run EXPLAIN (ANALYZE, BUFFERS) on it, add an index or cache, or slow its caller down.\nFormula: Σ hosts rate(digest_cpu_seconds_total) ÷ Σ hosts node CPU cores in use × 100, over 5m; top 10 by CPU over the range.\nAlert: PostgresDigestCPUHog (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 21,
@@ -860,8 +860,8 @@
             "type": "prometheus",
             "uid": "${ds_prometheus}"
           },
-          "expr": "100 * topk(10, sum by (instance, cluster, digest_id) (rate(obs_agent_postgres_digest_disk_read_bytes_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m])) / on (instance) group_left () (rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0)) * on (instance, cluster, digest_id) group_left (digest_text) obs_agent_postgres_digest_info{instance=~\"$instance\",cluster=~\"$cluster\"}",
-          "legendFormat": "{{instance}} {{digest_text}}"
+          "expr": "100 * sum by (digest_id) (rate(obs_agent_postgres_digest_disk_read_bytes_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[5m])) / on () group_left () sum(rate(obs_agent_node_disk_read_bytes_total{instance=~\"$instance\"}[5m]) > 0) * on (digest_id) group_left (digest_text) max by (digest_id, digest_text) (obs_agent_postgres_digest_info{instance=~\"$instance\",cluster=~\"$cluster\"}) and on (digest_id) topk(10, sum by (digest_id) (increase(obs_agent_postgres_digest_disk_read_bytes_total{instance=~\"$instance\",cluster=~\"$cluster\",digest_id!=\"other\"}[$__range] @ end())))",
+          "legendFormat": "{{digest_text}}"
         }
       ],
       "fieldConfig": {
@@ -888,7 +888,7 @@
         },
         "overrides": []
       },
-      "description": "What: for the ten heaviest query shapes, their share of the disk's reads.\nGood / bad: no line above 20% is normal; one above it reads a fifth of the disk (alert needs > 5 MiB/s). Empty on PostgreSQL 18+ async I/O.\nIf bad: 1–4 pages per call: add RAM / shared_buffers; hundreds: a scan — add an index or a LIMIT.\nFormula: rate(digest_disk_read_bytes_total) ÷ rate(node_disk_read_bytes_total) × 100, over 5m.\nAlert: PostgresDigestDiskReadHog (warning) fires above 20 (> 0.2)."
+      "description": "What: for the ten query shapes with the most disk reads over the dashboard range, their share of the selected servers' disk reads.\nGood / bad: no line above 20% is normal; one above it reads a fifth of the disk (the alert is per server and needs > 5 MiB/s). Empty on PostgreSQL 18+ async I/O.\nIf bad: 1–4 pages per call: add RAM / shared_buffers; hundreds: a scan — add an index or a LIMIT.\nFormula: Σ hosts rate(digest_disk_read_bytes_total) ÷ Σ hosts rate(node_disk_read_bytes_total) × 100, over 5m; top 10 by reads over the range.\nAlert: PostgresDigestDiskReadHog (warning) fires above 20 (> 0.2)."
     },
     {
       "id": 22,
